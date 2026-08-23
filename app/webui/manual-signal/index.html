@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>手动信号推送</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/manual-signal/style.css?v=20260519-login2" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>手动信号推送</h1>
+        <p>本页直接登录会员端，选择比赛盘口，生成完整信号字段并推送到远端服务器</p>
+      </div>
+      <div class="status-strip">
+        <span id="stMember" class="chip">会员未登录</span>
+        <span id="stMode" class="chip">滚球</span>
+        <span id="stPush" class="chip">待推送</span>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="panel controls login-panel">
+        <div class="panel-head">
+          <h2>会员端登录</h2>
+          <div class="actions">
+            <button id="btnCheckMember" class="btn ghost" type="button">检查心跳/会话</button>
+            <button id="btnLoginMember" class="btn primary" type="button">登录会员</button>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <label>
+            <span>会员端网址</span>
+            <input id="inBaseUrl" placeholder="https://会员端网址" />
+          </label>
+          <label>
+            <span>会员账号</span>
+            <input id="inUsername" autocomplete="username" placeholder="会员账号" />
+          </label>
+          <label>
+            <span>会员密码</span>
+            <input id="inPassword" type="password" autocomplete="current-password" placeholder="会员密码" />
+          </label>
+          <label>
+            <span>后台来源名称</span>
+            <input id="inBackendName" value="manual" placeholder="例如 manual / qax228" />
+          </label>
+          <label>
+            <span>盘口模式</span>
+            <select id="selMode">
+              <option value="live">滚球</option>
+              <option value="today">今日</option>
+              <option value="early">早盘</option>
+            </select>
+          </label>
+          <label>
+            <span>搜索比赛</span>
+            <input id="inSearch" placeholder="联赛 / 球队 / gid" />
+          </label>
+          <label>
+            <span>金额</span>
+            <input id="inAmount" type="number" min="1" step="1" value="1000" />
+          </label>
+          <label>
+            <span>自定义单号</span>
+            <input id="inOrderId" placeholder="留空自动生成" />
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="btnLoadGames" class="btn primary" type="button">读取比赛</button>
+          <button id="btnLoadOdds" class="btn" type="button">读取盘口 JSON</button>
+          <button id="btnPreview" class="btn" type="button">预览字段</button>
+          <button id="btnPush" class="btn danger" type="button">推送到远端</button>
+        </div>
+
+        <div class="member-card">
+          <div><span>会话状态</span><strong id="memberStatus">-</strong></div>
+          <div><span>平台</span><strong id="memberBase">-</strong></div>
+          <div><span>uid</span><strong id="memberUid">-</strong></div>
+          <div><span>提示</span><strong id="memberError">-</strong></div>
+        </div>
+      </section>
+
+      <section class="panel list-panel">
+        <div class="panel-head">
+          <h2>比赛列表</h2>
+          <span id="gameCount" class="chip">0</span>
+        </div>
+        <div class="table-wrap">
+          <table id="tblGames">
+            <thead>
+              <tr>
+                <th>gid</th>
+                <th>联赛</th>
+                <th>对阵</th>
+                <th>比分</th>
+                <th>时间</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel market-panel">
+        <div class="panel-head">
+          <h2>盘口选择</h2>
+          <span id="selectedGame" class="chip">未选择比赛</span>
+        </div>
+        <div id="metaBox" class="meta-grid"></div>
+        <div class="market-grid">
+          <div>
+            <h3>让球</h3>
+            <div id="handicapBox" class="market-list"></div>
+          </div>
+          <div>
+            <h3>大小</h3>
+            <div id="overUnderBox" class="market-list"></div>
+          </div>
+          <div>
+            <h3>上半场让球</h3>
+            <div id="halfHandicapBox" class="market-list"></div>
+          </div>
+          <div>
+            <h3>上半场大小</h3>
+            <div id="halfOverUnderBox" class="market-list"></div>
+          </div>
+          <div>
+            <h3>独赢</h3>
+            <div id="moneyLineBox" class="market-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel payload-panel">
+        <div class="panel-head">
+          <h2>当前推送字段</h2>
+          <span id="selectedPick" class="chip">未选择盘口</span>
+        </div>
+        <pre id="payloadBox">{}</pre>
+      </section>
+    </main>
+
+    <script src="/manual-signal/app.js?v=20260519-login2"></script>
+  </body>
+</html>

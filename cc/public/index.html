@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HGA WUI（实时盘口/水位）</title>
+    <meta name="color-scheme" content="dark light" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="appHeader">
+      <div class="brand">
+        <div class="brandMark">HGA</div>
+        <div class="brandText">
+          <div class="brandTitle">WUI 实时盘口/水位</div>
+          <div id="stTarget" class="brandSub mono">-</div>
+        </div>
+      </div>
+      <div class="headerRight">
+        <div class="chips">
+          <span id="chipStarted" class="chip">浏览器：-</span>
+          <span id="chipLoggedIn" class="chip">登录：-</span>
+          <span id="chipUid" class="chip mono">uid：-</span>
+        </div>
+        <button id="btnHelp" class="btnGhost" type="button">帮助</button>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="导航">
+      <button id="tabGames" class="tab isActive" data-view="viewGames" type="button">比赛</button>
+      <button id="tabMonitor" class="tab" data-view="viewMonitor" type="button">监控</button>
+      <button id="tabStatus" class="tab" data-view="viewStatus" type="button">状态</button>
+    </nav>
+
+    <main class="wrap">
+      <section id="viewGames" class="view">
+        <section class="card">
+          <div class="cardHead">
+            <h2>比赛列表</h2>
+            <p class="cardDesc">足球：滚球 / 今日 / 早盘</p>
+          </div>
+
+          <div class="toolbar">
+            <div class="segmented" aria-label="模式选择">
+              <button id="btnLoadLive" class="seg primary" type="button">滚球</button>
+              <button id="btnLoadToday" class="seg" type="button">今日</button>
+              <button id="btnLoadEarly" class="seg" type="button">早盘</button>
+            </div>
+            <button id="btnLoadGames" class="btnPrimary" type="button">刷新比赛列表</button>
+            <input id="inSearch" class="input" placeholder="搜索 联赛/球队/GID" />
+          </div>
+
+          <div id="gamesList" class="gamesList"></div>
+
+          <p class="hint">找不到比赛时：确认你在弹出的 Chromium 里已登录，并且页面停留在对应页面（足球-滚球/今日/早盘）。</p>
+        </section>
+      </section>
+
+      <section id="viewMonitor" class="view isHidden">
+        <section class="card">
+          <div class="cardHead">
+            <h2>实时监控盘口/水位</h2>
+            <p class="cardDesc">只展示：让球 / 大小 / 独赢。模式：<span id="stMode" class="mono">滚球</span></p>
+          </div>
+
+          <div class="toolbar">
+            <label class="field">
+              <span>gid</span>
+              <input id="inGid" class="input" placeholder="例如 8513893" />
+            </label>
+
+            <label class="field">
+              <span>刷新(ms)</span>
+              <input id="inRefresh" class="input" type="number" value="3000" min="1000" max="30000" />
+            </label>
+
+            <label class="check">
+              <input id="ckConfirm" type="checkbox" checked />
+              <span>校验水位（更准更慢）</span>
+            </label>
+
+            <label class="check">
+              <input id="ckRaw" type="checkbox" />
+              <span>显示原始字段</span>
+            </label>
+
+            <div class="actions">
+              <button id="btnStartStream" class="btnPrimary" type="button">开始监控</button>
+              <button id="btnStopStream" type="button">停止</button>
+              <button id="btnCopyGid" type="button">复制 gid</button>
+            </div>
+          </div>
+
+          <div class="streamBar">
+            <span id="stStream" class="mono">未连接</span>
+            <span id="stLastUpdate" class="mono"></span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>当前快照</h2>
+          <div id="boxMeta" class="kv"></div>
+        </section>
+
+        <section class="markets">
+          <div class="simpleGrid">
+            <div class="simpleCard">
+              <div class="simpleTitle">让球</div>
+              <div id="boxHandicap" class="lines"></div>
+            </div>
+            <div class="simpleCard">
+              <div class="simpleTitle">大小</div>
+              <div id="boxOverUnder" class="lines"></div>
+            </div>
+            <div class="simpleCard">
+              <div class="simpleTitle">独赢</div>
+              <div id="boxMoneyLine" class="moneyLine"></div>
+            </div>
+          </div>
+        </section>
+
+        <details id="boxRawWrap" class="card raw">
+          <summary>原始字段（调试用）</summary>
+          <pre id="boxRaw" class="mono"></pre>
+        </details>
+      </section>
+
+      <section id="viewStatus" class="view isHidden">
+        <section class="grid">
+          <section class="card">
+            <h2>浏览器/登录状态</h2>
+            <div class="row">
+              <button id="btnStart" class="btnPrimary" type="button">启动浏览器</button>
+              <button id="btnStop" class="danger" type="button">停止浏览器</button>
+            </div>
+            <div class="kv">
+              <div><span>目标网址</span><span id="stTarget2" class="mono">-</span></div>
+              <div><span>浏览器已启动</span><span id="stStarted">-</span></div>
+              <div><span>已登录</span><span id="stLoggedIn">-</span></div>
+              <div><span>uid(脱敏)</span><span id="stUid" class="mono">-</span></div>
+              <div><span>ver</span><span id="stVer" class="mono">-</span></div>
+              <div><span>错误</span><span id="stErr" class="mono">-</span></div>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2>操作步骤（小白版）</h2>
+            <ol class="steps">
+              <li>去“状态”页点 <b>启动浏览器</b>（会弹出一个 Chromium 窗口）。</li>
+              <li>在弹出的 Chromium 里，手动登录 <span class="mono">hga027.com</span>。</li>
+              <li>回到本页面，等状态变成 <b>已登录</b>。</li>
+              <li>去“比赛”页先选 <b>滚球 / 今日 / 早盘</b>，点 <b>刷新比赛列表</b>。</li>
+              <li>找到要看的比赛，点 <b>监控</b> 即可。</li>
+            </ol>
+            <p class="hint">
+              提醒：这个工具只做“展示盘口/水位”，不包含下注功能（也不会调用 <span class="mono">p=FT_bet</span>）。
+            </p>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <div id="toasts" class="toasts" aria-live="polite" aria-relevant="additions"></div>
+
+    <dialog id="dlgHelp" class="helpDialog">
+      <form method="dialog" class="helpCard">
+        <h2>快速提示</h2>
+        <ul>
+          <li>先去“状态”页启动浏览器并登录。</li>
+          <li>去“比赛”页刷新列表，点“监控”直接开始。</li>
+          <li>“校验水位”会额外请求 <span class="mono">FT_order_view</span>，更准也更慢。</li>
+        </ul>
+        <div class="row">
+          <button class="btnPrimary" value="close">知道了</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

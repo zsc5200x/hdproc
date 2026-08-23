@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbfbfd"/>
+      <stop offset="55%" stop-color="#eef1f6"/>
+      <stop offset="100%" stop-color="#d8dde6"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.78"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.14"/>
+    </linearGradient>
+    <filter id="tileShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="#6b7484" flood-opacity="0.16"/>
+    </filter>
+    <filter id="markShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#0b0c0e" flood-opacity="0.15"/>
+    </filter>
+    <path id="quad" d="M186 246C186 196 226 156 276 156H404C468 156 520 208 520 272V320C520 376 474 422 418 422H288C232 422 186 376 186 320V246Z"/>
+    <rect id="slit" x="344" y="246" width="36" height="212" rx="18"/>
+  </defs>
+
+  <g filter="url(#tileShadow)">
+    <rect x="76" y="76" width="872" height="872" rx="214" fill="url(#bg)"/>
+    <rect x="76" y="76" width="872" height="872" rx="214" fill="none" stroke="#ffffff" stroke-opacity="0.72" stroke-width="10"/>
+    <rect x="108" y="108" width="808" height="808" rx="188" fill="url(#glass)"/>
+  </g>
+
+  <g transform="translate(0 8)" filter="url(#markShadow)">
+    <g fill="#09090b">
+      <use href="#quad"/>
+      <use href="#quad" transform="translate(1024 0) scale(-1 1)"/>
+      <use href="#quad" transform="translate(0 1024) scale(1 -1)"/>
+      <use href="#quad" transform="translate(1024 1024) scale(-1 -1)"/>
+    </g>
+
+    <g fill="#ffffff" opacity="0.98">
+      <rect x="492" y="188" width="40" height="648" rx="20"/>
+      <rect x="188" y="492" width="648" height="40" rx="20"/>
+      <use href="#slit"/>
+      <use href="#slit" transform="translate(300 0)"/>
+      <use href="#slit" transform="translate(0 320)"/>
+      <use href="#slit" transform="translate(300 320)"/>
+    </g>
+  </g>
+</svg>

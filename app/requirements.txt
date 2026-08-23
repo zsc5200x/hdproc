@@ -1,0 +1,4 @@
+requests[socks]>=2.31.0
+urllib3<2
+playwright>=1.49.0
+Telethon>=1.36,<2

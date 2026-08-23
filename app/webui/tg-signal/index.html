@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TG 信号接入</title>
+  <link rel="stylesheet" href="/tg-signal/style.css?v=20260727-1">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <a class="back" href="/">HD 推送系统</a>
+      <h1>TG 信号接入</h1>
+    </div>
+    <div class="runtime">
+      <span id="workerDot" class="dot"></span>
+      <span id="workerText">监听未启动</span>
+      <button id="refreshBtn" class="icon-button" type="button" title="刷新状态" aria-label="刷新状态">↻</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="stage-rail" aria-label="接入进度">
+      <div class="stage" id="accountStage"><span>1</span><div><b>账号连接</b><small id="accountStageText">检查中</small></div></div>
+      <div class="rail-line"></div>
+      <div class="stage" id="sourceStage"><span>2</span><div><b>来源群</b><small id="sourceStageText">未选择</small></div></div>
+      <div class="rail-line"></div>
+      <div class="stage" id="ingestStage"><span>3</span><div><b>信号入单</b><small id="ingestStageText">已停止</small></div></div>
+    </section>
+
+    <section class="workspace">
+      <div class="control-column">
+        <section class="panel">
+          <div class="panel-head">
+            <div><span class="eyebrow">ACCOUNT</span><h2>Telegram 账号</h2></div>
+            <span id="credentialBadge" class="badge">凭据检查中</span>
+          </div>
+          <div id="connectedAccount" class="connected-row" hidden>
+            <div><b id="phoneMasked">已连接</b><small>个人账号会话保存在本机</small></div>
+            <button id="logoutBtn" class="button quiet danger-text" type="button">退出登录</button>
+          </div>
+          <div id="loginForm" class="login-grid">
+            <label><span>手机号</span><input id="phoneInput" type="tel" autocomplete="tel" placeholder="+86 13800000000"></label>
+            <button id="sendCodeBtn" class="button secondary" type="button">发送验证码</button>
+            <label><span>验证码</span><input id="codeInput" inputmode="numeric" autocomplete="one-time-code" placeholder="Telegram 验证码"></label>
+            <label><span>二步验证密码</span><input id="passwordInput" type="password" autocomplete="current-password" placeholder="没有可留空"></label>
+            <button id="verifyCodeBtn" class="button primary span-two" type="button">验证并连接</button>
+          </div>
+          <p id="loginHint" class="hint">API 凭据已由软件预置，只需完成一次账号验证。</p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div><span class="eyebrow">SOURCE</span><h2>监听来源</h2></div>
+            <button id="reloadChatsBtn" class="button quiet" type="button">刷新群组</button>
+          </div>
+          <input id="groupSearch" class="search" type="search" placeholder="搜索群组或频道">
+          <div id="groupList" class="group-list"><div class="empty">账号连接后读取群组</div></div>
+          <div class="selection-footer"><span id="selectedCount">已选择 0 个</span><button id="saveGroupsBtn" class="button secondary" type="button">保存来源</button></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><div><span class="eyebrow">DELIVERY</span><h2>入单控制</h2></div></div>
+          <div class="mode-switch" role="group" aria-label="入单模式">
+            <button id="dryRunMode" type="button" aria-pressed="true"><b>干跑检查</b><small>解析和匹配，不产生订单</small></button>
+            <button id="automaticMode" type="button" aria-pressed="false"><b>自动跟单</b><small>匹配成功后写入订单</small></button>
+          </div>
+          <div class="control-actions">
+            <button id="startBtn" class="button primary" type="button">启动监听</button>
+            <button id="stopBtn" class="button danger" type="button">停止监听</button>
+          </div>
+          <p id="actionHint" class="hint">默认干跑。先确认解析日志正确，再切换自动跟单。</p>
+        </section>
+      </div>
+
+      <section class="panel events-panel">
+        <div class="panel-head">
+          <div><span class="eyebrow">LIVE FEED</span><h2>解析日志</h2></div>
+          <span id="eventCount" class="badge">0 条</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>来源</th><th>状态</th><th>联赛 / 比赛</th><th>盘口</th><th>金额</th><th>说明</th></tr></thead>
+            <tbody id="eventRows"><tr><td colspan="7" class="empty">暂无解析记录</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/tg-signal/app.js?v=20260727-1"></script>
+</body>
+</html>

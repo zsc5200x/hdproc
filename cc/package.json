@@ -1,0 +1,18 @@
+{
+  "name": "hga-capture-tool",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Capture login network traffic for https://hga027.com using Playwright (authorized testing only).",
+  "type": "commonjs",
+  "scripts": {
+    "capture:login": "node scripts/capture-login.js",
+    "capture:odds": "node scripts/capture-odds.js",
+    "verify:parsers": "node scripts/verify-parsers.js",
+    "wui": "node src/server.js",
+    "install:browsers": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "playwright": "^1.51.1"
+  }
+}

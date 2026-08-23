@@ -1,0 +1,341 @@
+.config-popup-box.tg-config {
+  width: min(1180px, calc(100vw - 56px));
+  max-width: 1180px;
+  height: min(86vh, 850px);
+}
+
+.tg-signal-shell {
+  --tg-line: rgba(91, 130, 168, 0.24);
+  --tg-panel: rgba(8, 17, 31, 0.72);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+  color: var(--text);
+}
+
+.tg-signal-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--tg-line);
+  background: rgba(4, 10, 20, 0.74);
+  border-radius: 8px;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.tg-signal-status-item {
+  min-width: 0;
+  height: 68px;
+  padding: 11px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-right: 1px solid var(--tg-line);
+}
+
+.tg-signal-status-item:last-child { border-right: 0; }
+.tg-signal-status-item > span:last-child { min-width: 0; }
+.tg-signal-status-item small,
+.tg-signal-status-item b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tg-signal-status-item small { color: var(--text-2); font-size: 10px; margin-bottom: 4px; }
+.tg-signal-status-item b { color: var(--text); font-size: 12px; font-weight: 650; }
+
+.tg-signal-status-icon {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 7px;
+  color: var(--odds);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.tg-signal-status-item[data-tone="ok"] .tg-signal-status-icon {
+  color: var(--win);
+  border-color: rgba(16, 185, 129, 0.32);
+  background: rgba(16, 185, 129, 0.09);
+}
+
+.tg-signal-status-item[data-tone="off"] .tg-signal-status-icon,
+.tg-signal-status-item[data-tone="error"] .tg-signal-status-icon {
+  color: var(--loss);
+  border-color: rgba(244, 63, 94, 0.3);
+  background: rgba(244, 63, 94, 0.08);
+}
+
+.tg-signal-layout {
+  display: grid;
+  grid-template-columns: minmax(330px, 0.82fr) minmax(500px, 1.35fr);
+  gap: 14px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.tg-signal-setup,
+.tg-signal-runtime {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.tg-signal-section {
+  border: 1px solid var(--tg-line);
+  border-radius: 8px;
+  background: var(--tg-panel);
+  padding: 15px;
+}
+
+.tg-signal-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+  margin-bottom: 13px;
+}
+
+.tg-signal-kicker {
+  display: block;
+  color: var(--primary);
+  font-size: 9px;
+  font-weight: 750;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+
+.tg-signal-section h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.tg-icon-btn {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--tg-line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.tg-icon-btn:hover { color: var(--primary); border-color: var(--border-h); }
+
+.tg-signal-login {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: end;
+}
+
+.tg-signal-phone-field { grid-column: 1 / 2; }
+.tg-signal-login #tg-signal-send-code { min-height: 36px; }
+.tg-signal-login-submit { grid-column: 1 / -1; justify-content: center; }
+
+.tg-signal-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.tg-signal-field > span { color: var(--text-2); font-size: 10px; }
+
+.tg-signal-connected {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgba(16, 185, 129, 0.24);
+  border-radius: 7px;
+  background: rgba(16, 185, 129, 0.06);
+}
+.tg-signal-connected[hidden] { display: none !important; }
+.tg-signal-avatar { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: #229ed9; }
+.tg-signal-connected b,
+.tg-signal-connected small { display: block; }
+.tg-signal-connected b { font-size: 12px; }
+.tg-signal-connected small { margin-top: 3px; color: var(--text-2); font-size: 10px; }
+
+.tg-signal-hint {
+  min-height: 18px;
+  margin-top: 10px;
+  color: var(--text-2);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.tg-signal-hint.ok { color: var(--win); }
+.tg-signal-hint.error { color: var(--loss); }
+
+.tg-signal-source-section { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 265px; }
+.tg-signal-search { position: relative; flex: 0 0 auto; }
+.tg-signal-search i { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--text-3); font-size: 11px; }
+.tg-signal-search input {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px 0 31px;
+  border: 1px solid var(--tg-line);
+  border-radius: 6px;
+  background: rgba(3, 9, 18, 0.74);
+  color: var(--text);
+  outline: none;
+  font-size: 11px;
+}
+.tg-signal-search input:focus { border-color: var(--primary); }
+
+.tg-signal-group-list {
+  flex: 1 1 170px;
+  min-height: 140px;
+  max-height: 235px;
+  overflow: auto;
+  margin-top: 9px;
+  border-block: 1px solid var(--tg-line);
+}
+.tg-signal-group-row {
+  min-height: 48px;
+  padding: 8px 4px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(91, 130, 168, 0.13);
+}
+.tg-signal-group-row:last-child { border-bottom: 0; }
+.tg-signal-group-row:hover { background: rgba(56, 189, 248, 0.04); }
+.tg-signal-group-row input { accent-color: var(--primary); }
+.tg-signal-group-row b,
+.tg-signal-group-row small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tg-signal-group-row b { color: var(--text); font-size: 11px; font-weight: 550; }
+.tg-signal-group-row small { margin-top: 3px; color: var(--text-3); font-size: 9px; }
+.tg-signal-empty { color: var(--text-3); text-align: center; padding: 24px 10px !important; font-size: 11px; }
+
+.tg-signal-source-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 10px;
+  color: var(--text-2);
+  font-size: 10px;
+}
+
+.tg-signal-control-section { flex: 0 0 auto; }
+.tg-signal-live-label { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 10px; }
+.tg-signal-live-label i { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); }
+.tg-signal-live-label.running { color: var(--win); }
+.tg-signal-live-label.running i { background: var(--win); box-shadow: 0 0 8px rgba(16, 185, 129, 0.55); }
+
+.tg-signal-mode { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.tg-signal-mode button {
+  min-height: 62px;
+  padding: 10px;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--tg-line);
+  border-radius: 7px;
+  background: rgba(3, 9, 18, 0.65);
+  color: var(--text-2);
+  text-align: left;
+  cursor: pointer;
+}
+.tg-signal-mode button > i { font-size: 15px; text-align: center; }
+.tg-signal-mode button b,
+.tg-signal-mode button small { display: block; }
+.tg-signal-mode button b { color: var(--text); font-size: 11px; }
+.tg-signal-mode button small { margin-top: 4px; font-size: 9px; line-height: 1.35; }
+.tg-signal-mode button[aria-pressed="true"] { border-color: var(--primary); background: rgba(56, 189, 248, 0.08); color: var(--primary); }
+.tg-signal-mode #tg-signal-automatic[aria-pressed="true"] { border-color: var(--odds); background: rgba(251, 191, 36, 0.08); color: var(--odds); }
+
+.tg-signal-control-actions { display: flex; gap: 9px; margin-top: 11px; }
+.tg-signal-control-actions .btn { flex: 1 1 0; justify-content: center; }
+
+.tg-signal-events-section { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 265px; }
+.tg-signal-count { color: var(--primary); font-size: 10px; font-weight: 650; }
+.tg-signal-table-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; border-top: 1px solid var(--tg-line); }
+.tg-signal-table-wrap table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.tg-signal-table-wrap th { position: sticky; top: 0; z-index: 1; padding: 8px 7px; background: #08111f; color: var(--text-3); font-size: 9px; font-weight: 650; text-align: left; }
+.tg-signal-table-wrap td { padding: 8px 7px; border-top: 1px solid rgba(91, 130, 168, 0.12); color: var(--text-2); font-size: 9px; line-height: 1.4; vertical-align: middle; overflow-wrap: anywhere; }
+.tg-signal-table-wrap th:nth-child(1) { width: 82px; }
+.tg-signal-table-wrap th:nth-child(2) { width: 88px; }
+.tg-signal-table-wrap th:nth-child(3) { width: 68px; }
+.tg-signal-table-wrap th:nth-child(5) { width: 62px; }
+.tg-signal-table-wrap th:nth-child(6) { width: 112px; }
+.tg-signal-event-status { display: inline-block; padding: 2px 6px; border-radius: 4px; background: rgba(56, 189, 248, 0.09); color: var(--primary); white-space: nowrap; }
+.tg-signal-event-status.error,
+.tg-signal-event-status.rejected { color: var(--loss); background: rgba(244, 63, 94, 0.08); }
+.tg-signal-event-status.matched,
+.tg-signal-event-status.accepted { color: var(--win); background: rgba(16, 185, 129, 0.08); }
+
+@media (max-width: 920px) {
+  .config-popup-box.tg-config { width: calc(100vw - 24px); height: calc(100vh - 24px); max-height: none; }
+  .tg-signal-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tg-signal-status-item:nth-child(2) { border-right: 0; }
+  .tg-signal-status-item:nth-child(-n+2) { border-bottom: 1px solid var(--tg-line); }
+  .tg-signal-layout { display: flex; flex-direction: column; overflow-y: auto; padding-right: 2px; }
+  .tg-signal-setup,
+  .tg-signal-runtime { flex: 0 0 auto; min-height: auto; }
+  .tg-signal-source-section,
+  .tg-signal-events-section { min-height: 310px; }
+}
+
+@media (max-width: 560px) {
+  .config-popup-body .view[data-view="tg-signal"] { padding: 12px; }
+  .tg-signal-status-item { height: 60px; padding: 8px; }
+  .tg-signal-status-icon { width: 28px; height: 28px; flex-basis: 28px; }
+  .tg-signal-login,
+  .tg-signal-mode { grid-template-columns: 1fr; }
+  .tg-signal-phone-field,
+  .tg-signal-login-submit { grid-column: auto; }
+  .tg-signal-connected { grid-template-columns: 34px minmax(0, 1fr); }
+  .tg-signal-connected .btn { grid-column: 1 / -1; }
+  .tg-signal-table-wrap { overflow-x: auto; }
+  .tg-signal-table-wrap table { min-width: 620px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tg-signal-live-label.running i { box-shadow: none; }
+}
+
+/* Desktop popup alignment with the main workbench. */
+:root {
+  --tg-line: #2B3139;
+  --tg-panel: #1E2329;
+  --win: #0ECB81;
+  --loss: #F6465D;
+  --odds: #FCD535;
+  --text: #EAECEF;
+  --text-2: #929AA5;
+  --text-3: #707A8A;
+}
+.config-popup-box.tg-config {
+  width: min(1180px, calc(100vw - 48px));
+  max-width: 1180px;
+  height: min(86vh, 780px);
+  max-height: calc(100vh - 32px);
+  background: #1E2329;
+  border-color: #2B3139;
+}
+.tg-signal-shell { --tg-line: #2B3139; --tg-panel: #1E2329; gap: 12px; color: var(--text); }
+.tg-signal-status-grid { border-color: var(--tg-line); background: #0B0E11; border-radius: 6px; }
+.tg-signal-status-item { border-right-color: var(--tg-line); }
+.tg-signal-status-icon { border-radius: 5px; }
+.tg-signal-layout { gap: 12px; }
+.tg-signal-section { border-color: var(--tg-line); border-radius: 6px; background: #1E2329; padding: 13px; }
+.tg-icon-btn, .tg-signal-mode button { border-color: var(--tg-line); border-radius: 4px; background: #0B0E11; }
+.tg-signal-mode button[aria-pressed="true"] { border-color: var(--primary); background: rgba(59,130,246,.12); }
+.tg-signal-mode #tg-signal-automatic[aria-pressed="true"] { border-color: var(--odds); background: rgba(252,213,53,.10); }
+.tg-signal-table-wrap { border-top-color: var(--tg-line); }
+.tg-signal-table-wrap th { background: #1E2329; }
+.tg-signal-table-wrap td { border-top-color: rgba(43,49,57,.72); }
+
+@media (min-width: 921px) and (max-width: 1100px) {
+  .tg-signal-layout { grid-template-columns: minmax(280px,.82fr) minmax(420px,1.18fr); }
+  .tg-signal-section { padding: 11px; }
+  .tg-signal-status-item { padding-left: 10px; padding-right: 10px; }
+}

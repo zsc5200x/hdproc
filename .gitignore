@@ -1,0 +1,96 @@
+# 操作系统 / 本机工具
+.DS_Store
+.claude/
+.pytest_cache/
+.playwright-mcp/
+.dev-runtime-browser/
+.tmp-*/
+.tmp-*
+.tmp_*
+.probe_test.txt
+
+# 真实配置、凭据和运行时数据（绝不提交）
+.env
+.env.*
+!.env.example
+app/config.json
+app/data/*
+!app/data/*.example.json
+app/data_test_webui/
+data/
+*.log
+*.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+app/.venv/
+*.egg-info/
+
+# 运行时目录
+.run/
+**/.run/
+app/orders/
+app/state/
+
+# app/data 里大多数都是运行时产物/敏感信息
+app/data/_tmp/
+app/data/captures/
+app/data/screenshots/
+app/data/debug/
+app/data/*.tmp.*
+app/data/*.lock
+app/data/*.bak.*
+app/data/_pw/
+app/data/_pw_member/
+app/data/_pw_capture_profile_*/
+app/data/follow_results.jsonl
+app/data/follow_trace.jsonl
+app/data/follow_state.json
+app/data/telegram_status_log.jsonl
+app/data/quote_session.json
+app/data/quote_member.json
+app/data/odds_cache.json
+app/data/odds_watchlist.jsonl
+
+# IDE
+.vscode/
+.idea/
+
+# 便携式环境/大文件（Windows portable / Playwright）
+python/
+ms-playwright/
+**/node_modules/
+cc/captures/
+experiments/**/dist/
+experiments/**/target/
+experiments/**/*.tsbuildinfo
+experiments/**/vite.config.js
+experiments/**/vite.config.d.ts
+
+# 构建、发布和测试产物
+.build/
+_dist*/
+artifacts/
+_qa_shots/
+*.zip
+
+# 本地截图、抓包和一次性诊断脚本
+/*.png
+/*.jpg
+/wanted-*.json
+cc/_*.js
+cc/inspect*.tmp.*
+
+# 临时工作目录
+_work/
+
+# 备份/临时文件
+*.bak
+*.bak.*
+*.backup*
+*.ai_bak
+*.tmp
+*.tmp.*
+.ux_bak/

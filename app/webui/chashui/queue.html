@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>会员执行调度中心</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/chashui/style.css"/>
+  <link rel="stylesheet" href="/chashui/queue.css"/>
+  <link rel="stylesheet" href="/chashui/redesign-queue.css?v=20260824-strategy-queue-11"/>
+</head>
+<body class="queuePage executionCenterPage">
+  <header class="commandBar" aria-label="策略队列摘要" hidden>
+    <div class="commandMetrics">
+      <div class="commandMetric summaryCard clockMetric">
+        <span class="summaryIcon" aria-hidden="true"><i class="fa-regular fa-clock"></i></span>
+        <div class="summaryCopy"><span>当前时间</span><strong id="stCurrentTime" class="mono">--:--:--</strong><small id="stCurrentDate">--</small></div>
+      </div>
+      <div class="commandMetric summaryCard">
+        <span class="summaryIcon memberIcon" aria-hidden="true"><i class="fa-solid fa-user-group"></i></span>
+        <div class="summaryCopy"><span>在线会员</span><strong><b id="stOnlineMembers">0</b><small> / </small><small id="stTotalMembers">0</small></strong><em><i class="liveDot"></i> 实时在线</em></div>
+      </div>
+      <button class="commandMetric summaryCard runningMetric" type="button" aria-label="筛选执行中任务">
+        <span class="summaryIcon runningIcon" aria-hidden="true"><i class="fa-solid fa-gamepad"></i></span>
+        <div class="summaryCopy"><span>执行中</span><strong id="stJobsCount">0</strong><em>当前任务</em></div>
+      </button>
+      <button class="commandMetric summaryCard waitingMetric" type="button" aria-label="筛选等待执行任务">
+        <span class="summaryIcon waitingIcon" aria-hidden="true"><i class="fa-solid fa-bell"></i></span>
+        <div class="summaryCopy"><span>等待中</span><strong id="stPendingCount">0</strong><em>排队任务</em></div>
+      </button>
+      <details id="globalSettings" class="settingsMenu strategyMetric summaryCard">
+        <summary class="strategySummary">
+          <span class="summaryIcon strategyIcon" aria-hidden="true"><i class="fa-solid fa-hexagon-nodes"></i></span>
+          <span class="summaryCopy"><span>策略模式</span><strong id="stStrategyName">FT_bet 自动分单</strong><small id="stStrategyDesc">按会员可用额度与执行延迟智能分配</small></span>
+          <span class="strategyConfigCta"><i class="fa-solid fa-sliders" aria-hidden="true"></i><span>策略配置</span></span>
+        </summary>
+        <div class="settingsPanel">
+          <div class="settingsHeader">
+            <div><strong>执行策略设置</strong><span id="stConfigStatus" class="settingsStatus">未修改</span></div>
+            <button id="btnResetConfig" class="iconButton" type="button" title="重置推荐参数" aria-label="重置推荐参数"><i class="fa-solid fa-rotate-left"></i></button>
+          </div>
+          <label class="settingsField"><span>查水账号</span><select id="selMember" aria-label="查水账号"></select></label>
+          <div class="settingsGrid">
+            <label class="settingsField"><span>页面刷新（毫秒）</span><input id="inQueueRefresh" type="number" value="1000" min="300" max="10000"/></label>
+            <label class="settingsField"><span>分单数量</span><input id="inSplitCount" type="number" min="1" max="5" value="3"/></label>
+            <label class="settingsField"><span>分单延迟（秒）</span><input id="inSplitDelay" type="number" min="0" max="10" step="0.1" value="0.5"/></label>
+            <label class="settingsField"><span>探测窗口（秒）</span><input id="inWaitLineNotFound" type="number" min="10" max="120" value="45"/></label>
+          </div>
+          <div class="toggleGrid">
+            <label class="check"><input id="ckOnlyActive" type="checkbox"/><span>仅进行中</span></label>
+          </div>
+          <button id="btnSaveConfig" class="primaryButton" type="button"><i class="fa-solid fa-floppy-disk"></i><span>保存设置</span></button>
+        </div>
+      </details>
+    </div>
+  </header>
+
+  <main id="executionCanvas" class="executionCanvas">
+    <div class="workspaceGrid">
+      <aside class="performanceColumn">
+        <section class="controlPanel performancePanel" aria-labelledby="performanceTitle">
+          <div class="panelHeading"><h2 id="performanceTitle">实时性能看板</h2><span id="stPerformanceTime" class="mono">--:--:--</span></div>
+          <div class="memberKpiGrid">
+            <div><span>在线会员</span><strong id="kpiOnline">0</strong></div>
+            <div><span>空闲会员</span><strong id="kpiIdle">0</strong></div>
+            <div><span>执行中会员</span><strong id="kpiRunning">0</strong></div>
+            <div><span>掉线会员</span><strong id="kpiOffline">0</strong></div>
+          </div>
+          <div class="taskKpiGrid" aria-label="任务指标">
+            <div><span>等待任务</span><strong id="kpiWaitingTasks">0</strong></div>
+            <div><span>执行任务</span><strong id="kpiRunningTasks">0</strong></div>
+            <div><span>今日成功率</span><strong id="kpiSuccessRate">0%</strong></div>
+          </div>
+          <div class="performanceBlock">
+            <div class="metricSectionTitle"><span>执行性能</span><i></i></div>
+            <div class="performanceMetrics">
+              <div><span>平均执行</span><strong id="kpiAvgAttempt">-</strong></div>
+              <div><span>FT_bet P50</span><strong id="kpiAvgFtBet">-</strong></div>
+              <div><span>订单累计</span><strong id="kpiAvgOrderElapsed">-</strong></div>
+            </div>
+          </div>
+          <div class="healthStrip">
+            <div><span class="healthDot"></span><strong id="kpiHealthState">Healthy</strong><small>系统正常</small></div>
+            <span id="kpiSnapshotVersion" class="mono">S000000</span>
+            <span id="kpiHealth" class="visuallyHidden">0%</span>
+          </div>
+        </section>
+        <section class="controlPanel failurePanel memberExecutionPanel" aria-labelledby="memberPoolTitle">
+          <div class="panelHeading"><h2 id="memberPoolTitle">会员执行池</h2><span>实时状态</span></div>
+          <div class="memberPoolLegend memberLegend" aria-label="会员状态图例">
+            <span><i class="legendDot idle"></i>空闲</span><span><i class="legendDot running"></i>执行中</span>
+            <span><i class="legendDot cooldown"></i>冷却</span><span><i class="legendDot offline"></i>掉线</span>
+          </div>
+          <div id="memberPool" class="memberPool" aria-label="会员执行列表"></div>
+          <div class="failureOverview" hidden aria-hidden="true">
+            <div id="failureDonut" class="failureDonut"><div><strong id="failureTotal">0</strong><span>总计</span></div></div>
+            <div id="failureLegend" class="failureLegend"></div>
+          </div>
+        </section>
+      </aside>
+
+      <div class="queueMainColumn">
+      <section class="controlPanel orderPanel" aria-label="订单队列 / 执行任务区">
+        <div class="taskTabs" role="tablist" aria-label="任务状态筛选">
+          <button class="taskTab active" type="button" role="tab" aria-selected="true" data-task-filter="all">全部 <b id="tabAllCount">0</b></button>
+          <button class="taskTab" type="button" role="tab" aria-selected="false" data-task-filter="waiting">等待执行 <b id="tabWaitingCount">0</b></button>
+          <button class="taskTab" type="button" role="tab" aria-selected="false" data-task-filter="running">执行中 <b id="tabRunningCount">0</b></button>
+          <button class="taskTab" type="button" role="tab" aria-selected="false" data-task-filter="success">成功 <b id="tabSuccessCount">0</b></button>
+          <button class="taskTab retryTaskTab" type="button" role="tab" aria-selected="false" data-task-filter="retry">重试 <b id="tabRetryCount">0</b></button>
+          <button class="taskTab" type="button" role="tab" aria-selected="false" data-task-filter="failed">失败 <b id="tabFailedCount">0</b></button>
+        </div>
+        <div id="orderPool" class="orderPool">
+          <div id="boxQueue" class="orderGroupList"></div>
+          <div id="boxEmpty" class="taskEmpty">
+            <i class="fa-solid fa-satellite-dish"></i><strong>当前没有匹配的订单</strong><span>新订单进入后会在这里自动拆分并分发</span>
+          </div>
+        </div>
+      </section>
+
+    <div class="lowerGrid">
+      <section class="controlPanel logPanel" aria-labelledby="executionLogTitle">
+        <div class="logToolbar">
+          <div class="panelHeading logHeading"><h2 id="executionLogTitle">执行日志 / 状态时间线</h2></div>
+          <div class="logFilters" aria-label="日志阶段筛选">
+            <button class="logFilter active" type="button" data-log-filter="all">全部</button>
+            <button class="logFilter" type="button" data-log-filter="success">成功</button>
+            <button class="logFilter" type="button" data-log-filter="failed">失败</button>
+            <button class="logFilter" type="button" data-log-filter="retry">重试</button>
+            <button class="logFilter" type="button" data-log-filter="error">异常</button>
+          </div>
+          <select id="selLogSplit" class="logSplitSelect" aria-label="按拆分单筛选">
+            <option value="all">全部拆分</option>
+            <option value="1">拆分单一</option>
+            <option value="2">拆分单二</option>
+            <option value="3">拆分单三</option>
+            <option value="4">拆分单四</option>
+            <option value="5">拆分单五</option>
+          </select>
+          <label class="compactCheck"><input id="ckOnlyErrors" type="checkbox"/><span>只看异常</span></label>
+        </div>
+        <div class="logColumnHead" aria-hidden="true"><span>时间</span><span>订单号</span><span>任务</span><span>会员</span><span>状态</span><span>详情</span><span>耗时</span></div>
+        <div id="executionLog" class="executionLog"></div>
+      </section>
+      <section class="controlPanel statsPanel" aria-labelledby="statsTitle" hidden>
+        <div class="panelHeading"><h2 id="statsTitle">今日数据总览</h2><span id="stStatsUpdated">实时</span></div>
+        <div class="statsOverview">
+          <div><i class="fa-solid fa-inbox"></i><span>历史任务</span><strong id="stHistoryTasks">0</strong></div>
+          <div><i class="fa-solid fa-circle-check"></i><span>成功任务</span><strong id="stSuccessCount">0</strong></div>
+          <div><i class="fa-solid fa-circle-xmark"></i><span>失败任务</span><strong id="stFailedCount">0</strong></div>
+          <div><i class="fa-solid fa-gauge-high"></i><span>系统负载</span><strong id="stSystemLoad">0%</strong></div>
+        </div>
+      </section>
+    </div>
+      </div>
+    </div>
+
+    <div class="systemFooter" aria-live="polite">
+      <span id="stErr" class="systemState"><i class="fa-solid fa-circle-check"></i>运行正常</span>
+      <span id="stQuoteMember">查水账号：-</span><span id="stQueueUpdatedAt">队列更新：-</span>
+      <span id="stServerTime">服务器时间：-</span><span id="stLastUpdate">本页刷新：-</span>
+      <span id="stCounts" class="visuallyHidden">待入队：0 · 队列中：0</span>
+    </div>
+  </main>
+  <script src="/chashui/queue.js?v=20260824-strategy-queue-11"></script>
+</body>
+</html>

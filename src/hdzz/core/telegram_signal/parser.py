@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+import re
+from typing import Any, Dict, List, Tuple
+
+
+class SignalParseError(ValueError):
+    pass
+
+
+def _nonempty_lines(text: Any) -> List[str]:
+    normalized = str(text or "").replace("\ufeff", "").replace("\r\n", "\n").replace("\r", "\n")
+    return [line.strip() for line in normalized.split("\n") if line.strip()]
+
+
+def _label_value(lines: List[str], label: str) -> str:
+    pattern = re.compile(rf"^{re.escape(label)}\s*[:：]\s*(.+)$")
+    values = []
+    for line in lines:
+        match = pattern.match(line)
+        if match:
+            values.append(str(match.group(1) or "").strip())
+    return values[-1] if values else ""
+
+
+def _parse_split_line(text: str) -> float:
+    match = re.fullmatch(r"([+-]?\d+(?:\.\d+)?)(?:\s*/\s*([+-]?\d+(?:\.\d+)?))?", str(text or "").strip())
+    if not match:
+        raise SignalParseError("invalid_line")
+    left_text = match.group(1)
+    right_text = match.group(2)
+    left = float(left_text)
+    if right_text is None:
+        return left
+    right = float(right_text)
+    if left_text.startswith("-") and not right_text.startswith(("-", "+")):
+        right = -abs(right)
+    elif left_text.startswith("+") and not right_text.startswith(("-", "+")):
+        right = abs(right)
+    return (left + right) / 2.0
+
+
+def _content_lines(lines: List[str]) -> List[str]:
+    for index, line in enumerate(lines):
+        if re.fullmatch(r"内容\s*[:：]?", line):
+            return lines[index + 1 :]
+    return []
+
+
+def _parse_match_line(line: str) -> Tuple[str, str, int, int]:
+    match = re.match(r"^(.+?)\s+v(?:s)?\s+(.+?)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*$", line, re.IGNORECASE)
+    if not match:
+        raise SignalParseError("missing_match")
+    return (
+        str(match.group(1) or "").strip(),
+        str(match.group(2) or "").strip(),
+        int(match.group(3)),
+        int(match.group(4)),
+    )
+
+
+def _parse_bet_line(line: str) -> Tuple[str, str, str]:
+    match = re.match(
+        r"^(.+?)\s+([+-]?\d+(?:\.\d+)?(?:\s*/\s*[+-]?\d+(?:\.\d+)?)?)\s*@\s*(\d+(?:\.\d+)?)\s*$",
+        line,
+    )
+    if not match:
+        raise SignalParseError("missing_bet_line")
+    return (
+        str(match.group(1) or "").strip(),
+        re.sub(r"\s*/\s*", " / ", str(match.group(2) or "").strip()),
+        str(match.group(3) or "").strip(),
+    )
+
+
+def _market_from(bet_type: str, selection: str) -> str:
+    if "让球" in bet_type:
+        return "handicap"
+    if any(token in bet_type for token in ("大 / 小", "大小", "大球", "小球")):
+        return "total_under" if str(selection).startswith("小") else "total_over"
+    if "独赢" in bet_type or "獨贏" in bet_type:
+        return "moneyline"
+    raise SignalParseError("unsupported_market")
+
+
+def parse_telegram_bet_signal(text: Any) -> Dict[str, Any]:
+    lines = _nonempty_lines(text)
+    if not lines or not any(re.match(r"^单号\s*[:：]", line) for line in lines) or not _content_lines(lines):
+        raise SignalParseError("unsupported_signal")
+
+    monitor_match = re.match(r"^(.+?)监控(?:\s|$)", lines[0])
+    monitor = str(monitor_match.group(1) or "").strip() if monitor_match else ""
+
+    member = _label_value(lines, "会员")
+    order_id = _label_value(lines, "单号")
+    if not re.fullmatch(r"\d{6,}", order_id):
+        raise SignalParseError("missing_order_id")
+
+    order_time = _label_value(lines, "时间")
+    time_match = re.fullmatch(r"(\d{2}-\d{2}-\d{4})\s+(\d{2}:\d{2}:\d{2})", order_time)
+    if not time_match:
+        raise SignalParseError("missing_time")
+
+    sport = ""
+    bet_type = ""
+    for line in lines:
+        sport_match = re.match(r"^(足球|篮球)\s*[:：]\s*(.+)$", line)
+        if sport_match:
+            sport = str(sport_match.group(1) or "").strip()
+            bet_type = str(sport_match.group(2) or "").strip()
+            break
+    if not sport or not bet_type:
+        raise SignalParseError("missing_bet_type")
+
+    content = _content_lines(lines)
+    if len(content) < 4:
+        raise SignalParseError("missing_content")
+    league = content[0]
+
+    number_match = re.fullmatch(r"\[(\d+)\]\s*(?:vs|v)\s*\[(\d+)\]", content[1], re.IGNORECASE)
+    if number_match:
+        home_number = str(number_match.group(1) or "")
+        away_number = str(number_match.group(2) or "")
+        match_index = 2
+    else:
+        home_number = ""
+        away_number = ""
+        match_index = 1
+
+    if len(content) <= match_index + 1:
+        raise SignalParseError("missing_content")
+    home, away, score_home, score_away = _parse_match_line(content[match_index])
+    selection, line_text, odds = _parse_bet_line(content[match_index + 1])
+
+    amount_match = None
+    for line in lines:
+        amount_match = re.match(r"^[￥¥]\s*[:：]?\s*([\d,]+(?:\.\d+)?)\s*$", line)
+        if amount_match:
+            break
+    if not amount_match:
+        raise SignalParseError("missing_amount")
+    amount = float(str(amount_match.group(1) or "0").replace(",", ""))
+    if amount <= 0:
+        raise SignalParseError("missing_amount")
+
+    market = _market_from(bet_type, selection)
+    line_value = _parse_split_line(line_text)
+    return {
+        "monitor": monitor,
+        "member": member,
+        "order_id": order_id,
+        "date": str(time_match.group(1)),
+        "time": str(time_match.group(2)),
+        "sport": sport,
+        "mode": "live" if "滚球" in bet_type else "early",
+        "bet_type": bet_type,
+        "market": market,
+        "league": league,
+        "home_number": home_number,
+        "away_number": away_number,
+        "home": home,
+        "away": away,
+        "score_home": score_home,
+        "score_away": score_away,
+        "selection": selection,
+        "line_text": line_text,
+        "line": f"{selection} {line_text}".strip(),
+        "line_value": line_value,
+        "odds": odds,
+        "amount": amount,
+        "raw_text": str(text or ""),
+    }

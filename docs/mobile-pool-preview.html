@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AG Matrix Mobile Preview</title>
+  <style>
+    :root {
+      --bg: #061014;
+      --bg-deep: #03070b;
+      --panel: rgba(12, 25, 31, 0.86);
+      --panel-strong: rgba(17, 38, 45, 0.94);
+      --line: rgba(100, 206, 206, 0.18);
+      --line-strong: rgba(100, 206, 206, 0.42);
+      --text: #e7fff8;
+      --muted: #78a9a9;
+      --dim: #41696a;
+      --mint: #40f0b7;
+      --cyan: #45d8ff;
+      --amber: #ffc857;
+      --red: #ff5b79;
+      --violet: #a68cff;
+      --radius-xl: 28px;
+      --radius-lg: 22px;
+      --radius-md: 16px;
+      --shadow: 0 24px 70px rgba(0, 0, 0, 0.38);
+      --ease: cubic-bezier(.2, .8, .2, 1);
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      min-height: 100%;
+      background: #0d1516;
+    }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px 12px;
+      color: var(--text);
+      font-family: ui-rounded, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at 20% 0%, rgba(64, 240, 183, 0.18), transparent 31%),
+        radial-gradient(circle at 86% 12%, rgba(69, 216, 255, 0.13), transparent 29%),
+        linear-gradient(135deg, #16251f, #071015 48%, #03070b);
+    }
+
+    .phone-shell {
+      width: min(100%, 430px);
+      min-height: 860px;
+      overflow: hidden;
+      position: relative;
+      border: 1px solid rgba(201, 255, 241, 0.18);
+      border-radius: 42px;
+      background:
+        linear-gradient(rgba(82, 255, 211, 0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(82, 255, 211, 0.035) 1px, transparent 1px),
+        radial-gradient(circle at 50% -8%, rgba(69, 216, 255, 0.22), transparent 35%),
+        linear-gradient(180deg, #071216, #03070b 68%);
+      background-size: 28px 28px, 28px 28px, auto, auto;
+      box-shadow: var(--shadow), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+    }
+
+    .phone-shell::before {
+      content: "";
+      position: absolute;
+      inset: -20% auto auto -30%;
+      width: 82%;
+      height: 34%;
+      pointer-events: none;
+      transform: rotate(-18deg);
+      background: linear-gradient(90deg, transparent, rgba(64, 240, 183, 0.12), transparent);
+      filter: blur(1px);
+      animation: sweep 6s var(--ease) infinite;
+    }
+
+    .safe-area {
+      position: relative;
+      z-index: 1;
+      padding: 16px 16px 98px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 3px 14px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .logo {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 15px;
+      color: #03100d;
+      font-weight: 1000;
+      background: linear-gradient(135deg, var(--mint), var(--cyan));
+      box-shadow: 0 0 28px rgba(64, 240, 183, 0.28);
+    }
+
+    .brand-title {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.05;
+      letter-spacing: 0.02em;
+    }
+
+    .brand-sub {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .ghost-btn,
+    .primary-btn,
+    .chip {
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: rgba(9, 22, 27, 0.78);
+      backdrop-filter: blur(18px);
+    }
+
+    .ghost-btn {
+      width: 42px;
+      height: 42px;
+      border-radius: 15px;
+      display: grid;
+      place-items: center;
+      font-size: 18px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-xl);
+      padding: 18px;
+      background:
+        radial-gradient(circle at 88% 16%, rgba(64, 240, 183, 0.28), transparent 24%),
+        linear-gradient(135deg, rgba(18, 48, 55, 0.98), rgba(7, 20, 25, 0.92));
+      box-shadow: 0 20px 44px rgba(0, 0, 0, 0.28);
+      animation: rise .7s var(--ease) both;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -56px;
+      top: 22px;
+      width: 148px;
+      height: 148px;
+      border: 1px solid rgba(64, 240, 183, 0.22);
+      border-radius: 50%;
+      box-shadow:
+        inset 0 0 0 18px rgba(64, 240, 183, 0.025),
+        inset 0 0 0 42px rgba(69, 216, 255, 0.025);
+    }
+
+    .hero-head {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: flex-start;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--mint);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .hero h2 {
+      margin: 0;
+      font-size: 31px;
+      line-height: 0.98;
+      letter-spacing: -0.06em;
+    }
+
+    .hero h2 span {
+      color: var(--mint);
+    }
+
+    .status-pill {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 10px;
+      border: 1px solid rgba(64, 240, 183, 0.28);
+      border-radius: 999px;
+      color: var(--mint);
+      background: rgba(64, 240, 183, 0.08);
+      font-size: 11px;
+      font-weight: 900;
+    }
+
+    .pulse {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--mint);
+      box-shadow: 0 0 0 0 rgba(64, 240, 183, 0.52);
+      animation: pulse 1.8s infinite;
+    }
+
+    .hero-grid {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .metric {
+      min-height: 86px;
+      padding: 13px;
+      border: 1px solid rgba(201, 255, 241, 0.12);
+      border-radius: 18px;
+      background: rgba(1, 7, 10, 0.34);
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .metric-value {
+      margin-top: 10px;
+      font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+      font-size: 25px;
+      font-weight: 950;
+      letter-spacing: -0.04em;
+    }
+
+    .metric-value small {
+      color: var(--dim);
+      font-size: 13px;
+    }
+
+    .quick-row {
+      display: flex;
+      gap: 9px;
+      margin: 14px 0 16px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      animation: rise .7s .08s var(--ease) both;
+    }
+
+    .quick-row::-webkit-scrollbar { display: none; }
+
+    .chip {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 39px;
+      padding: 0 13px;
+      border-radius: 999px;
+      color: #c4eeeb;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .chip.is-active {
+      color: #04100d;
+      background: linear-gradient(135deg, var(--mint), var(--cyan));
+      border-color: transparent;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      margin: 19px 2px 10px;
+      animation: rise .7s .12s var(--ease) both;
+    }
+
+    .section-head h3 {
+      margin: 0;
+      font-size: 17px;
+      letter-spacing: -0.02em;
+    }
+
+    .section-head a {
+      color: var(--cyan);
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .monitor-stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    .card {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      padding: 14px;
+      background:
+        linear-gradient(180deg, rgba(13, 31, 38, 0.93), rgba(6, 16, 20, 0.92));
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.20);
+      animation: rise .7s var(--ease) both;
+    }
+
+    .card:nth-child(1) { animation-delay: .16s; }
+    .card:nth-child(2) { animation-delay: .22s; }
+    .card:nth-child(3) { animation-delay: .28s; }
+
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 2px;
+      background: linear-gradient(90deg, var(--mint), transparent);
+    }
+
+    .card.is-warn::before { background: linear-gradient(90deg, var(--amber), transparent); }
+    .card.is-signal::before { background: linear-gradient(90deg, var(--violet), var(--cyan), transparent); }
+
+    .card-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .node-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .node-icon {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      border-radius: 15px;
+      background: rgba(64, 240, 183, 0.08);
+      border: 1px solid rgba(64, 240, 183, 0.18);
+    }
+
+    .node-name {
+      margin: 0;
+      max-width: 190px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 15px;
+      font-weight: 950;
+    }
+
+    .node-sub {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .tag {
+      align-self: flex-start;
+      padding: 6px 9px;
+      border-radius: 999px;
+      color: var(--mint);
+      background: rgba(64, 240, 183, 0.08);
+      font-size: 11px;
+      font-weight: 950;
+    }
+
+    .tag.warn {
+      color: var(--amber);
+      background: rgba(255, 200, 87, 0.10);
+    }
+
+    .card-body {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 13px;
+    }
+
+    .mini {
+      padding: 11px 12px;
+      border: 1px solid rgba(201, 255, 241, 0.10);
+      border-radius: 16px;
+      background: rgba(0, 0, 0, 0.17);
+    }
+
+    .mini span {
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .mini strong {
+      display: block;
+      margin-top: 6px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+      font-size: 14px;
+    }
+
+    .card-note {
+      margin: 12px 0 0;
+      color: #a8d7d2;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .order-strip {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid rgba(69, 216, 255, 0.18);
+      border-radius: var(--radius-lg);
+      padding: 13px;
+      background: rgba(6, 18, 24, 0.74);
+      animation: rise .7s .32s var(--ease) both;
+    }
+
+    .order-strip strong {
+      display: block;
+      font-size: 14px;
+    }
+
+    .order-strip span {
+      display: block;
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .primary-btn {
+      height: 42px;
+      padding: 0 14px;
+      border: 0;
+      border-radius: 15px;
+      color: #04100d;
+      font-weight: 950;
+      background: linear-gradient(135deg, var(--mint), var(--cyan));
+    }
+
+    .bottom-nav {
+      position: absolute;
+      z-index: 4;
+      left: 14px;
+      right: 14px;
+      bottom: 14px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      padding: 9px;
+      border: 1px solid rgba(201, 255, 241, 0.14);
+      border-radius: 24px;
+      background: rgba(4, 11, 14, 0.82);
+      backdrop-filter: blur(22px);
+      box-shadow: 0 12px 38px rgba(0, 0, 0, 0.34);
+    }
+
+    .nav-item {
+      min-height: 50px;
+      display: grid;
+      place-items: center;
+      gap: 3px;
+      border-radius: 17px;
+      color: var(--dim);
+      font-size: 10px;
+      font-weight: 900;
+    }
+
+    .nav-item b {
+      font-size: 18px;
+      line-height: 1;
+    }
+
+    .nav-item.active {
+      color: #03100d;
+      background: linear-gradient(135deg, var(--mint), var(--cyan));
+    }
+
+    @keyframes pulse {
+      70% { box-shadow: 0 0 0 10px rgba(64, 240, 183, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(64, 240, 183, 0); }
+    }
+
+    @keyframes sweep {
+      0%, 28% { transform: translateX(-20%) rotate(-18deg); opacity: 0; }
+      45% { opacity: 1; }
+      78%, 100% { transform: translateX(190%) rotate(-18deg); opacity: 0; }
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(14px) scale(.985); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @media (max-width: 420px) {
+      body { padding: 0; background: var(--bg-deep); }
+      .phone-shell {
+        width: 100%;
+        min-height: 100vh;
+        border: 0;
+        border-radius: 0;
+      }
+      .safe-area { padding-top: 14px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="phone-shell" aria-label="AG Matrix 手机端静态预览">
+    <div class="safe-area">
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo">AG</div>
+          <div>
+            <h1 class="brand-title">号池移动端</h1>
+            <div class="brand-sub">静态效果稿 · 未接入任何数据</div>
+          </div>
+        </div>
+        <button class="ghost-btn" type="button" aria-label="打开提醒">⌁</button>
+      </header>
+
+      <section class="hero" aria-labelledby="overview-title">
+        <div class="hero-head">
+          <div>
+            <p class="eyebrow">Live Scan Board</p>
+            <h2 id="overview-title">20 个监控号<br><span>一起扫</span></h2>
+          </div>
+          <div class="status-pill"><span class="pulse"></span>正常</div>
+        </div>
+        <div class="hero-grid">
+          <div class="metric">
+            <div class="metric-label">并发扫描</div>
+            <div class="metric-value">20 <small>/ 20</small></div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">跟单会员</div>
+            <div class="metric-value">3 <small>/ 3</small></div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">待处理队列</div>
+            <div class="metric-value">0</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">异常来源</div>
+            <div class="metric-value" style="color:var(--amber)">1</div>
+          </div>
+        </div>
+      </section>
+
+      <nav class="quick-row" aria-label="号池筛选">
+        <button class="chip is-active" type="button">全部号池</button>
+        <button class="chip" type="button">监控号</button>
+        <button class="chip" type="button">会员号</button>
+        <button class="chip" type="button">远端信号</button>
+      </nav>
+
+      <div class="section-head">
+        <h3>监控号池</h3>
+        <a href="#" aria-label="查看全部监控号">查看全部</a>
+      </div>
+
+      <section class="monitor-stack" aria-label="监控号池卡片">
+        <article class="card">
+          <div class="card-top">
+            <div class="node-title">
+              <div class="node-icon">⌬</div>
+              <div>
+                <h4 class="node-name">zxcv226699</h4>
+                <div class="node-sub">登入3后台监控号</div>
+              </div>
+            </div>
+            <div class="tag">在线扫单</div>
+          </div>
+          <div class="card-body">
+            <div class="mini"><span>最后扫单</span><strong>12:54:36</strong></div>
+            <div class="mini"><span>监控范围</span><strong>全部下线</strong></div>
+            <div class="mini"><span>代理</span><strong>未配置</strong></div>
+            <div class="mini"><span>失败原因</span><strong>最近无异常</strong></div>
+          </div>
+        </article>
+
+        <article class="card is-signal">
+          <div class="card-top">
+            <div class="node-title">
+              <div class="node-icon">⌁</div>
+              <div>
+                <h4 class="node-name">远端交易节点</h4>
+                <div class="node-sub">远端信号源</div>
+              </div>
+            </div>
+            <div class="tag">已接入</div>
+          </div>
+          <div class="card-body">
+            <div class="mini"><span>拉取节奏</span><strong>1s / 次</strong></div>
+            <div class="mini"><span>每次上限</span><strong>50 条</strong></div>
+            <div class="mini"><span>模式</span><strong>只接滚球</strong></div>
+            <div class="mini"><span>状态</span><strong>参与号池</strong></div>
+          </div>
+        </article>
+
+        <article class="card is-warn">
+          <div class="card-top">
+            <div class="node-title">
+              <div class="node-icon">!</div>
+              <div>
+                <h4 class="node-name">login3-hk-07</h4>
+                <div class="node-sub">登入3后台监控号</div>
+              </div>
+            </div>
+            <div class="tag warn">系统繁忙</div>
+          </div>
+          <p class="card-note">失败原因：由于网站流量较高，请稍后重试。页面会把这种原因直接露出来，方便判断是不是代理、登录、超时或系统繁忙。</p>
+        </article>
+      </section>
+
+      <div class="section-head">
+        <h3>实时跟单</h3>
+        <a href="#" aria-label="查看跟单队列">队列</a>
+      </div>
+
+      <section class="order-strip" aria-label="最新订单提示">
+        <div>
+          <strong>等待新订单进入</strong>
+          <span>静态预览：这里未来可放最新订单、队列风险、掉单提醒。</span>
+        </div>
+        <button class="primary-btn" type="button">刷新</button>
+      </section>
+    </div>
+
+    <nav class="bottom-nav" aria-label="手机底部导航">
+      <div class="nav-item"><b>≋</b><span>订单</span></div>
+      <div class="nav-item"><b>▤</b><span>队列</span></div>
+      <div class="nav-item active"><b>⌬</b><span>号池</span></div>
+      <div class="nav-item"><b>◌</b><span>设置</span></div>
+    </nav>
+  </main>
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>查水（实时盘口/水位）</title>
+    <link rel="stylesheet" href="/chashui/style.css" />
+  </head>
+  <body>
+    <div class="bg"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <div class="brandTitle">查水</div>
+        <div class="brandSub">实时盘口 / 水位（主盘 + 附加盘）</div>
+      </div>
+
+      <div class="topPills">
+        <span id="stStream" class="pill mono">未连接</span>
+        <span id="stMode" class="pill mono">滚球</span>
+        <span id="stLastUpdate" class="pill mono">-</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="left">
+        <section class="card controls">
+          <div class="cardHead">
+            <h2>控制台</h2>
+            <div class="pillRow">
+              <span id="stMemberStatus" class="pill">-</span>
+            </div>
+          </div>
+
+          <div class="controlGrid">
+            <div class="field">
+              <div class="label">会员</div>
+              <select id="selMember"></select>
+            </div>
+
+            <div class="field">
+              <div class="label">模式</div>
+              <div class="seg">
+                <button id="btnLoadLive" class="btn btn-seg primary" title="滚球">滚球</button>
+                <button id="btnLoadToday" class="btn btn-seg" title="今日">今日</button>
+                <button id="btnLoadEarly" class="btn btn-seg" title="早盘">早盘</button>
+              </div>
+            </div>
+
+            <div class="field gid">
+              <div class="label">gid</div>
+              <div class="gidRow">
+                <input id="inGid" placeholder="例如 8513893" />
+                <button id="btnPasteGid" class="btn btn-ghost" title="从剪贴板粘贴 gid">粘贴</button>
+              </div>
+            </div>
+
+            <div class="field small">
+              <div class="label">刷新(ms)</div>
+              <input id="inRefresh" type="number" value="3000" min="1000" max="30000" />
+            </div>
+
+            <div class="field span2">
+              <div class="label">操作</div>
+              <div class="inlineRow">
+                <button id="btnRefreshStatus" class="btn btn-ghost">刷新状态</button>
+                <button id="btnLoadGames" class="btn btn-ghost">刷新列表</button>
+              </div>
+            </div>
+
+            <div class="field span2">
+              <div class="label">选项</div>
+              <div class="inlineRow">
+                <label class="check" title="更准但更慢：会额外调用 FT_order_view">
+                  <input id="ckConfirm" type="checkbox" checked />
+                  <span>校验水位</span>
+                </label>
+                <label class="check" title="调试用：展示原始字段">
+                  <input id="ckRaw" type="checkbox" />
+                  <span>原始字段</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="actionsRow">
+            <button id="btnStartStream" class="btn btn-primary">开始监控</button>
+            <button id="btnStopStream" class="btn btn-danger">停止</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="cardHead">
+            <h2>会话信息</h2>
+          </div>
+
+          <div class="kv">
+            <div><span>base_url</span><span id="stBaseUrl" class="mono">-</span></div>
+            <div><span>uid(脱敏)</span><span id="stUid" class="mono">-</span></div>
+            <div><span>ver</span><span id="stVer" class="mono">-</span></div>
+            <div><span>proxy</span><span id="stProxy" class="mono">-</span></div>
+            <div><span>错误</span><span id="stErr" class="mono">-</span></div>
+          </div>
+          <div class="hint">
+            找不到比赛/水位：先刷新状态确认会员在线；必要时去主 WebUI「弹药库」执行“检测/重登”。
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="cardHead">
+            <h2>比赛列表</h2>
+            <div class="pillRow">
+              <span id="stGameCount" class="pill mono">0</span>
+            </div>
+          </div>
+          <div class="row">
+            <input id="inGameSearch" placeholder="搜索：联赛 / 球队 / gid" />
+          </div>
+          <div class="tableWrap">
+            <table id="tblGames">
+              <thead>
+                <tr>
+                  <th>gid</th>
+                  <th>联赛</th>
+                  <th>主队 vs 客队</th>
+                  <th>比分</th>
+                  <th>时间</th>
+                  <th>更多盘</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <details class="card help">
+          <summary>使用说明 / 注意事项</summary>
+          <ol>
+            <li>先在主 WebUI 的<b>弹药库</b>里确保有可用会员（建议单独建一个 <span class="mono">role=quote</span> 的账号）。</li>
+            <li>本页会复用弹药库会员的 <span class="mono">uid/ver/cookie/proxy</span> 调接口展示盘口/水位。</li>
+            <li>开启<b>校验水位</b>会额外调用 <span class="mono">FT_order_view</span>（更准但更慢）。</li>
+          </ol>
+          <p class="hint">提醒：本页只做“展示盘口/水位”，不包含下注功能（不会调用 <span class="mono">p=FT_bet</span>）。</p>
+        </details>
+      </section>
+
+      <section class="right">
+        <section class="card">
+          <div class="cardHead">
+            <h2>当前快照</h2>
+          </div>
+          <div id="boxMeta" class="kv"></div>
+        </section>
+
+        <section class="card">
+          <div class="cardHead">
+            <h2>盘口 / 水位</h2>
+          </div>
+
+          <div class="simpleGrid">
+            <div class="simpleCard">
+              <div class="simpleTitle">让球</div>
+              <div id="boxHandicap" class="lines"></div>
+            </div>
+            <div class="simpleCard">
+              <div class="simpleTitle">大小</div>
+              <div id="boxOverUnder" class="lines"></div>
+            </div>
+            <div class="simpleCard">
+              <div class="simpleTitle">独赢</div>
+              <div id="boxMoneyLine" class="moneyLine"></div>
+            </div>
+          </div>
+
+          <details id="boxRawWrap" class="raw">
+            <summary>原始字段（调试用）</summary>
+            <pre id="boxRaw" class="mono"></pre>
+          </details>
+        </section>
+      </section>
+    </main>
+
+    <script src="/chashui/app.js"></script>
+  </body>
+</html>

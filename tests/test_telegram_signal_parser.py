@@ -1,0 +1,99 @@
+import unittest
+
+
+HANDICAP_SIGNAL = """10215c监控 会员：cpb3k（D1）单号：***88407
+时间：07-26-2026 13:32:24
+会员：cpb3k
+单号：24929088407
+足球：(滚球) 让球
+内容：
+斯洛伐克超级联赛
+[701356] vs [701355]
+拜斯迪卡   v  布拉迪斯拉发   (0 - 2)
+布拉迪斯拉发   -0.5 / 1 @ 0.99
+
+￥：5270"""
+
+
+TOTAL_SIGNAL = """10215c监控 会员：cpb3k（D1）单号：***65904
+时间：07-26-2026 13:20:08
+会员：cpb3k
+单号：24928965904
+足球：(滚球) 大 / 小
+内容：
+挪威超级联赛
+[700336] vs [700335]
+奥勒松   v  维京   (0 - 0)
+大 3 / 3.5 @ 0.93
+
+￥：12000"""
+
+
+class TelegramSignalParserTest(unittest.TestCase):
+    def test_parses_live_handicap_signal(self) -> None:
+        from hdzz.core.telegram_signal.parser import parse_telegram_bet_signal
+
+        signal = parse_telegram_bet_signal(HANDICAP_SIGNAL)
+
+        self.assertEqual(signal["monitor"], "10215c")
+        self.assertEqual(signal["member"], "cpb3k")
+        self.assertEqual(signal["order_id"], "24929088407")
+        self.assertEqual(signal["date"], "07-26-2026")
+        self.assertEqual(signal["time"], "13:32:24")
+        self.assertEqual(signal["sport"], "足球")
+        self.assertEqual(signal["mode"], "live")
+        self.assertEqual(signal["bet_type"], "(滚球) 让球")
+        self.assertEqual(signal["market"], "handicap")
+        self.assertEqual(signal["league"], "斯洛伐克超级联赛")
+        self.assertEqual(signal["home_number"], "701356")
+        self.assertEqual(signal["away_number"], "701355")
+        self.assertEqual(signal["home"], "拜斯迪卡")
+        self.assertEqual(signal["away"], "布拉迪斯拉发")
+        self.assertEqual(signal["score_home"], 0)
+        self.assertEqual(signal["score_away"], 2)
+        self.assertEqual(signal["selection"], "布拉迪斯拉发")
+        self.assertEqual(signal["line_text"], "-0.5 / 1")
+        self.assertEqual(signal["line"], "布拉迪斯拉发 -0.5 / 1")
+        self.assertAlmostEqual(signal["line_value"], -0.75)
+        self.assertEqual(signal["odds"], "0.99")
+        self.assertEqual(signal["amount"], 5270.0)
+
+    def test_parses_live_total_signal(self) -> None:
+        from hdzz.core.telegram_signal.parser import parse_telegram_bet_signal
+
+        signal = parse_telegram_bet_signal(TOTAL_SIGNAL)
+
+        self.assertEqual(signal["market"], "total_over")
+        self.assertEqual(signal["selection"], "大")
+        self.assertEqual(signal["line_text"], "3 / 3.5")
+        self.assertEqual(signal["line"], "大 3 / 3.5")
+        self.assertAlmostEqual(signal["line_value"], 3.25)
+        self.assertEqual(signal["home_number"], "700336")
+        self.assertEqual(signal["away_number"], "700335")
+        self.assertEqual(signal["amount"], 12000.0)
+
+    def test_accepts_crlf_and_ascii_amount_prefix(self) -> None:
+        from hdzz.core.telegram_signal.parser import parse_telegram_bet_signal
+
+        text = HANDICAP_SIGNAL.replace("\n", "\r\n").replace("￥：5270", "¥: 5,270")
+        signal = parse_telegram_bet_signal(text)
+
+        self.assertEqual(signal["amount"], 5270.0)
+        self.assertEqual(signal["order_id"], "24929088407")
+
+    def test_rejects_unrelated_group_message(self) -> None:
+        from hdzz.core.telegram_signal.parser import SignalParseError, parse_telegram_bet_signal
+
+        with self.assertRaisesRegex(SignalParseError, "unsupported_signal"):
+            parse_telegram_bet_signal("今晚比赛大家注意风险")
+
+    def test_rejects_missing_amount(self) -> None:
+        from hdzz.core.telegram_signal.parser import SignalParseError, parse_telegram_bet_signal
+
+        text = HANDICAP_SIGNAL.replace("￥：5270", "")
+        with self.assertRaisesRegex(SignalParseError, "missing_amount"):
+            parse_telegram_bet_signal(text)
+
+
+if __name__ == "__main__":
+    unittest.main()
