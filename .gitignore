@@ -18,6 +18,9 @@ app/data/*
 !app/data/*.example.json
 app/data_test_webui/
 data/
+# Tauri 前端源码中的 data 目录不是生产运行数据
+!experiments/hd-push-tauri-preview/src/data/
+!experiments/hd-push-tauri-preview/src/data/**
 *.log
 *.jsonl
 

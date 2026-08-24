@@ -29,7 +29,7 @@ import { MetricCard } from "./components/MetricCard";
 import { OrderDrawer } from "./components/OrderDrawer";
 import { OrderTable } from "./components/OrderTable";
 import { Sidebar, type PageId } from "./components/Sidebar";
-import { getDashboardSnapshot, setPushEngine } from "./data/dashboard";
+import { getDashboardSnapshot, isTauriRuntime, setPushEngine } from "./data/dashboard";
 import type { DashboardSnapshot, OrderStatus, PushOrder } from "./types";
 
 const pageTitles: Record<PageId, { eyebrow: string; title: string; subtitle: string }> = {
@@ -151,7 +151,12 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [lastRefresh, setLastRefresh] = useState("刚刚更新");
 
-  useEffect(() => { getDashboardSnapshot().then(setSnapshot); }, []);
+  useEffect(() => {
+    // The Tauri shell redirects to the real Python WebUI. Never render the
+    // preview snapshot as a desktop fallback while that connection is pending.
+    if (isTauriRuntime()) return;
+    getDashboardSnapshot().then(setSnapshot);
+  }, []);
 
   const visibleOrders = useMemo(() => {
     if (!snapshot) return [];
@@ -169,7 +174,7 @@ export function App() {
     setLastRefresh("刚刚更新");
   };
 
-  if (!snapshot) return <main className="loading-screen"><span className="loading-mark"><Zap size={20} /></span><strong>正在连接推送终端</strong></main>;
+  if (!snapshot) return <main className="loading-screen"><span className="loading-mark"><Zap size={20} /></span><strong>{isTauriRuntime() ? "正在连接正式 WebUI" : "正在连接推送终端"}</strong><small>{isTauriRuntime() ? "Python backend 启动后将自动打开业务页面" : "正在加载预览数据"}</small></main>;
 
   const page = pageTitles[activePage];
   return (
