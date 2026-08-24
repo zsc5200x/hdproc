@@ -184,6 +184,12 @@ test('keeps the public top navigation at one size across views', () => {
   assert.doesNotMatch(redesign, /body\[data-view="orders"\]\s+\.tn-(?:logo|name|nav|item)\s*\{/);
 });
 
+test('exposes a safe Tauri drag region without covering public controls', () => {
+  assert.match(page, /<div class="tn-drag-region" data-tauri-drag-region aria-hidden="true"><\/div>/);
+  assert.match(redesign, /#topnav \.tn-drag-region\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0;[\s\S]*?z-index:\s*0;/);
+  assert.match(redesign, /#topnav > \.tn-brand,[\s\S]*?#topnav > \.tn-right\s*\{[\s\S]*?position:\s*relative;[\s\S]*?z-index:\s*1;/);
+});
+
 test('notifies the embedded strategy queue so hidden views stop polling', () => {
   const queueScript = fs.readFileSync(path.join(root, 'app/webui/chashui/queue.js'), 'utf8');
 
