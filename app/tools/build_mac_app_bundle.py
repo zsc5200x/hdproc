@@ -12,7 +12,7 @@ from macos_icon import APP_ICON_NAME, ensure_app_icon_icns
 
 DEFAULT_BUNDLE_NAME = "AG Matrix"
 DEFAULT_BUNDLE_ID = "com.hdproc.agmatrix"
-DEFAULT_VERSION = "0.1.0"
+DEFAULT_VERSION = "1.0.0"
 PAYLOAD_DIRNAME = "app_payload"
 INCLUDED_TOP_LEVEL = ("app", "scripts", "src", "ook", "README_PORTABLE.txt")
 EXCLUDED_RELATIVE_PREFIXES = (
