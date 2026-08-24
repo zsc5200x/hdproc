@@ -1,12 +1,12 @@
 [package]
-name = "hd-push-terminal-preview"
+name = "hd-follow-shell"
 version = "0.1.0"
-description = "HD sports push terminal Tauri preview"
+description = "HD跟单系统 macOS desktop shell"
 authors = ["HD Sports"]
 edition = "2021"
 
 [lib]
-name = "hd_push_terminal_preview_lib"
+name = "hd_follow_shell_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -14,5 +14,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tauri = { version = "2", features = [] }
-
+tauri-plugin-single-instance = "2.4.3"

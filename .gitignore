@@ -71,6 +71,10 @@ experiments/**/target/
 experiments/**/*.tsbuildinfo
 experiments/**/vite.config.js
 experiments/**/vite.config.d.ts
+experiments/hd-push-tauri-preview/src-tauri/resources/backend/hdzz-backend/
+experiments/hd-push-tauri-preview/src-tauri/resources/hdzz-backend/
+experiments/hd-push-tauri-preview/src-tauri/resources/_pyinstaller/
+experiments/hd-push-tauri-preview/src-tauri/resources/_browser-build/
 
 # 构建、发布和测试产物
 .build/
