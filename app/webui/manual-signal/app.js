@@ -193,8 +193,11 @@ async function checkMember() {
   if (!memberId()) throw new Error("请先登录会员");
   text("memberStatus", "正在检查心跳/会话");
   text("memberError", "正在确认会员会话是否可用");
-  const data = await fetchJson(`/api/chashui/status?member_id=${encodeURIComponent(memberId())}`);
-  const member = data.member || (Array.isArray(data.members) ? data.members.find((m) => String(m.id) === memberId()) : null);
+  // 手动信号页不再调用查水接口；只读本地会员池状态。
+  const data = await fetchJson("/api/arsenal");
+  const member = Array.isArray(data.members)
+    ? data.members.find((m) => String(m.id) === memberId())
+    : null;
   if (member) {
     state.member = { ...state.member, ...member };
     renderMember(state.member);
@@ -341,17 +344,7 @@ async function selectGameAndLoadOdds(game) {
 }
 
 async function loadGames() {
-  const currentMemberId = memberId();
-  if (!currentMemberId) throw new Error("请先登录会员");
-  const mode = selectedMode();
-  text("stMode", modeLabel(mode));
-  const data = await fetchJson(`/api/chashui/games?member_id=${encodeURIComponent(currentMemberId)}&mode=${encodeURIComponent(mode)}`);
-  state.games = Array.isArray(data.games) ? data.games : [];
-  state.selectedGame = null;
-  state.odds = null;
-  state.selectedPick = null;
-  renderGames();
-  renderSelection();
+  throw new Error("实时比赛查水已移除，请使用正式跟单 Snapshot 数据。");
 }
 
 async function loginMember() {
@@ -391,24 +384,7 @@ async function loginMember() {
 }
 
 async function loadOdds() {
-  const currentMemberId = memberId();
-  if (!currentMemberId) throw new Error("请先登录会员");
-  if (!state.selectedGame || !state.selectedGame.gid) throw new Error("请先选择比赛");
-  const mode = selectedMode();
-  text("stPush", "正在读取盘口 JSON");
-  const data = await fetchJson(
-    `/api/chashui/odds?member_id=${encodeURIComponent(currentMemberId)}&gid=${encodeURIComponent(state.selectedGame.gid)}&mode=${encodeURIComponent(mode)}&confirm=1&raw=1`
-  );
-  state.odds = data;
-  state.selectedPick = null;
-  renderSelection();
-  renderOdds();
-  const simple = data && data.simple ? data.simple : {};
-  const count =
-    (((simple.handicap || {}).lines || []).length || 0) +
-    (((simple.overUnder || {}).lines || []).length || 0) +
-    ((simple.moneyLine && !simple.moneyLine.empty) ? 1 : 0);
-  text("stPush", count ? "盘口读取成功" : "未读取到盘口，请稍后重试或切换盘口模式");
+  throw new Error("实时查水已移除，请使用正式跟单 Snapshot 数据。");
 }
 
 function makePick(kind, label, line, odd, extra = {}) {

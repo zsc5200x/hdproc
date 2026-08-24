@@ -80,6 +80,13 @@ def ensure_dirs() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    ensure_dirs()
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
 def read_pid_info() -> Optional[Dict[str, Any]]:
     if not PID_FILE.exists():
         return None
@@ -90,8 +97,7 @@ def read_pid_info() -> Optional[Dict[str, Any]]:
 
 
 def write_pid_info(payload: Dict[str, Any]) -> None:
-    ensure_dirs()
-    PID_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(PID_FILE, payload)
 
 
 def read_core_pid_info() -> Optional[Dict[str, Any]]:
@@ -104,8 +110,7 @@ def read_core_pid_info() -> Optional[Dict[str, Any]]:
 
 
 def write_core_pid_info(payload: Dict[str, Any]) -> None:
-    ensure_dirs()
-    CORE_PID_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(CORE_PID_FILE, payload)
 
 
 def read_follow_engine_pid_info() -> Optional[Dict[str, Any]]:
@@ -118,13 +123,11 @@ def read_follow_engine_pid_info() -> Optional[Dict[str, Any]]:
 
 
 def write_follow_engine_pid_info(payload: Dict[str, Any]) -> None:
-    ensure_dirs()
-    FOLLOW_ENGINE_PID_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(FOLLOW_ENGINE_PID_FILE, payload)
 
 
 def write_snapshot_watch_pid_info(payload: Dict[str, Any]) -> None:
-    ensure_dirs()
-    SNAPSHOT_WATCH_PID_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(SNAPSHOT_WATCH_PID_FILE, payload)
 
 
 def read_telegram_signal_pid_info() -> Optional[Dict[str, Any]]:
@@ -137,8 +140,7 @@ def read_telegram_signal_pid_info() -> Optional[Dict[str, Any]]:
 
 
 def write_telegram_signal_pid_info(payload: Dict[str, Any]) -> None:
-    ensure_dirs()
-    TELEGRAM_SIGNAL_PID_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(TELEGRAM_SIGNAL_PID_FILE, payload)
 
 
 def is_port_bindable(host: str, port: int) -> bool:
@@ -687,8 +689,13 @@ def start_all(host: str, port: int, backend_interval: int, member_interval: int)
         except Exception:
             pass
 
-    procs: List[subprocess.Popen] = []
-    for w in workers(host, port, backend_interval, member_interval):
+    snapshot_pids = _alive_snapshot_watch_pids()
+    launched: List[tuple[WorkerSpec, subprocess.Popen]] = []
+    worker_specs = workers(host, port, backend_interval, member_interval)
+    for w in worker_specs:
+        if w.name == "odds_snapshot_watch" and snapshot_pids:
+            print(f"[{now_iso()}] Reuse: odds_snapshot_watch PID={snapshot_pids[0]}")
+            continue
         out_path = LOG_DIR / f"{w.name}.out.log"
         err_path = LOG_DIR / f"{w.name}.err.log"
         cmd = build_worker_process_command(w)
@@ -713,19 +720,21 @@ def start_all(host: str, port: int, backend_interval: int, member_interval: int)
         if os.name != "nt":
             popen_kwargs["start_new_session"] = True
         p = subprocess.Popen(cmd, **popen_kwargs)
-        procs.append(p)
+        launched.append((w, p))
 
     payload = {
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "host": host,
         "port": int(port),
         "live": True,
-        "pids": [p.pid for p in procs],
+        "pids": [proc.pid for _spec, proc in launched] + snapshot_pids[:1],
     }
     write_pid_info(payload)
     try:
         started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        for spec, proc in zip(workers(host, port, backend_interval, member_interval), procs):
+        if snapshot_pids:
+            write_snapshot_watch_pid_info({"recovered_at": started_at, "live": True, "pids": snapshot_pids[:1]})
+        for spec, proc in launched:
             if spec.name == "odds_snapshot_watch":
                 write_snapshot_watch_pid_info({"started_at": started_at, "live": True, "pids": [proc.pid]})
             if spec.name == "follow_engine":
@@ -757,8 +766,13 @@ def start_core(backend_interval: int, member_interval: int) -> int:
         except Exception:
             pass
 
-    procs: List[subprocess.Popen] = []
-    for w in core_workers(backend_interval, member_interval):
+    snapshot_pids = _alive_snapshot_watch_pids()
+    launched: List[tuple[WorkerSpec, subprocess.Popen]] = []
+    worker_specs = core_workers(backend_interval, member_interval)
+    for w in worker_specs:
+        if w.name == "odds_snapshot_watch" and snapshot_pids:
+            print(f"[{now_iso()}] Reuse(core): odds_snapshot_watch PID={snapshot_pids[0]}")
+            continue
         out_path = LOG_DIR / f"{w.name}.out.log"
         err_path = LOG_DIR / f"{w.name}.err.log"
         cmd = build_worker_process_command(w)
@@ -782,13 +796,19 @@ def start_core(backend_interval: int, member_interval: int) -> int:
         if os.name != "nt":
             popen_kwargs["start_new_session"] = True
         p = subprocess.Popen(cmd, **popen_kwargs)
-        procs.append(p)
+        launched.append((w, p))
 
-    payload = {"started_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "live": True, "pids": [p.pid for p in procs]}
+    payload = {
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "live": True,
+        "pids": [proc.pid for _spec, proc in launched] + snapshot_pids[:1],
+    }
     write_core_pid_info(payload)
     try:
         started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        for spec, proc in zip(core_workers(backend_interval, member_interval), procs):
+        if snapshot_pids:
+            write_snapshot_watch_pid_info({"recovered_at": started_at, "live": True, "pids": snapshot_pids[:1]})
+        for spec, proc in launched:
             if spec.name == "odds_snapshot_watch":
                 write_snapshot_watch_pid_info({"started_at": started_at, "live": True, "pids": [proc.pid]})
             if spec.name == "follow_engine":
@@ -806,7 +826,45 @@ def _alive_worker_pids(info: Optional[Dict[str, Any]]) -> List[int]:
     return [pid for pid in pids if is_pid_running(pid) and _is_probably_hdydf_worker_pid(int(pid))]
 
 
-def _merge_follow_engine_pid(pids: List[int]) -> List[int]:
+def _pid_command_line(pid: int) -> str:
+    if os.name == "nt":
+        return str(_windows_get_process_info(pid).get("cmd") or "")
+    try:
+        out = subprocess.check_output(
+            ["ps", "-p", str(int(pid)), "-o", "command="],
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        return out.decode("utf-8", "ignore").strip()
+    except Exception:
+        return ""
+
+
+def _alive_snapshot_watch_pids() -> List[int]:
+    seen = set()
+    out: List[int] = []
+    for path in (SNAPSHOT_WATCH_PID_FILE, CORE_PID_FILE, PID_FILE):
+        try:
+            obj = json.loads(path.read_text(encoding="utf-8-sig") or "{}")
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        for raw_pid in obj.get("pids") or []:
+            try:
+                pid = int(raw_pid)
+            except (TypeError, ValueError):
+                continue
+            if pid in seen or not is_pid_running(pid):
+                continue
+            seen.add(pid)
+            command = _pid_command_line(pid).lower()
+            if "odds_snapshot_watch.py" in command or "--hdzz-worker odds_snapshot_watch" in command:
+                out.append(pid)
+    return out
+
+
+def _merge_dedicated_worker_pids(pids: List[int]) -> List[int]:
     merged: List[int] = []
     seen = set()
     for pid in list(pids):
@@ -818,6 +876,16 @@ def _merge_follow_engine_pid(pids: List[int]) -> List[int]:
     follow_info = read_follow_engine_pid_info()
     if isinstance(follow_info, dict):
         for raw_pid in (follow_info.get("pids") or []):
+            pid_i = int(raw_pid)
+            if pid_i not in seen:
+                seen.add(pid_i)
+                merged.append(pid_i)
+    try:
+        snapshot_info = json.loads(SNAPSHOT_WATCH_PID_FILE.read_text(encoding="utf-8-sig") or "{}")
+    except Exception:
+        snapshot_info = {}
+    if isinstance(snapshot_info, dict):
+        for raw_pid in snapshot_info.get("pids") or []:
             pid_i = int(raw_pid)
             if pid_i not in seen:
                 seen.add(pid_i)
@@ -1024,7 +1092,7 @@ def stop_all(force: bool) -> int:
     if not info:
         print(".run/pids.json not found (maybe not started by app.py/app.ps1/run_all.ps1).")
         return 1
-    pids = _merge_follow_engine_pid([int(x) for x in (info.get("pids") or [])])
+    pids = _merge_dedicated_worker_pids([int(x) for x in (info.get("pids") or [])])
     if not pids:
         print("PID list is empty.")
         return 0
@@ -1118,7 +1186,7 @@ def stop_core(force: bool) -> int:
     if not info:
         print(".run/pids_core.json not found (core not started).")
         return 1
-    pids = _merge_follow_engine_pid([int(x) for x in (info.get("pids") or [])])
+    pids = _merge_dedicated_worker_pids([int(x) for x in (info.get("pids") or [])])
     if not pids:
         print("Core PID list is empty.")
         return 0

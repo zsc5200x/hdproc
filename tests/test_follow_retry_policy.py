@@ -25,6 +25,14 @@ def _mk_job(*, err: str = "") -> RetryJob:
 
 
 class TestFollowRetryPolicy(unittest.TestCase):
+    def test_optional_telemetry_float_accepts_a_fallback(self) -> None:
+        from hdzz.core.follower.engine import _to_float
+
+        self.assertEqual(_to_float(None, 17.5), 17.5)
+        self.assertEqual(_to_float("", 17.5), 17.5)
+        self.assertEqual(_to_float("not-a-number", 17.5), 17.5)
+        self.assertEqual(_to_float("12.25", 17.5), 12.25)
+
     def test_network_errors_are_classified_and_backed_off(self) -> None:
         from hdzz.core.follower.engine import extract_err_from_result, retry_delay_for_result
 
@@ -64,7 +72,156 @@ class TestFollowRetryPolicy(unittest.TestCase):
 
         self.assertTrue(is_retryable_follow_result(result))
 
-    def test_diagnostic_submitted_failure_does_not_resubmit(self) -> None:
+    def test_diagnostic_explicit_market_rejection_is_retryable(self) -> None:
+        from hdzz.core.follower.engine import (
+            _apply_market_submit_breaker,
+            _schedule_explicit_market_rejection_retry,
+            is_retryable_follow_result,
+        )
+
+        job = _mk_job()
+        job.order["_wait_for_snapshot_revision"] = 7
+        result = {
+            "ok": False,
+            "bet_context_mode": "diagnostic_order_view",
+            "snapshot_direct_submission": True,
+            "snapshot_direct_result_status": "MARKET_ERROR",
+            "error_code": "betError9487",
+            "ft_bet_request": {"p": "FT_bet", "gid": "g1"},
+            "ft_bet_raw_response": {"http_status": 200, "errormsg": "betError9487"},
+            "market_row_fingerprint": "fp-1",
+        }
+
+        self.assertFalse(_apply_market_submit_breaker(job, result, max_attempts=3, retry_delay_seconds=0.5))
+        self.assertTrue(result["market_submit_reject_retryable"])
+        self.assertTrue(is_retryable_follow_result(result))
+        self.assertTrue(_schedule_explicit_market_rejection_retry(job, result, now=200.0))
+        self.assertNotIn("_wait_for_snapshot_revision", job.order)
+        self.assertEqual(job.order["_market_reject_retry_not_before"], 200.5)
+        self.assertEqual(job.next_try_at, 200.5)
+
+    def test_explicit_market_rejection_stops_on_third_identical_rejection(self) -> None:
+        from hdzz.core.follower.engine import (
+            MARKET_SUBMIT_REJECTED,
+            _apply_market_submit_breaker,
+            is_retryable_follow_result,
+        )
+
+        job = _mk_job()
+
+        def rejection() -> dict:
+            return {
+                "ok": False,
+                "bet_context_mode": "diagnostic_order_view",
+                "snapshot_direct_submission": True,
+                "snapshot_direct_result_status": "MARKET_ERROR",
+                "error_code": "betError9487",
+                "ft_bet_request": {"p": "FT_bet", "gid": "g1"},
+                "ft_bet_raw_response": {
+                    "http_status": 200,
+                    "errormsg": "betError9487",
+                    "parsed_fields": {},
+                },
+                "market_row_fingerprint": "fp-1",
+            }
+
+        first = rejection()
+        self.assertFalse(_apply_market_submit_breaker(job, first, max_attempts=3, retry_delay_seconds=0.5))
+        self.assertEqual(first["market_submit_reject_count"], 1)
+        self.assertTrue(is_retryable_follow_result(first))
+
+        second = rejection()
+        self.assertFalse(_apply_market_submit_breaker(job, second, max_attempts=3, retry_delay_seconds=0.5))
+        self.assertEqual(second["market_submit_reject_count"], 2)
+        self.assertTrue(is_retryable_follow_result(second))
+
+        third = rejection()
+        self.assertTrue(_apply_market_submit_breaker(job, third, max_attempts=3, retry_delay_seconds=0.5))
+        self.assertEqual(third["market_submit_reject_count"], 3)
+        self.assertEqual(third["snapshot_direct_result_status"], MARKET_SUBMIT_REJECTED)
+        self.assertFalse(is_retryable_follow_result(third))
+
+    def test_explicit_market_rejection_change_starts_new_count_window(self) -> None:
+        from hdzz.core.follower.engine import _apply_market_submit_breaker
+
+        job = _mk_job()
+
+        def rejection(*, fingerprint: str, code: str) -> dict:
+            return {
+                "ok": False,
+                "snapshot_direct_submission": True,
+                "snapshot_direct_result_status": "MARKET_ERROR",
+                "error_code": code,
+                "ft_bet_request": {"p": "FT_bet", "gid": "g1"},
+                "ft_bet_raw_response": {"http_status": 200, "errormsg": code},
+                "market_row_fingerprint": fingerprint,
+            }
+
+        first = rejection(fingerprint="fp-1", code="betError9487")
+        second = rejection(fingerprint="fp-2", code="betError9487")
+        third = rejection(fingerprint="fp-2", code="betError000")
+        _apply_market_submit_breaker(job, first, max_attempts=3)
+        _apply_market_submit_breaker(job, second, max_attempts=3)
+        _apply_market_submit_breaker(job, third, max_attempts=3)
+
+        self.assertEqual(first["market_submit_reject_count"], 1)
+        self.assertEqual(second["market_submit_reject_count"], 1)
+        self.assertEqual(third["market_submit_reject_count"], 1)
+
+    def test_unknown_result_502_never_enters_explicit_rejection_retry(self) -> None:
+        from hdzz.core.follower.engine import (
+            _apply_market_submit_breaker,
+            _schedule_explicit_market_rejection_retry,
+            is_retryable_follow_result,
+        )
+
+        job = _mk_job()
+        result = {
+            "ok": False,
+            "bet_context_mode": "diagnostic_order_view",
+            "snapshot_direct_submission": True,
+            "snapshot_direct_result_status": "UNKNOWN_RESULT",
+            "error_code": "HTTPError",
+            "unknown_result": True,
+            "reconcile_pending": True,
+            "ft_bet_request": {"p": "FT_bet", "gid": "g1"},
+            "ft_bet_raw_response": {
+                "http_status": 502,
+                "errormsg": "",
+                "response_body": "Blocked",
+            },
+            "market_row_fingerprint": "fp-1",
+        }
+
+        self.assertFalse(_apply_market_submit_breaker(job, result, max_attempts=3))
+        self.assertNotIn("market_submit_reject_retryable", result)
+        self.assertFalse(_schedule_explicit_market_rejection_retry(job, result, now=200.0))
+        self.assertTrue(is_retryable_follow_result(result))
+        self.assertEqual(job.market_submit_reject_count, 0)
+
+    def test_explicit_rejection_with_nested_ticket_is_not_retryable(self) -> None:
+        from hdzz.core.follower.engine import _apply_market_submit_breaker
+
+        job = _mk_job()
+        result = {
+            "ok": False,
+            "snapshot_direct_submission": True,
+            "snapshot_direct_result_status": "MARKET_ERROR",
+            "error_code": "betError9487",
+            "ft_bet_request": {"p": "FT_bet", "gid": "g1"},
+            "ft_bet_raw_response": {
+                "http_status": 200,
+                "errormsg": "betError9487",
+                "parsed_fields": {"ticket_id": "ticket-1"},
+            },
+            "market_row_fingerprint": "fp-1",
+        }
+
+        self.assertFalse(_apply_market_submit_breaker(job, result, max_attempts=3))
+        self.assertNotIn("market_submit_reject_retryable", result)
+        self.assertEqual(job.market_submit_reject_count, 0)
+
+    def test_diagnostic_non_explicit_submitted_failure_does_not_resubmit(self) -> None:
         from hdzz.core.follower.engine import is_retryable_follow_result
 
         self.assertFalse(is_retryable_follow_result({
@@ -113,12 +270,38 @@ class TestFollowRetryPolicy(unittest.TestCase):
         self.assertTrue(all(job.parent_key == "source|order-1" for job in jobs))
         self.assertTrue(all(job.independent_split for job in jobs))
         self.assertTrue(all(job.next_try_at == 1000.0 for job in jobs))
+        self.assertIsNot(jobs[0].order, jobs[1].order)
+        for job in jobs[:2]:
+            job.order["_unknown_result_gid"] = f"gid-{job.split_index}"
+            job.order["_unknown_result_submitted_at"] = 123.0 + job.split_index
+
+        from hdzz.core.follower.engine import _clear_unknown_result_state
+
+        _clear_unknown_result_state(jobs[0])
+        self.assertNotIn("_unknown_result_gid", jobs[0].order)
+        self.assertEqual(jobs[1].order["_unknown_result_gid"], "gid-1")
+        self.assertEqual(jobs[1].order["_unknown_result_submitted_at"], 124.0)
 
         restored = retry_job_from_dict(retry_job_to_dict(jobs[1]), now_value=2000.0)
         self.assertIsNotNone(restored)
         self.assertEqual(restored.parent_key, "source|order-1")
         self.assertTrue(restored.independent_split)
         self.assertEqual(restored.split_index, 1)
+
+    def test_market_rejection_state_survives_retry_job_persistence(self) -> None:
+        from hdzz.core.follower.retry_scheduler import retry_job_from_dict, retry_job_to_dict
+
+        job = _mk_job()
+        job.market_submit_reject_fingerprint = "fp-1"
+        job.market_submit_reject_code = "betError9487"
+        job.market_submit_reject_count = 2
+
+        restored = retry_job_from_dict(retry_job_to_dict(job), now_value=200.0)
+
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.market_submit_reject_fingerprint, "fp-1")
+        self.assertEqual(restored.market_submit_reject_code, "betError9487")
+        self.assertEqual(restored.market_submit_reject_count, 2)
 
     def test_aggregate_independent_split_done_waits_and_collects_all_tickets(self) -> None:
         from hdzz.core.follower.retry_scheduler import aggregate_independent_split_done
@@ -248,6 +431,21 @@ class TestFollowRetryPolicy(unittest.TestCase):
         self.assertAlmostEqual(job.market_closed_wait_started_at, 100.0, places=6)
         self.assertAlmostEqual(job.market_closed_wait_deadline_at, 400.0, places=6)
         self.assertAlmostEqual(job.next_try_at, 101.0, places=6)
+
+        status, remain, next_delay = scheduler.schedule_wait_by_err(
+            job,
+            err="1X001",
+            now=150.0,
+            wait_max=300.0,
+            probe_seconds=1.0,
+        )
+
+        self.assertEqual(status, "scheduled")
+        self.assertAlmostEqual(remain, 250.0, places=6)
+        self.assertAlmostEqual(next_delay, 1.0, places=6)
+        self.assertAlmostEqual(job.market_closed_wait_started_at, 100.0, places=6)
+        self.assertAlmostEqual(job.market_closed_wait_deadline_at, 400.0, places=6)
+        self.assertAlmostEqual(job.next_try_at, 151.0, places=6)
 
     def test_schedule_wait_by_err_unsupported_is_immediate(self) -> None:
         scheduler = RetryScheduler()

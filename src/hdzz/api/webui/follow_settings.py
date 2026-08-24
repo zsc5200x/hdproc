@@ -94,6 +94,9 @@ def _sanitize_target_rules(v: Any) -> List[Dict[str, Any]]:
 
 FOLLOW_SETTINGS_DEFAULTS: Dict[str, Any] = {
     "enabled": False,
+    # None means a legacy config has not opted into the global switch yet.
+    # Once the UI saves the field, False explicitly means follow all markets.
+    "only_live": None,
     "mode": "fixed",
     "fixed_amount": 50,
     "ratio_percent": 100,
@@ -116,6 +119,8 @@ FOLLOW_SETTINGS_DEFAULTS: Dict[str, Any] = {
     "bet_context_mode": "disabled",
     "unknown_result_reconcile_max_seconds": 120,
     "unknown_result_reconcile_max_attempts": 5,
+    "market_reject_max_attempts": 3,
+    "market_reject_retry_delay_seconds": 0.5,
     "member_error_cooldown_seconds": 30,
     # 会员角色
     "allow_quote_members": False,
@@ -136,6 +141,13 @@ def ensure_follow_settings_defaults(doc: Dict[str, Any]) -> Dict[str, Any]:
         out = dict(doc)
         for k, v in FOLLOW_SETTINGS_DEFAULTS.items():
             out.setdefault(k, v)
+
+    # Keep the tri-state migration behavior documented above.  A boolean is
+    # the only value emitted by the current UI, while None preserves legacy
+    # per-target only_live rules until the user makes an explicit choice.
+    if out.get("only_live") not in (None, True, False):
+        value = str(out.get("only_live") or "").strip().lower()
+        out["only_live"] = value in {"1", "true", "yes", "on"} if value else None
 
     out["targets"] = _sanitize_target_rules(out.get("targets"))
     if not isinstance(out.get("members"), list):
@@ -177,6 +189,26 @@ def ensure_follow_settings_defaults(doc: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         out["unknown_result_reconcile_max_attempts"] = 5
     try:
+        raw_market_reject_attempts = out.get("market_reject_max_attempts")
+        if raw_market_reject_attempts is None or (
+            isinstance(raw_market_reject_attempts, str) and not raw_market_reject_attempts.strip()
+        ):
+            raw_market_reject_attempts = 3
+        out["market_reject_max_attempts"] = max(1, min(20, int(raw_market_reject_attempts)))
+    except Exception:
+        out["market_reject_max_attempts"] = 3
+    try:
+        raw_market_reject_delay = out.get("market_reject_retry_delay_seconds")
+        if raw_market_reject_delay is None or (
+            isinstance(raw_market_reject_delay, str) and not raw_market_reject_delay.strip()
+        ):
+            raw_market_reject_delay = 0.5
+        out["market_reject_retry_delay_seconds"] = max(
+            0.0, min(30.0, float(raw_market_reject_delay))
+        )
+    except Exception:
+        out["market_reject_retry_delay_seconds"] = 0.5
+    try:
         out["member_error_cooldown_seconds"] = max(0, min(600, int(out.get("member_error_cooldown_seconds") or 30)))
     except Exception:
         out["member_error_cooldown_seconds"] = 30
@@ -202,6 +234,14 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
     # 基础
     if "enabled" in incoming:
         out["enabled"] = bool(incoming.get("enabled"))
+    if "only_live" in incoming:
+        raw_only_live = incoming.get("only_live")
+        if raw_only_live is None:
+            out["only_live"] = None
+        elif isinstance(raw_only_live, str):
+            out["only_live"] = raw_only_live.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            out["only_live"] = bool(raw_only_live)
     if "mode" in incoming:
         out["mode"] = str(incoming.get("mode") or "fixed")
     if "fixed_amount" in incoming:
@@ -261,6 +301,18 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
             out["unknown_result_reconcile_max_attempts"] = max(1, min(100, int(incoming.get("unknown_result_reconcile_max_attempts") or 0)))
         except Exception:
             out["unknown_result_reconcile_max_attempts"] = 5
+    if "market_reject_max_attempts" in incoming:
+        try:
+            out["market_reject_max_attempts"] = max(1, min(20, int(incoming.get("market_reject_max_attempts") or 0)))
+        except Exception:
+            out["market_reject_max_attempts"] = 3
+    if "market_reject_retry_delay_seconds" in incoming:
+        try:
+            out["market_reject_retry_delay_seconds"] = max(
+                0.0, min(30.0, float(incoming.get("market_reject_retry_delay_seconds") or 0.0))
+            )
+        except Exception:
+            out["market_reject_retry_delay_seconds"] = 0.5
     if "member_error_cooldown_seconds" in incoming:
         try:
             out["member_error_cooldown_seconds"] = max(0, min(600, int(incoming.get("member_error_cooldown_seconds") or 0)))

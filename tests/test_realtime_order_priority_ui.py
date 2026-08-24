@@ -8,25 +8,22 @@ APP_JS = ROOT / "app" / "webui" / "app.js"
 
 
 class RealtimeOrderPriorityUITest(unittest.TestCase):
-    def test_page_brand_matches_hd_push_system(self) -> None:
+    def test_page_brand_matches_hd_follow_system(self) -> None:
         html = INDEX_HTML.read_text(encoding="utf-8")
-        app_js = APP_JS.read_text(encoding="utf-8")
 
-        self.assertIn("<title>HD 推送系统 — 实时订单终端</title>", html)
-        self.assertIn('class="sb-name">HD 推送系统</div>', html)
-        self.assertIn("HD 推送系统测试消息", app_js)
+        self.assertIn("<title>HD跟单系统 v1.0</title>", html)
+        self.assertIn('aria-label="HD跟单系统 v1.0"', html)
+        self.assertIn('<span class="tn-name">HD跟单系统</span>', html)
+        self.assertIn('<span class="tn-version">v1.0</span>', html)
 
-    def test_order_stream_precedes_collapsed_insights(self) -> None:
+    def test_order_stream_is_the_last_dashboard_panel(self) -> None:
         html = INDEX_HTML.read_text(encoding="utf-8")
 
         stream_pos = html.index('id="matches-grid"')
-        insights_pos = html.index('id="od-insights"')
-        self.assertLess(stream_pos, insights_pos)
-
-        toggle_start = html.index('id="od-toggle-charts"')
-        toggle = html[toggle_start:toggle_start + 260]
-        self.assertIn('aria-expanded="false"', toggle)
-        self.assertIn('展开分析', toggle)
+        queue_pos = html.index('data-view="queue"', stream_pos)
+        self.assertLess(stream_pos, queue_pos)
+        self.assertNotIn('id="od-insights"', html)
+        self.assertNotIn('id="od-toggle-charts"', html)
 
 
 if __name__ == "__main__":

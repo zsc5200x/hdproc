@@ -26,6 +26,6 @@ def test_parse_pay_link_result() -> None:
 
 def test_is_deposit_paid() -> None:
     assert is_deposit_paid({"data": {"status": 1, "type": "deposit"}}) is True
-    assert is_deposit_paid({"status": "success", "code": 10000}) is True
+    assert is_deposit_paid({"status": "success", "code": 10000}) is False
+    assert is_deposit_paid({"status": "success", "code": 10000, "type": "deposit"}) is True
     assert is_deposit_paid({"data": {"status": 0, "type": "deposit"}}) is False
-

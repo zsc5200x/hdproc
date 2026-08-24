@@ -10,6 +10,18 @@ if str(SRC) not in sys.path:
 
 
 class TestFollowTargetEnabled(unittest.TestCase):
+    def test_global_only_live_switch_overrides_target_rules(self) -> None:
+        from hdzz.core.follower.engine import target_only_live
+
+        target = "ccvv445566"
+        self.assertTrue(target_only_live({"only_live": True, "targets": [{"name": target, "only_live": False}]}, target))
+        self.assertFalse(target_only_live({"only_live": False, "targets": [{"name": target, "only_live": True}]}, target))
+
+    def test_legacy_missing_global_switch_keeps_target_rule(self) -> None:
+        from hdzz.core.follower.engine import target_only_live
+
+        self.assertTrue(target_only_live({"targets": [{"name": "legacy", "only_live": True}]}, "legacy"))
+
     def test_target_enabled_defaults_to_true(self) -> None:
         from hdzz.core.follower.engine import target_follow_enabled
 

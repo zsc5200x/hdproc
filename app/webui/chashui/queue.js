@@ -1,29 +1,13 @@
 let queueTimer = null;
 let statusTimer = null;
+let queueViewActive = true;
+let queuePageInitialized = false;
+let queuePageInitPromise = null;
+
+const EXECUTION_RESULTS_LIMIT = 300;
+const STATUS_REFRESH_MS = 10000;
 
 let lastOddByKey = new Map();
-let snapshotCache = new Map();
-let snapshotInflight = new Map();
-
-function createSemaphore(max) {
-  let active = 0;
-  const waiters = [];
-  const release = () => {
-    active = Math.max(0, active - 1);
-    const next = waiters.shift();
-    if (next) next();
-  };
-  return {
-    async acquire() {
-      if (active >= max) await new Promise((resolve) => waiters.push(resolve));
-      active += 1;
-      return release;
-    },
-  };
-}
-
-const snapshotSem = createSemaphore(4);
-
 let cardStateByKey = new Map();
 let lastRenderOrder = [];
 let lastMembersSnapshot = [];
@@ -32,8 +16,6 @@ let dashboardQueueItems = [];
 let dashboardTaskGroups = [];
 let dashboardResults = [];
 let dashboardCounts = {};
-let dashboardSnapshotByGame = new Map();
-let snapshotErrorByGame = new Map();
 let activeTaskFilter = 'all';
 let activeLogFilter = 'all';
 let activeLogSplit = 'all';
@@ -219,24 +201,7 @@ function parseOddNumber(v) {
   return n;
 }
 
-function decorateOdd(el, key, oddStr) {
-  if (!el) return;
-  const n = parseOddNumber(oddStr);
-  if (n == null) return;
-  const prev = lastOddByKey.has(key) ? lastOddByKey.get(key) : null;
-  if (prev != null && Number.isFinite(prev)) {
-    if (n > prev + 1e-6) {
-      el.classList.add('oddUp', 'oddFlash');
-    } else if (n < prev - 1e-6) {
-      el.classList.add('oddDown', 'oddFlash');
-    }
-  }
-  lastOddByKey.set(key, n);
-}
-
-function resetOddCache() {
-  lastOddByKey = new Map();
-}
+function resetOddCache() {}
 
 function getSelectedMemberId() {
   const sel = $('selMember');
@@ -321,26 +286,15 @@ function renderMembers(members, selectedId) {
 
 async function refreshMemberStatus() {
   try {
-    const mid = getSelectedMemberId();
-    const url = mid ? `/api/chashui/status?member_id=${encodeURIComponent(mid)}` : '/api/chashui/status';
-    const [arsenal, st] = await Promise.all([fetchJson('/api/arsenal'), fetchJson(url)]);
+    const arsenal = await fetchJson('/api/arsenal');
     const allMembers = Array.isArray(arsenal.members)
       ? arsenal.members
-      : Array.isArray(st.members)
-        ? st.members
-        : [];
+      : [];
     lastMembersSnapshot = allMembers.slice();
-    renderMembers(allMembers, st.member && st.member.id ? String(st.member.id) : mid);
+    renderMembers(allMembers, '');
     refreshAvailableMemberChips();
-    if (st.member) {
-      const label = st.member.label || st.member.username || st.member.id || '-';
-      const role = formatMemberRole(st.member.role);
-      const status = formatMemberStatus(st.member.status);
-      const roleText = role ? `【${role}】` : '';
-      const stText = status ? `（${status}）` : '';
-      setText('stQuoteMember', `查水账号：${label}${roleText}${stText}`);
-    }
-    if (st.server_time) setText('stServerTime', `服务器时间：${st.server_time}`);
+    setText('stQuoteMember', '跟单会员池：后台 Snapshot');
+    if (arsenal.server_time) setText('stServerTime', `服务器时间：${arsenal.server_time}`);
     renderMemberPool();
   } catch (e) {
     setErrBox(e.message || String(e));
@@ -658,182 +612,7 @@ function parseSignedSplitLineFromText(text) {
   return (aVal + bVal) / 2;
 }
 
-function buildPick({ label, line, odd, oddKey, isTarget }) {
-  const pick = document.createElement('div');
-  pick.className = isTarget ? 'pick targetPick' : 'pick';
-
-  const top = document.createElement('div');
-  top.className = 'pickTop';
-
-  const left = document.createElement('span');
-  left.textContent = label || '';
-
-  const right = document.createElement('span');
-  right.className = 'mono';
-  right.textContent = line || '';
-
-  top.appendChild(left);
-  top.appendChild(right);
-
-  const oddEl = document.createElement('div');
-  oddEl.className = 'odd mono';
-  oddEl.textContent = odd || '';
-  decorateOdd(oddEl, oddKey, odd);
-
-  pick.appendChild(top);
-  pick.appendChild(oddEl);
-  return pick;
-}
-
-function renderHandicap(box, lines, target, cardKey, sideOnly = false) {
-  box.innerHTML = '';
-  if (!Array.isArray(lines) || lines.length === 0) {
-    box.innerHTML = '<div class="hint">暂无让球盘口</div>';
-    return;
-  }
-  const wantWtype = baseWtype(target && target.wtype);
-  const wantLine = target && target.target_line_val != null ? Number(target.target_line_val) : null;
-  const wantSide = String(target && target.chose_team ? target.chose_team : '').toUpperCase();
-
-  for (const row of lines) {
-    const wrap = document.createElement('div');
-    wrap.className = 'pairRow';
-
-    const rowWtype = baseWtype(row.wtype);
-    const homeLineVal = parseSignedSplitLineFromText(row.home && row.home.line);
-    const awayLineVal = parseSignedSplitLineFromText(row.away && row.away.line);
-
-    const hitRow = wantWtype && rowWtype && wantWtype === rowWtype && wantLine != null;
-    const hitHome = hitRow && wantSide === 'H' && homeLineVal != null && Math.abs(homeLineVal - wantLine) < 1e-6;
-    const hitAway = hitRow && wantSide === 'C' && awayLineVal != null && Math.abs(awayLineVal - wantLine) < 1e-6;
-
-    const lkey = `${cardKey}|hc|H|${rowWtype}|${row.home.line || ''}`;
-    const rkey = `${cardKey}|hc|C|${rowWtype}|${row.away.line || ''}`;
-
-    if (!sideOnly || wantSide === 'H') {
-      wrap.appendChild(
-        buildPick({
-          label: row.home.team,
-          line: row.home.line,
-          odd: row.home.odd,
-          oddKey: lkey,
-          isTarget: hitHome,
-        })
-      );
-    }
-    if (!sideOnly || wantSide === 'C') {
-      wrap.appendChild(
-        buildPick({
-          label: row.away.team,
-          line: row.away.line,
-          odd: row.away.odd,
-          oddKey: rkey,
-          isTarget: hitAway,
-        })
-      );
-    }
-    if (!wrap.children.length) continue;
-    box.appendChild(wrap);
-  }
-}
-
-function renderOverUnder(box, lines, target, cardKey) {
-  box.innerHTML = '';
-  if (!Array.isArray(lines) || lines.length === 0) {
-    box.innerHTML = '<div class="hint">暂无大小盘口</div>';
-    return;
-  }
-  const wantWtype = baseWtype(target && target.wtype);
-  const wantLine = target && target.target_line_val != null ? Number(target.target_line_val) : null;
-  const isOver = target && target.is_over != null ? Boolean(target.is_over) : null;
-
-  for (const row of lines) {
-    const wrap = document.createElement('div');
-    const singleSide = isOver === true || isOver === false;
-    wrap.className = singleSide ? 'pairRow singleRow' : 'pairRow';
-
-    const rowWtype = baseWtype(row.wtype);
-    const baseLine = row.rawLine || (row.over && row.over.line) || (row.under && row.under.line) || '';
-    const rowVal = parseSplitLineAvg(baseLine);
-
-    const hitRow = wantWtype && rowWtype && wantWtype === rowWtype && wantLine != null && rowVal != null && Math.abs(rowVal - wantLine) < 1e-6;
-    const hitOver = hitRow && isOver === true;
-    const hitUnder = hitRow && isOver === false;
-
-    const lkey = `${cardKey}|ou|O|${rowWtype}|${baseLine}`;
-    const rkey = `${cardKey}|ou|U|${rowWtype}|${baseLine}`;
-
-    if (isOver !== false) {
-      wrap.appendChild(
-        buildPick({
-          label: row.over.label,
-          line: row.over.line,
-          odd: row.over.odd,
-          oddKey: lkey,
-          isTarget: hitOver,
-        })
-      );
-    }
-    if (isOver !== true) {
-      wrap.appendChild(
-        buildPick({
-          label: row.under.label,
-          line: row.under.line,
-          odd: row.under.odd,
-          oddKey: rkey,
-          isTarget: hitUnder,
-        })
-      );
-    }
-    box.appendChild(wrap);
-  }
-}
-
-function renderMoneyLine(box, moneyLine, target, cardKey) {
-  box.innerHTML = '';
-  if (!moneyLine || moneyLine.empty) {
-    box.innerHTML = '<div class="hint">暂无独赢盘口</div>';
-    return;
-  }
-
-  const wantWtype = baseWtype(target && target.wtype);
-  const wantSide = String(target && target.chose_team ? target.chose_team : '').toUpperCase();
-  const isMl = wantWtype && wantWtype.endsWith('M');
-
-  const wrap = document.createElement('div');
-  wrap.className = 'tripleRow';
-
-  wrap.appendChild(
-    buildPick({
-      label: moneyLine.home.team,
-      line: '',
-      odd: moneyLine.home.odd,
-      oddKey: `${cardKey}|ml|H`,
-      isTarget: isMl && wantSide === 'H',
-    })
-  );
-  wrap.appendChild(
-    buildPick({
-      label: moneyLine.draw.label,
-      line: '',
-      odd: moneyLine.draw.odd,
-      oddKey: `${cardKey}|ml|N`,
-      isTarget: isMl && wantSide === 'N',
-    })
-  );
-  wrap.appendChild(
-    buildPick({
-      label: moneyLine.away.team,
-      line: '',
-      odd: moneyLine.away.odd,
-      oddKey: `${cardKey}|ml|C`,
-      isTarget: isMl && wantSide === 'C',
-    })
-  );
-  box.appendChild(wrap);
-}
-
-function renderFollowMarketSnapshot(box, order, derived, simple, cardKey) {
+function renderFollowMarketSnapshot(box, order) {
   if (!box) return;
   box.innerHTML = '';
 
@@ -841,50 +620,6 @@ function renderFollowMarketSnapshot(box, order, derived, simple, cardKey) {
   original.className = 'followOriginal';
   original.textContent = `原单：${formatFollowMarketText(order)}`;
   box.appendChild(original);
-
-  if (!simple || typeof simple !== 'object') return;
-
-  const label = document.createElement('div');
-  label.className = 'followCurrentLabel';
-  label.textContent = '当前盘口';
-  box.appendChild(label);
-
-  const lines = document.createElement('div');
-  lines.className = 'followSnapshotLines lines';
-  const wantWtype = baseWtype(derived && derived.wtype);
-  if (wantWtype.endsWith('OU')) {
-    renderOverUnder(lines, simple.overUnder && simple.overUnder.lines, derived, cardKey);
-  } else if (wantWtype.endsWith('RE') || wantWtype.endsWith('R')) {
-    renderHandicap(lines, simple.handicap && simple.handicap.lines, derived, cardKey, true);
-  } else if (wantWtype.endsWith('M')) {
-    renderMoneyLine(lines, simple.moneyLine, derived, cardKey);
-  } else {
-    lines.innerHTML = '<div class="hint">当前玩法暂无盘口快照</div>';
-  }
-  box.appendChild(lines);
-}
-
-async function requestFollowSnapshot({ memberId, gid, mode }) {
-  const cacheKey = `${memberId}|${mode}|${gid}`;
-  const now = Date.now();
-  const cached = snapshotCache.get(cacheKey);
-  if (cached && now - cached.ts < 2200) return cached.data;
-  if (snapshotInflight.has(cacheKey)) return snapshotInflight.get(cacheKey);
-
-  const url = `/api/chashui/odds?member_id=${encodeURIComponent(memberId)}&gid=${encodeURIComponent(gid)}&mode=${encodeURIComponent(mode)}&confirm=0`;
-  const request = (async () => {
-    const release = await snapshotSem.acquire();
-    try {
-      const data = await fetchJson(url);
-      snapshotCache.set(cacheKey, { ts: Date.now(), data });
-      return data;
-    } finally {
-      release();
-    }
-  })()
-    .finally(() => snapshotInflight.delete(cacheKey));
-  snapshotInflight.set(cacheKey, request);
-  return request;
 }
 
 function formatTs(ts) {
@@ -1178,7 +913,10 @@ function buildExecutionTaskModels(items) {
       if (!taskStatus && !storedSplitTasks.length && declaredSplitCount > 1 && itemStatus === 'done') {
         status = splitDone > 0 && splitDone <= splitIndex ? 'waiting' : 'success';
       }
-      const failureReason = displayExecutionMessage(task.last_message || task.last_err || (result && (result.message || result.error_type)) || job.reason || job.last_message || order.last_result && (order.last_result.message || order.last_result.error_type));
+      const snapshotFailure = order.last_result && order.last_result.snapshot_failure_summary
+        ? String(order.last_result.snapshot_failure_summary)
+        : '';
+      const failureReason = displayExecutionMessage(task.last_message || task.last_err || (result && (result.message || result.error_type)) || job.reason || job.last_message || order.last_result && (order.last_result.message || order.last_result.error_type) || snapshotFailure);
       const errorCode = extractErrorCode({ last_err: task.last_err || job.last_err, last_message: failureReason });
       const resultOdd = result && (result.ioratio || result.bet_result_head && result.bet_result_head.ioratio);
       return {
@@ -1331,58 +1069,8 @@ function orderElapsedSeconds(row) {
   return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-function selectedTaskSnapshot(task) {
-  if (!task) return null;
-  return dashboardSnapshotByGame.get(`${task.mode}|${task.gid}`) || null;
-}
-
-function buildMarketSnapshotBadges(simple, derived) {
-  if (!simple || typeof simple !== 'object' || !derived) return [];
-  const wantWtype = snapshotMarketWtype(derived.wtype);
-  const wantLine = derived.target_line_val != null ? Number(derived.target_line_val) : null;
-  const wantSide = String(derived.chose_team || '').toUpperCase();
-  const out = [];
-
-  if (wantWtype === 'OU') {
-    const lines = simple.overUnder && Array.isArray(simple.overUnder.lines) ? simple.overUnder.lines : [];
-    const isOver = derived.is_over !== false;
-    for (const row of lines) {
-      if (!row || snapshotMarketWtype(row.wtype) !== 'OU') continue;
-      const pick = isOver ? row.over : row.under;
-      if (!pick) continue;
-      const line = pick.line || row.rawLine || '-';
-      const lineValue = parseSplitLineAvg(line);
-      out.push({
-        text: `${pick.label || (isOver ? '大' : '小')} ${line} @ ${pick.odd || '-'}`,
-        isTarget: wantLine != null && lineValue != null && Math.abs(lineValue - Math.abs(wantLine)) < 1e-6,
-      });
-    }
-    return out;
-  }
-
-  if (wantWtype && !wantWtype.endsWith('M')) {
-    const lines = simple.handicap && Array.isArray(simple.handicap.lines) ? simple.handicap.lines : [];
-    for (const row of lines) {
-      if (!row || snapshotMarketWtype(row.wtype) !== wantWtype) continue;
-      const pick = wantSide === 'C' ? row.away : row.home;
-      if (!pick) continue;
-      const line = pick.line || '-';
-      const lineValue = parseSignedSplitLineFromText(line);
-      out.push({
-        text: `${pick.team || ''} ${line} @ ${pick.odd || '-'}`.trim(),
-        isTarget: wantLine != null && lineValue != null && Math.abs(lineValue - wantLine) < 1e-6,
-      });
-    }
-  }
-  return out;
-}
-
 function marketLineBadges(task) {
-  const snapshot = selectedTaskSnapshot(task);
-  const simple = snapshot && snapshot.simple && typeof snapshot.simple === 'object' ? snapshot.simple : null;
-  if (simple && task && task.derived) return buildMarketSnapshotBadges(simple, task.derived);
-  const error = snapshotErrorByGame.get(`${task && task.mode ? task.mode : 'live'}|${task && task.gid ? task.gid : ''}`);
-  return error ? [{ text: `快照失败：${formatSnapshotError(error)}`, isTarget: false, isError: true }] : [];
+  return [];
 }
 
 function snapshotFreshness(task) {
@@ -1424,11 +1112,18 @@ function taskExecutionChain(task) {
 
 function taskMarketDisplay(task, odd) {
   const derived = task && task.derived ? task.derived : {};
+  const order = task && task.order && typeof task.order === 'object' ? task.order : {};
   const rawType = cleanBetTypeText(task && task.order && task.order.betType ? task.order.betType : '');
   const isOu = String(derived.wtype || '').toUpperCase().includes('OU') || /大\s*\/\s*小|大小/.test(rawType);
-  const direction = isOu ? (derived.is_over === false ? 'UNDER / 小' : 'OVER / 大') : (derived.chose_team === 'H' ? '主队' : derived.chose_team === 'C' ? '客队' : '独赢');
-  const line = derived.target_line_txt || (task && task.order && task.order.line ? String(task.order.line).replace(/^(大|小)\s*/,'') : '-');
-  return { type: isOu ? '全场大小球' : (rawType || '比赛盘口'), direction, line, odd: odd || '-' };
+  // The source order already contains the real team name and requested line.
+  // Do not replace it with generic “主队/客队”: a team name can contain
+  // digits, and the exact text is also the value used by the parser.
+  const sourceLine = String(order.display_line || order.line || '').trim();
+  const fallbackLine = derived.target_line_txt || '';
+  const direction = isOu
+    ? (sourceLine || (derived.is_over === false ? '小' : '大'))
+    : (sourceLine || fallbackLine || (derived.chose_team === 'H' ? '主队' : derived.chose_team === 'C' ? '客队' : '独赢'));
+  return { type: isOu ? '全场大小球' : (rawType || '比赛盘口'), direction, line: '', odd: odd || '-' };
 }
 
 function splitOrderMatch(match) {
@@ -1455,30 +1150,14 @@ function orderCardMarket(group) {
   const tasks = Array.isArray(group && group.tasks) ? group.tasks : [];
   const task = tasks.find((item) => item && item.status === 'success') || tasks[0] || null;
   if (!task) return { direction: '-', odd: '-' };
-  const snapshot = selectedTaskSnapshot(task);
-  const odd = extractCurrentOddFromSnapshot(snapshot && snapshot.simple, task.derived) || task.sourceOdd || '-';
+  const odd = task.sourceOdd || '-';
   const market = taskMarketDisplay(task, odd);
-  const direction = String(market.direction || '')
-    .split('/')
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .pop() || '-';
+  const direction = String(market.direction || '').trim() || '-';
   const line = String(market.line || '').trim();
   return {
     direction: [direction, line && line !== '-' ? line : ''].filter(Boolean).join(' '),
     odd: market.odd || '-',
   };
-}
-
-function shouldRequestTaskSnapshot(status, state, snapshotCtx, now = Date.now(), refreshMs = 2200) {
-  const normalized = String(status || '').toLowerCase();
-  if (!['job', 'pending', 'failed'].includes(normalized)) return false;
-  const previousCtx = state && String(state.lastFollowSnapshotCtx || '');
-  if (previousCtx !== String(snapshotCtx || '')) return true;
-  // Terminal failures are historical records: fetch once for diagnosis, then stop polling them.
-  if (normalized === 'failed') return false;
-  const lastAt = Number(state && state.lastFollowOddsAt || 0);
-  return !lastAt || now - lastAt >= refreshMs;
 }
 
 function memberExecutionStats(memberId) {
@@ -1625,17 +1304,20 @@ function renderOrderPool() {
     const matchMarkup = teams.separated
       ? `<div class="orderTeam homeTeam"><span>主队</span><strong title="${escapeHtml(teams.home)}">${escapeHtml(teams.home)}</strong></div><span class="orderVersus" aria-hidden="true">VS</span><div class="orderTeam awayTeam"><span>客队</span><strong title="${escapeHtml(teams.away)}">${escapeHtml(teams.away)}</strong></div>`
       : `<div class="orderTeam singleTeam"><span>比赛</span><strong title="${escapeHtml(teams.home)}">${escapeHtml(teams.home)}</strong></div>`;
+    const tagMarkup = [tags.market, tags.period, tags.mode]
+      .filter(Boolean)
+      .map((tag, index) => `<span class="orderTag ${index === 0 ? 'marketTag' : index === 1 ? 'periodTag' : 'modeTag'}">${escapeHtml(tag)}</span>`)
+      .join('');
     html.push(`
       <section class="orderGroup orderSummaryCard ${groupStatus}" data-order-key="${escapeHtml(group.key)}" aria-label="订单 #${escapeHtml(group.orderId)}">
         <header class="orderCardTop">
-          <div class="orderCardTitle"><span>订单</span><strong>#${escapeHtml(group.orderId)}</strong><i aria-hidden="true"></i><b>${taskCount} 单</b></div>
+          <div class="orderCardTitle">
+            <span>订单</span><strong>#${escapeHtml(group.orderId)}</strong><i aria-hidden="true"></i><b>${taskCount} 单</b>
+            <span class="orderCardTags" aria-label="订单玩法">${tagMarkup}</span>
+            <time class="orderCardTime" datetime="${escapeHtml(orderDate.replace(' ', 'T'))}"><i class="fa-regular fa-clock" aria-hidden="true"></i>${escapeHtml(orderDate)}</time>
+          </div>
           <span class="orderStatusBadge ${groupStatus}"><i class="fa-solid ${statusIcon(groupStatus)}" aria-hidden="true"></i>${orderStatusLabel(groupStatus)}</span>
         </header>
-        <div class="orderTagRow" aria-label="订单玩法">
-          <span class="orderTag marketTag">${escapeHtml(tags.market)}</span>
-          ${tags.period ? `<span class="orderTag periodTag">${escapeHtml(tags.period)}</span>` : ''}
-          ${tags.mode ? `<span class="orderTag modeTag">${escapeHtml(tags.mode)}</span>` : ''}
-        </div>
         <div class="orderMatchPanel ${teams.separated ? '' : 'singleMatch'}" aria-label="${escapeHtml(group.match)}">${matchMarkup}</div>
         <div class="orderMetricGrid" aria-label="订单摘要">
           <div><span>投注单数</span><strong class="countMetric">${taskCount} 单</strong></div>
@@ -1644,10 +1326,6 @@ function renderOrderPool() {
           <div><span>水位</span><strong class="oddsMetric">${escapeHtml(cardMarket.odd)}</strong></div>
           <div><span>状态</span><strong class="statusMetric ${groupStatus}"><i class="fa-solid ${statusIcon(groupStatus)}" aria-hidden="true"></i>${orderStatusLabel(groupStatus)}</strong></div>
         </div>
-        <footer class="orderCardFooter">
-          <div><i class="fa-regular fa-clock" aria-hidden="true"></i><span>下单时间</span><time datetime="${escapeHtml(orderDate.replace(' ', 'T'))}">${escapeHtml(orderDate)}</time></div>
-          <a class="orderDetailLink" href="/chashui/index.html" target="_blank" rel="noopener" aria-label="查看订单 #${escapeHtml(group.orderId)} 的盘口详情">查看详情<i class="fa-solid fa-chevron-right" aria-hidden="true"></i></a>
-        </footer>
       </section>`);
   }
   updateHtmlIfChanged(box, html.join(''), $('orderPool') || box);
@@ -1797,7 +1475,7 @@ async function refreshExecutionResults() {
   if (executionResultsRefreshInFlight) return executionResultsRefreshInFlight;
   const request = (async () => {
     try {
-      const data = await fetchJson('/api/follow-results?limit=1000');
+      const data = await fetchJson(`/api/follow-results?limit=${EXECUTION_RESULTS_LIMIT}`);
       dashboardResults = Array.isArray(data.results) ? data.results : [];
       renderExecutionCenter();
     } catch (error) {
@@ -1811,31 +1489,6 @@ async function refreshExecutionResults() {
     if (executionResultsRefreshInFlight === request) {
       executionResultsRefreshInFlight = null;
     }
-  }
-}
-
-function refreshActiveSnapshots() {
-  const memberId = getSelectedMemberId();
-  if (!memberId) return;
-  const seen = new Set();
-  const activeTasks = flattenExecutionTasks(dashboardTaskGroups).filter((task) => ['waiting', 'running', 'retry'].includes(task.status));
-  for (const task of activeTasks) {
-    if (!task.gid) continue;
-    const key = `${task.mode}|${task.gid}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    requestFollowSnapshot({ memberId, gid: task.gid, mode: task.mode })
-      .then((data) => {
-        dashboardSnapshotByGame.set(key, data || null);
-        snapshotErrorByGame.delete(key);
-        snapshotRevision += 1;
-        renderOrderPool();
-        renderPerformanceAndSnapshot();
-      })
-      .catch((error) => {
-        snapshotErrorByGame.set(key, error && error.message ? error.message : String(error || 'snapshot_failed'));
-        renderOrderPool();
-      });
   }
 }
 
@@ -1876,13 +1529,6 @@ function createOrderCardState(cardKey) {
   berr.className = 'badge err mono';
   berr.style.display = 'none';
   right.appendChild(berr);
-
-  const btn = document.createElement('a');
-  btn.className = 'btn btn-ghost btn-small';
-  btn.textContent = '单场查水';
-  btn.href = '/chashui/index.html';
-  btn.target = '_blank';
-  right.appendChild(btn);
 
   head.appendChild(left);
   head.appendChild(right);
@@ -2011,9 +1657,6 @@ function createOrderCardState(cardKey) {
     lastOddsSig: '',
     lastOddsAt: 0,
     lastSnapshotCtx: '',
-    lastFollowSnapshot: null,
-    lastFollowSnapshotCtx: '',
-    lastFollowOddsAt: 0,
   };
 }
 
@@ -2032,7 +1675,7 @@ function updateCardFromItem(st, it) {
 
   st.refs.title.textContent = formatMatchTitle(order);
   st.refs.sub.textContent = buildSubLine(order, derived);
-  renderFollowMarketSnapshot(st.refs.followMarket, order, derived, st.lastFollowSnapshot, it.key || '');
+  renderFollowMarketSnapshot(st.refs.followMarket, order);
 
   const errCode = extractErrorCode(job);
   if (job && errCode) {
@@ -2056,7 +1699,9 @@ function updateCardFromItem(st, it) {
   st.refs.detOrderId.textContent = order.orderId == null || order.orderId === '' ? '-' : String(order.orderId);
   st.refs.detGid.textContent = order.gid == null || order.gid === '' ? '-' : String(order.gid);
   st.refs.detErrorType.textContent = lastResult && lastResult.error_type ? String(lastResult.error_type) : '-';
-  st.refs.detErrorMsg.textContent = lastResult && lastResult.message ? displayExecutionMessage(lastResult.message) : '-';
+  st.refs.detErrorMsg.textContent = lastResult && (lastResult.message || lastResult.snapshot_failure_summary)
+    ? displayExecutionMessage(lastResult.message || lastResult.snapshot_failure_summary)
+    : '-';
   st.refs.detException.textContent = lastResult && lastResult.exception ? String(lastResult.exception) : '-';
   st.refs.detResponseHead.textContent = lastResult && lastResult.response_head ? String(lastResult.response_head) : '-';
 
@@ -2067,9 +1712,9 @@ function updateCardFromItem(st, it) {
     st.refs.metaSplit.textContent = `${Number(job.split_index || 0) + 1}/${job.split_count || 1}`;
     st.refs.metaAttempts.textContent = job.attempts == null ? '-' : String(job.attempts);
     st.refs.metaNext.textContent = job.next_try_at ? formatCountdown(job.next_try_at) : '-';
-    if (job.last_message && !errCode) {
+    if ((job.last_message || lastResult && lastResult.snapshot_failure_summary) && !errCode) {
       st.refs.metaHintItem.style.display = '';
-      st.refs.metaHint.textContent = displayExecutionMessage(job.last_message);
+      st.refs.metaHint.textContent = displayExecutionMessage(job.last_message || lastResult.snapshot_failure_summary);
     } else {
       st.refs.metaHintItem.style.display = 'none';
       st.refs.metaHint.textContent = '';
@@ -2222,33 +1867,6 @@ function renderQueue(items) {
     // 保持顺序（仅在顺序变化/新卡时 move；避免每秒移动 DOM 导致“跳动/闪烁”）
     if (needReorder || st.card.parentNode !== box) box.appendChild(st.card);
 
-    const status = String(it.status || '').toLowerCase();
-    const order = it.order || {};
-    const derived = order.derived || {};
-    const memberId = getSelectedMemberId();
-    const gid = order.gid ? String(order.gid) : '';
-    const mode = derived.mode ? String(derived.mode) : 'live';
-    const snapshotCtx = `${memberId}|${mode}|${gid}`;
-    if (memberId && gid && shouldRequestTaskSnapshot(status, st, snapshotCtx)) {
-      st.lastFollowOddsAt = Date.now();
-      st.lastFollowSnapshotCtx = snapshotCtx;
-      requestFollowSnapshot({ memberId, gid, mode })
-        .then((data) => {
-          if (!st || !st.card || st.card.dataset.key !== cardKey) return;
-          const simple = data && data.simple && typeof data.simple === 'object' ? data.simple : null;
-          if (!simple) return;
-          dashboardSnapshotByGame.set(`${mode}|${gid}`, data);
-          snapshotErrorByGame.delete(`${mode}|${gid}`);
-          st.lastFollowSnapshot = simple;
-          renderFollowMarketSnapshot(st.refs.followMarket, order, derived, simple, cardKey);
-          renderOrderPool();
-        })
-        .catch((error) => {
-          snapshotErrorByGame.set(`${mode}|${gid}`, error && error.message ? error.message : String(error || 'snapshot_failed'));
-          renderOrderPool();
-        });
-    }
-
   }
 
   // 清理已不存在的卡片
@@ -2294,7 +1912,6 @@ async function refreshQueueOnce() {
       setText('stLastUpdate', `本页刷新：${fmtNowTime()}`);
       setErrBox('-');
       renderExecutionCenter();
-      refreshActiveSnapshots();
     } catch (e) {
       setErrBox(e.message || String(e));
     }
@@ -2349,7 +1966,14 @@ function restartTimers() {
   queueTimer = null;
 
   const ms = Math.max(300, Math.min(10000, readNumber('inQueueRefresh', 1000)));
-  queueTimer = setInterval(refreshQueueOnce, ms);
+  queueTimer = setInterval(() => {
+    if (!queuePollingAllowed()) return;
+    if (!queuePageInitialized) {
+      ensureQueuePageStarted().catch((error) => setErrBox(error.message || String(error)));
+      return;
+    }
+    refreshQueueOnce();
+  }, ms);
 }
 
 function bindUi() {
@@ -2363,15 +1987,7 @@ function bindUi() {
   if (waitingSummary) waitingSummary.addEventListener('click', () => focusTaskTab('waiting'));
   if ($('btnRefreshNow')) $('btnRefreshNow').addEventListener('click', () => refreshQueueOnce());
   if ($('btnClearQueue')) $('btnClearQueue').addEventListener('click', () => clearFollowQueue());
-  $('selMember').addEventListener('change', async () => {
-    resetOddCache();
-    snapshotCache = new Map();
-    snapshotInflight = new Map();
-    dashboardSnapshotByGame = new Map();
-    snapshotErrorByGame = new Map();
-    await refreshMemberStatus();
-    await refreshQueueOnce();
-  });
+  resetOddCache();
   $('inQueueRefresh').addEventListener('change', () => restartTimers());
   $('inQueueRefresh').addEventListener('input', () => restartTimers());
   $('ckOnlyActive').addEventListener('change', () => renderExecutionCenter());
@@ -2443,16 +2059,71 @@ function bindUi() {
   if ($('btnResetConfig')) $('btnResetConfig').addEventListener('click', () => resetFollowSettingsToRecommended());
 }
 
+function detectQueueViewActive() {
+  try {
+    if (window.parent && window.parent !== window && window.parent.document?.body) {
+      return window.parent.document.body.dataset.view === 'queue';
+    }
+  } catch (_) {}
+  return queueViewActive;
+}
+
+function queuePollingAllowed() {
+  queueViewActive = detectQueueViewActive();
+  return queueViewActive && document.visibilityState !== 'hidden';
+}
+
+async function ensureQueuePageStarted() {
+  if (queuePageInitialized) return;
+  if (queuePageInitPromise) return queuePageInitPromise;
+  if (!queuePollingAllowed()) return;
+  queuePageInitPromise = (async () => {
+    await loadFollowSettings();
+    await refreshMemberStatus();
+    await Promise.all([refreshQueueOnce(), refreshExecutionResults()]);
+    queuePageInitialized = true;
+  })();
+  try {
+    await queuePageInitPromise;
+  } finally {
+    queuePageInitPromise = null;
+  }
+}
+
+function setQueueViewActive(active) {
+  queueViewActive = !!active;
+  if (queuePollingAllowed()) {
+    ensureQueuePageStarted().catch((error) => setErrBox(error.message || String(error)));
+  }
+}
+
 async function main() {
   bindUi();
-  await loadFollowSettings();
-  await refreshMemberStatus();
-  await Promise.all([refreshQueueOnce(), refreshExecutionResults()]);
+  queueViewActive = detectQueueViewActive();
 
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('message', (event) => {
+      if (window.location?.origin && event.origin && event.origin !== window.location.origin) return;
+      if (event.data?.type !== 'hdproc:queue-visibility') return;
+      setQueueViewActive(event.data.active);
+    });
+  }
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', () => {
+      if (queuePollingAllowed()) ensureQueuePageStarted().catch(() => {});
+    });
+  }
+
+  await ensureQueuePageStarted();
   statusTimer = setInterval(() => {
+    if (!queuePollingAllowed()) return;
+    if (!queuePageInitialized) {
+      ensureQueuePageStarted().catch((error) => setErrBox(error.message || String(error)));
+      return;
+    }
     refreshMemberStatus();
     refreshExecutionResults();
-  }, 4000);
+  }, STATUS_REFRESH_MS);
   restartTimers();
 }
 

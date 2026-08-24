@@ -5,11 +5,11 @@
 
 ---
 
-## 已落地（WebUI）：新增「查水」页面（只读盘口/水位）
+## 历史实现（已停用）：独立「查水」页面（只读盘口/水位）
 
 > 更新：2026-02-08
 
-- 入口：主 WebUI 顶部导航「查水」（在「弹药库」旁边），或直接访问 `/chashui/index.html`
+- 旧独立页面入口已移除；相关后端接口暂时保留供内部链路和诊断使用
 - 数据来源：复用弹药库 `app/data/arsenal.json` 的会话字段（`uid/ver/cookie/proxy/base_url`），不包含下注（不会调用 `p=FT_bet`）
 - 后端接口（由 `app/webui_server.py` 提供）：
   - `/api/chashui/status`：列出弹药库会员并回显会话信息（uid 脱敏）
@@ -24,9 +24,9 @@
 - 主 WebUI 顶部导航：原「查水」已替换为「跟单队列」视图（仍可新窗口打开）
 - 页面：`/chashui/queue.html`
   - 数据：读取 `app/data/follow_state.json` 的 `pending_orders/jobs`
-  - 查水：复用弹药库 quote 会员会话，调用 `/api/chashui/odds?member_id=...&gid=...` 拉取快照
-  - 高亮：按后台订单推导出的 `wtype + 目标盘口线 + 方向(大/小, 主/客)` 在卡片内标记目标 pick
-- 保留原「单 gid 查水」页：`/chashui/index.html`（用于手动监控/排查）
+  - 盘口：正式跟单统一使用后台 Snapshot，不再由队列页直连 `/api/chashui/odds`
+  - 展示：队列页展示原单与后台执行结果，不再渲染旧实时查水盘口
+- 原「单 gid 查水」页已移除，不再作为正式入口
 - 新增 API：`/api/follow-queue`（WebUI 队列页轮询用）
 
 ## 已落地（WebUI）：策略页新增「查水融合 / 提速」开关

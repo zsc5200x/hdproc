@@ -86,6 +86,11 @@ const REMOTE_SIGNAL_FILTER_TARGET = "__remote_signal_pull__";
 const MATCH_SEARCH_RETAINED_KEY = "hdproc.matchSearch.retained.v1";
 const MATCH_SEARCH_MODES = ["live", "today", "early"];
 const MATCH_ODDS_REFRESH_MS = 2000;
+const DEFAULT_FETCH_TIMEOUT_MS = 12000;
+const LIVE_CONTEXT_FETCH_TIMEOUT_MS = 6000;
+const ORDER_AUTO_REFRESH_MS = 10000;
+const STATUS_AUTO_REFRESH_MS = 10000;
+const LIVE_CONTEXT_REFRESH_MS = 30000;
 
 let addNodeFormState = null;
 let matchSearchDebounceTimer = null;
@@ -102,9 +107,15 @@ let matchEventRefreshing = false;
 let matchEventLastSnapshot = null;
 let matchRetainedRefreshInFlight = false;
 let refreshViewInFlight = false;
+let liveContextRefreshInFlight = false;
 let orderStreamReady = false;
+let orderRefreshSeq = 0;
+let lastOrderRefreshAt = 0;
+let lastLiveContextRefreshAt = 0;
 let realtimeOrderListRenderSignature = "";
 let orderModalReturnFocus = null;
+let pendingAccountDeleteConfirmation = null;
+let accountDeleteReturnFocus = null;
 const followFormTools = (typeof window !== "undefined" && window.HDFollowSettingsForm) || {};
 const followFormRenderGuard = typeof followFormTools.createFollowFormRenderGuard === "function"
   ? followFormTools.createFollowFormRenderGuard()
@@ -1099,9 +1110,7 @@ function renderAccountsSidebar() {
     });
     div.querySelector("[data-action='delete']").addEventListener("click", async (ev) => {
       ev.stopPropagation();
-      if (confirm(`确定要删除监控目标 ${accountLabel(a)} 吗？`)) {
-        await deleteAccount(String(a.name || ""), accountLabel(a));
-      }
+      await confirmDeleteAccount(String(a.name || ""), accountLabel(a));
     });
     wrap.appendChild(div);
   }
@@ -1745,7 +1754,7 @@ async function ensureReadLaneMember(lane, options = {}) {
   if (lanes[k] && lanes[k].memberId) params.set("member_id", lanes[k].memberId);
   const excludes = collectLaneExcludes(k);
   if (excludes.length) params.set("exclude_member_ids", excludes.join(","));
-  const data = await fetchJson(`/api/chashui/status?${params.toString()}`);
+  const data = await fetchJson("/api/arsenal");
   const members = Array.isArray(data.members) ? data.members : [];
   const selected = data.member || members.find((m) => String(m.status || "").toLowerCase() === "online") || members[0];
   if (!selected || !selected.id) throw new Error("没有可用拉数据会员，请先在号池管理里保持至少一个拉数据用账号在线。");
@@ -1758,121 +1767,14 @@ async function ensureReadLaneMember(lane, options = {}) {
 }
 
 async function searchHgMatches() {
-  const query = String(state.matchSearch.query || "").trim();
-  const seq = ++matchSearchRequestSeq;
-  if (!query) {
-    state.matchSearch.results = [];
-    state.matchSearch.error = "";
-    state.matchSearch.loading = false;
-    resetReadLaneMembers();
-    renderOrdersView();
-    return;
-  }
-
-  state.matchSearch.loading = true;
-  state.matchSearch.error = "";
+  state.matchSearch.results = [];
+  state.matchSearch.loading = false;
+  state.matchSearch.error = "实时比赛查水已移除，请以正式跟单 Snapshot 为准。";
   renderOrdersView();
-
-  try {
-    const memberId = await ensureMatchSearchMember();
-    const mode = String(state.matchSearch.mode || "all").trim().toLowerCase();
-    const modes = mode === "all" ? MATCH_SEARCH_MODES : [mode || "live"];
-    const orderSearchContext = buildHgOrderSearchContext(state.orders, query);
-    const settled = await Promise.allSettled(
-      modes.map(async (m) => {
-        const data = await fetchJson(`/api/chashui/games?member_id=${encodeURIComponent(memberId)}&mode=${encodeURIComponent(m)}`);
-        if (data && data.readonly_member) setLaneMember("games", data.readonly_member);
-        const rows = filterHgSearchGames(data.games || [], query, orderSearchContext).map((game) => normalizeHgSearchGame(game, {
-          mode: data.mode || m,
-          memberId: String((data.readonly_member && data.readonly_member.id) || memberId || "").trim(),
-          memberLabel: String((data.readonly_member && data.readonly_member.label) || state.matchSearch.memberLabel || "").trim(),
-          matchedOrderId: orderSearchContext.matchedOrderId,
-          teamIds: orderSearchContext.teamIds,
-        }));
-        return rows;
-      })
-    );
-    if (seq !== matchSearchRequestSeq) return;
-    const summary = matchSearchTools && typeof matchSearchTools.collectHgSearchSettledResults === "function"
-      ? matchSearchTools.collectHgSearchSettledResults(settled)
-      : { rows: [], error: "比赛搜索失败", warning: "" };
-    if (summary.error) throw new Error(summary.error);
-    state.matchSearch.results = summary.rows.slice(0, 24);
-    if (summary.warning) console.warn(summary.warning);
-    state.matchSearch.retained = mergeRetainedHgMatches(state.matchSearch.retained, state.matchSearch.results);
-    saveRetainedHgMatches();
-  } catch (e) {
-    if (seq !== matchSearchRequestSeq) return;
-    state.matchSearch.results = [];
-    state.matchSearch.error = e && e.message ? e.message : String(e || "比赛搜索失败");
-  } finally {
-    if (seq === matchSearchRequestSeq) {
-      state.matchSearch.loading = false;
-      renderOrdersView();
-    }
-  }
 }
 
-async function refreshRetainedHgMatches(options = {}) {
-  const retained = Array.isArray(state.matchSearch.retained) ? state.matchSearch.retained : [];
-  if (!retained.length || matchRetainedRefreshInFlight) return false;
-  matchRetainedRefreshInFlight = true;
-  try {
-    const memberId = await ensureMatchSearchMember();
-    const modes = Array.from(new Set(retained
-      .map((row) => String(row && row.mode || "live").trim().toLowerCase())
-      .filter((mode) => mode === "live" || mode === "today" || mode === "early")));
-    if (!modes.length) modes.push("live");
-
-    const updates = [];
-    const updatedKeys = new Set();
-    const successfulModes = new Set();
-    const settled = await Promise.allSettled(modes.map(async (mode) => {
-      const data = await fetchJson(`/api/chashui/games?member_id=${encodeURIComponent(memberId)}&mode=${encodeURIComponent(mode)}`);
-      if (data && data.readonly_member) setLaneMember("games", data.readonly_member);
-      successfulModes.add(data.mode || mode);
-      return (Array.isArray(data.games) ? data.games : []).map((game) => normalizeHgSearchGame(game, {
-        mode: data.mode || mode,
-        memberId: String((data.readonly_member && data.readonly_member.id) || memberId || "").trim(),
-        memberLabel: String((data.readonly_member && data.readonly_member.label) || state.matchSearch.memberLabel || "").trim(),
-      }));
-    }));
-
-    for (const item of settled) {
-      if (item.status !== "fulfilled") continue;
-      for (const row of item.value || []) {
-        if (!row || !row.key) continue;
-        updates.push(row);
-        updatedKeys.add(row.key);
-      }
-    }
-    if (!updates.length && !successfulModes.size) return false;
-
-    let next = mergeRetainedHgMatches(retained, updates);
-    const liveChecked = successfulModes.has("live");
-    if (liveChecked) {
-      next = next.map((row) => {
-        if (!row || row.mode !== "live" || updatedKeys.has(row.key)) return row;
-        return Object.assign({}, row, {
-          statusLine: "已结束",
-          statusText: "已结束",
-          isEnded: true,
-          isRunningClock: false,
-          capturedAt: Date.now(),
-        });
-      });
-    }
-
-    state.matchSearch.retained = next;
-    saveRetainedHgMatches();
-    if (options.render !== false && state.view === "orders") renderOrdersView();
-    return true;
-  } catch (e) {
-    console.warn("retained match refresh failed:", e);
-    return false;
-  } finally {
-    matchRetainedRefreshInFlight = false;
-  }
+async function refreshRetainedHgMatches() {
+  return false;
 }
 
 function scheduleHgMatchSearch() {
@@ -2364,91 +2266,8 @@ function stopHgMatchEventRefresh() {
   matchEventRequestSeq += 1;
 }
 
-async function fetchHgMatchOddsSnapshot(model, options = {}) {
-  const memberId = await ensureReadLaneMember("odds");
-  const gid = model.gid || model.eventId;
-  if (!gid) throw new Error("当前比赛缺少 gid，无法读取盘口。");
-  const mode = model.mode || "live";
-  const confirm = options.confirm === false ? "0" : "1";
-  const url = `/api/chashui/odds?member_id=${encodeURIComponent(memberId)}&gid=${encodeURIComponent(gid)}&mode=${encodeURIComponent(mode)}&confirm=${confirm}&raw=0`;
-  const data = await fetchJson(url);
-  if (!data || data.ok === false) throw new Error((data && data.message) || "盘口读取失败");
-  if (data && data.readonly_member) setLaneMember("odds", data.readonly_member);
-  return data;
-}
-
 async function fetchHgMatchEventSnapshot(model) {
-  const memberId = await ensureReadLaneMember("events");
-  const marketMode = model.mode || "live";
-  const eventMode = matchEventLastSnapshot && matchEventLastSnapshot.timeline ? "delta" : "full";
-  const matchId = String(model.mtId || model.eventMatchId || (model.raw && (model.raw.MT_ID || model.raw.mtId)) || "").trim();
-  const gid = String(model.gid || model.eventId || "").trim();
-  const params = new URLSearchParams({
-    member_id: memberId,
-    mode: eventMode,
-    market_mode: marketMode,
-  });
-  if (matchId) params.set("match_id", matchId);
-  else if (gid) params.set("gid", gid);
-  else throw new Error(formatHgEventErrorMessage("missing_match_id"));
-
-  let response;
-  try {
-    response = await fetch(`/api/chashui/events?${params.toString()}`, { cache: "no-store" });
-  } catch {
-    throw new Error("网络请求失败：请确认后台服务正在运行，稍后刷新。");
-  }
-  const text = await response.text().catch(() => "");
-  let data = null;
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = null;
-    }
-  }
-  if (!response.ok || !data || data.ok === false) {
-    const message = data && data.message ? data.message : (text || `HTTP ${response.status}`);
-    throw new Error(formatHgEventErrorMessage(message));
-  }
-  if (data && data.readonly_member) setLaneMember("events", data.readonly_member);
-  return data;
-}
-
-async function refreshHgMatchOdds(model, options = {}) {
-  const token = hgOddsToken(model);
-  if (!matchOddsActiveToken || token !== matchOddsActiveToken || matchOddsRefreshing) return;
-  const seq = ++matchOddsRequestSeq;
-  matchOddsRefreshing = true;
-  if (options.first && !matchOddsLastSnapshot) {
-    renderHgMatchModalContent(model, "盘口信息", { loading: true, snapshot: null, error: "" });
-  }
-  try {
-    const snapshot = await fetchHgMatchOddsSnapshot(model);
-    if (token !== matchOddsActiveToken || seq !== matchOddsRequestSeq) return;
-    matchOddsLastSnapshot = snapshot;
-    renderHgMatchModalContent(model, "盘口信息", { loading: false, snapshot, error: "" });
-  } catch (e) {
-    if (token !== matchOddsActiveToken || seq !== matchOddsRequestSeq) return;
-    renderHgMatchModalContent(model, "盘口信息", {
-      loading: false,
-      snapshot: matchOddsLastSnapshot,
-      error: e && e.message ? e.message : String(e || "盘口读取失败"),
-    });
-  } finally {
-    if (token === matchOddsActiveToken) matchOddsRefreshing = false;
-  }
-}
-
-function startHgMatchOddsRefresh(model) {
-  stopHgMatchEventRefresh();
-  stopHgMatchOddsRefresh();
-  matchOddsActiveToken = hgOddsToken(model);
-  renderHgMatchModalContent(model, "盘口信息", { loading: true, snapshot: null, error: "" });
-  refreshHgMatchOdds(model, { first: true }).catch(() => {});
-  matchOddsRefreshTimer = window.setInterval(() => {
-    refreshHgMatchOdds(model).catch(() => {});
-  }, MATCH_ODDS_REFRESH_MS);
+  throw new Error("实时比赛事件查水已移除，请以正式跟单 Snapshot 为准。");
 }
 
 async function refreshHgMatchEvent(model, options = {}) {
@@ -2492,11 +2311,11 @@ function startHgMatchEventRefresh(model) {
   stopHgMatchOddsRefresh();
   stopHgMatchEventRefresh();
   matchEventActiveToken = hgEventToken(model);
-  renderHgMatchModalContent(model, "比赛事件", { loading: true, snapshot: null, error: "" });
-  refreshHgMatchEvent(model, { first: true }).catch(() => {});
-  matchEventRefreshTimer = window.setInterval(() => {
-    refreshHgMatchEvent(model).catch(() => {});
-  }, MATCH_ODDS_REFRESH_MS);
+  renderHgMatchModalContent(model, "比赛事件", {
+    loading: false,
+    snapshot: null,
+    error: "实时比赛事件查水已移除，请以正式跟单 Snapshot 为准。",
+  });
 }
 
 function showOrderDetailModal(mode = "drawer") {
@@ -2521,7 +2340,8 @@ function openHgMatchModal(match, group = "比赛详情") {
     title.innerHTML = `<i class="fa-solid fa-futbol"></i><span>${escapeHtml(group)}</span>${group === "盘口信息" || group === "比赛事件" ? `<span class="hg-title-live-dot" title="数据实时更新中"></span>` : ""}`;
   }
   if (group === "盘口信息") {
-    startHgMatchOddsRefresh(model);
+    stopHgMatchOddsRefresh();
+    renderHgMatchModalContent(model, group, { error: "实时查水已移除；正式跟单使用后台 Snapshot。" });
   } else if (group === "比赛事件") {
     startHgMatchEventRefresh(model);
   } else {
@@ -2821,7 +2641,8 @@ function openModal(order, group = "注单详情") {
   }
   if (group === "盘口信息") {
     const hgModel = buildHgModelFromOrder(order, model);
-    startHgMatchOddsRefresh(hgModel);
+    stopHgMatchOddsRefresh();
+    renderHgMatchModalContent(hgModel, group, { error: "实时查水已移除；正式跟单使用后台 Snapshot。" });
     if ($("modal-pre")) $("modal-pre").textContent = JSON.stringify(order, null, 2);
     showOrderDetailModal();
     return;
@@ -2992,6 +2813,126 @@ function bindMemberModalControls() {
   modal.dataset.memberModalBound = "true";
 }
 
+function setAccountDeleteDialogBusy(busy) {
+  const confirmButton = $("account-delete-confirm");
+  const cancelButton = $("account-delete-cancel");
+  const closeButton = $("modal-account-delete-close");
+  const label = $("account-delete-confirm-label");
+  const icon = confirmButton?.querySelector("i");
+  const status = $("account-delete-status");
+  const isBusy = !!busy;
+  if (confirmButton) {
+    confirmButton.disabled = isBusy;
+    confirmButton.setAttribute("aria-busy", String(isBusy));
+  }
+  if (cancelButton) cancelButton.disabled = isBusy;
+  if (closeButton) closeButton.disabled = isBusy;
+  if (label) label.textContent = isBusy ? "删除中..." : "确认删除";
+  if (icon) icon.className = `fa-solid ${isBusy ? "fa-spinner" : "fa-trash-can"}`;
+  if (status) status.textContent = isBusy ? "正在删除监控账号，请稍候。" : "";
+}
+
+function hideAccountDeleteConfirmationDialog() {
+  const modal = $("modal-account-delete");
+  if (modal) {
+    modal.classList.remove("show");
+    modal.setAttribute("aria-hidden", "true");
+  }
+  setAccountDeleteDialogBusy(false);
+  const returnTarget = accountDeleteReturnFocus;
+  accountDeleteReturnFocus = null;
+  window.requestAnimationFrame(() => {
+    if (returnTarget && returnTarget.isConnected) {
+      returnTarget.focus({ preventScroll: true });
+    } else {
+      $("btn-add-monitor")?.focus({ preventScroll: true });
+    }
+  });
+}
+
+function closeAccountDeleteConfirmation(confirmed = false) {
+  const pending = pendingAccountDeleteConfirmation;
+  if (!pending) {
+    if ($("account-delete-confirm")?.getAttribute("aria-busy") !== "true") {
+      hideAccountDeleteConfirmationDialog();
+    }
+    return;
+  }
+  pendingAccountDeleteConfirmation = null;
+  if (confirmed) {
+    setAccountDeleteDialogBusy(true);
+    pending.resolve(true);
+    return;
+  }
+  pending.resolve(false);
+  hideAccountDeleteConfirmationDialog();
+}
+
+function finishAccountDeleteConfirmation() {
+  pendingAccountDeleteConfirmation = null;
+  hideAccountDeleteConfirmationDialog();
+}
+
+function requestAccountDeleteConfirmation(label) {
+  const modal = $("modal-account-delete");
+  if (!modal || $("account-delete-confirm")?.getAttribute("aria-busy") === "true") {
+    return Promise.resolve(false);
+  }
+  if (pendingAccountDeleteConfirmation) closeAccountDeleteConfirmation(false);
+  const active = document.activeElement;
+  accountDeleteReturnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
+  if ($("account-delete-name")) $("account-delete-name").textContent = String(label || "未命名账号");
+  modal.classList.add("show");
+  modal.setAttribute("aria-hidden", "false");
+  return new Promise((resolve) => {
+    pendingAccountDeleteConfirmation = { resolve };
+    window.requestAnimationFrame(() => $("account-delete-cancel")?.focus({ preventScroll: true }));
+  });
+}
+
+async function confirmDeleteAccount(name, label) {
+  if (!name || !(await requestAccountDeleteConfirmation(label))) return false;
+  try {
+    return await deleteAccount(name, label);
+  } finally {
+    finishAccountDeleteConfirmation();
+  }
+}
+
+function bindAccountDeleteDialogControls() {
+  const modal = $("modal-account-delete");
+  if (!modal || modal.dataset.accountDeleteBound === "true") return;
+  $("modal-account-delete-close")?.addEventListener("click", () => closeAccountDeleteConfirmation(false));
+  $("account-delete-cancel")?.addEventListener("click", () => closeAccountDeleteConfirmation(false));
+  $("account-delete-confirm")?.addEventListener("click", () => closeAccountDeleteConfirmation(true));
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) closeAccountDeleteConfirmation(false);
+  });
+  modal.addEventListener("keydown", (event) => {
+    if (!modal.classList.contains("show")) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeAccountDeleteConfirmation(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(modal.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )).filter((element) => element.getClientRects().length > 0);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  modal.dataset.accountDeleteBound = "true";
+}
+
 function escapeHtml(s) {
   return String(s || "")
     .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -3066,22 +3007,37 @@ function renderAddNodeModal() {
 }
 
 // ── Fetch helper ───────────────────────────────────────────────
-async function fetchJson(url, init) {
-  let r;
-  try {
-    r = await fetch(url, { cache: "no-store", ...init });
-  } catch {
-    throw new Error("网络请求失败：请确认后台服务正在运行，稍后刷新。");
+async function fetchJson(url, init, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS) {
+  const options = { cache: "no-store", ...(init || {}) };
+  const controller = typeof AbortController === "function" && !options.signal
+    ? new AbortController()
+    : null;
+  let timeoutId = null;
+  if (controller) {
+    options.signal = controller.signal;
+    timeoutId = window.setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || DEFAULT_FETCH_TIMEOUT_MS));
   }
-  const text = await r.text().catch(() => "");
+  let r;
+  let responseText = "";
+  try {
+    r = await fetch(url, options);
+    responseText = await r.text().catch(() => "");
+  } catch (error) {
+    if (controller && controller.signal.aborted) {
+      throw new Error("请求超时：后台数据源响应过慢，请稍后重试。");
+    }
+    throw new Error("网络请求失败：请确认后台服务正在运行，稍后刷新。");
+  } finally {
+    if (timeoutId != null) window.clearTimeout(timeoutId);
+  }
   if (!r.ok) {
-    const detail = text ? `：${text.slice(0, 200)}` : "";
+    const detail = responseText ? `：${responseText.slice(0, 200)}` : "";
     throw new Error(`请求失败（HTTP ${r.status}）${detail}`);
   }
   try {
-    return JSON.parse(text);
+    return JSON.parse(responseText);
   } catch {
-    throw new Error(`响应格式错误：${text.slice(0, 200) || "空响应"}`);
+    throw new Error(`响应格式错误：${responseText.slice(0, 200) || "空响应"}`);
   }
 }
 
@@ -3151,17 +3107,34 @@ async function reloginAccount(name, label, successMessage) {
 }
 
 async function deleteAccount(name, label) {
-  if (!name) return;
+  if (!name) return false;
   try {
     const data = await fetchJson("/api/accounts/delete", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     });
     if (!data.ok) throw new Error(data.message || "delete_failed");
-    await loadAccounts();
+    state.accounts = state.accounts.filter((account) => String(account?.name || "") !== String(name));
+    if (state.selectedTarget === String(name)) state.selectedTarget = "";
+    if (state.poolSelection.kind === "monitor" && state.poolSelection.id === String(name)) {
+      state.poolSelection = { kind: "", id: "" };
+    }
+    delete state.statuses[String(name)];
+    renderAccountsSidebar();
+    renderAccountSelect();
+    renderTradingNodeKpi();
+    if (state.view === "arsenal") renderPoolManagement();
+    try {
+      await loadAccounts();
+    } catch (refreshError) {
+      toast(`账号已删除，但列表刷新失败: ${String(refreshError?.message || refreshError)}`, "warning");
+      return true;
+    }
     toast(`已删除账号: ${label}`, "success");
+    return true;
   } catch (e) {
     toast(`删除失败: ${String(e && e.message ? e.message : e)}`, "error");
+    return false;
   }
 }
 
@@ -3963,8 +3936,7 @@ function renderLegacyMonitorSourceCard(source) {
       renderMonitorPool();
       return;
     }
-    if (confirm(`确定要删除监控目标 ${source.label} 吗？`)) {
-      await deleteAccount(source.id, source.label);
+    if (await confirmDeleteAccount(source.id, source.label)) {
       renderMonitorPool();
     }
   });
@@ -4235,10 +4207,9 @@ function renderMonitorSourceCard(source) {
     event.stopPropagation();
     if (source.kind === "signal") {
       await deleteSignalSource(source.rawItem);
-    } else if (confirm(`确定要删除监控目标 ${source.label} 吗？`)) {
-      await deleteAccount(source.id, source.label);
+    } else if (await confirmDeleteAccount(source.id, source.label)) {
+      renderPoolManagement();
     }
-    renderPoolManagement();
   });
   return article;
 }
@@ -4742,6 +4713,7 @@ function bindFollowFormDirtyTracking() {
     "follow-max-odds",
     "follow-split-count",
     "follow-split-delay",
+    "follow-only-live",
   ].forEach((id) => {
     const el = $(id);
     if (!el) return;
@@ -4813,6 +4785,7 @@ function renderFollowForm(options = {}) {
     if ($("follow-market-limit")) $("follow-market-limit").value = String(s.market_limit_amount ?? 0);
     if ($("follow-split-count")) $("follow-split-count").value = String(s.split_count ?? 1);
     setFollowSplitDelayValue(s.split_delay_seconds);
+    setFollowOnlyLiveValue(s.only_live);
     applyFollowMode();
 
     // 反单规则
@@ -4845,6 +4818,27 @@ function setRevBtn(id, active) {
   btn.setAttribute("aria-pressed", active ? "true" : "false");
   const stateEl = btn.querySelector(".rev-btn-state");
   if (stateEl) stateEl.textContent = active ? "已开启" : "关闭";
+}
+
+function setFollowOnlyLiveValue(value) {
+  const enabled = value === true || ["1", "true", "yes", "on"].includes(String(value ?? "").trim().toLowerCase());
+  const button = $("follow-only-live");
+  const container = $("follow-live-filter");
+  if (button) {
+    button.setAttribute("aria-pressed", enabled ? "true" : "false");
+    button.title = enabled
+      ? "已开启：只执行滚球跟单；早盘订单仍接收并记录"
+      : "已关闭：早盘和滚球订单都会接收并执行跟单";
+    const label = button.querySelector(".follow-live-toggle-label");
+    if (label) label.textContent = enabled ? "已开启" : "关闭";
+  }
+  if (container) container.dataset.active = enabled ? "true" : "false";
+  const status = $("follow-only-live-status");
+  if (status) status.textContent = enabled ? "已开启" : "关闭";
+  const hint = $("follow-only-live-hint");
+  if (hint) hint.textContent = enabled
+    ? "早盘订单仍会接收并记录，但不会执行跟单"
+    : "早盘和滚球订单都会接收并执行跟单";
 }
 
 // 玩法比例渲染
@@ -5158,6 +5152,7 @@ function setFollowSplitDelayValue(value) {
 
 function getFollowFormData() {
   const enabled     = true;
+  const onlyLive    = $("follow-only-live")?.getAttribute("aria-pressed") === "true";
   const mode        = getFollowModeValue();
   const fixedAmount = parseFloat(($("follow-fixed")?.value || "0").trim()) || 0;
   const ratioPercent= parseFloat(($("follow-ratio")?.value || "0").trim()) || 0;
@@ -5228,7 +5223,7 @@ function getFollowFormData() {
   const follow_max_odds = maxOddsRaw === "" ? null : (parseFloat(maxOddsRaw) || 0);
 
   return {
-    enabled, mode, fixed_amount: fixedAmount, ratio_percent: ratioPercent,
+    enabled, only_live: onlyLive, mode, fixed_amount: fixedAmount, ratio_percent: ratioPercent,
     max_amount: maxAmount, match_limit_amount: matchLimitAmount, market_limit_amount: marketLimitAmount,
     split_count: splitCount, split_delay_seconds: splitDelay,
     follow_min_odds, follow_max_odds,
@@ -5854,7 +5849,7 @@ async function fetchFollowQueueItemsForOrders() {
 
 async function fetchFollowResultsForOrders() {
   try {
-    const data = await fetchJson("/api/follow-results?limit=1000");
+    const data = await fetchJson("/api/follow-results?limit=500");
     const rows = Array.isArray(data.results) ? data.results : [];
     setOrderFollowResults(rows);
     return rows;
@@ -5952,35 +5947,14 @@ function applyOrderEventSnapshotsForDisplay(orders) {
 }
 
 async function enrichOrdersWithLiveMatches(orders) {
-  if (!orderRealtimeTools || typeof orderRealtimeTools.applyLiveMatchSnapshotsToOrders !== "function") {
-    return Array.isArray(orders) ? orders : [];
-  }
-  const rows = Array.isArray(orders) ? orders : [];
-  const liveRows = rows.filter((row) => getOrderRealtimeMode(row) === "live");
-  const wantedGids = new Set(liveRows.map(getOrderRealtimeGid).filter(Boolean));
-  if (!wantedGids.size) return rows;
-
-  try {
-    const memberId = await ensureMatchSearchMember();
-    const games = [];
-    const data = await fetchJson(`/api/chashui/games?member_id=${encodeURIComponent(memberId)}&mode=live`);
-    for (const game of Array.isArray(data.games) ? data.games : []) {
-      games.push(Object.assign({}, game, { mode: data.mode || "live" }));
-    }
-    return orderRealtimeTools.applyLiveMatchSnapshotsToOrders(rows, games, {
-      memberId,
-      memberLabel: state.matchSearch.memberLabel,
-    });
-  } catch (e) {
-    console.warn("live order match refresh failed:", e);
-    return rows;
-  }
+  return Array.isArray(orders) ? orders : [];
 }
 
 async function refreshView(options = {}) {
   const manual = !!(options && options.manual);
   if (refreshViewInFlight) return;
   refreshViewInFlight = true;
+  const refreshSeq = ++orderRefreshSeq;
   const btn = $("btn-refresh");
   const blocking = !orderStreamReady && !state.orders.length && canShowOrderStreamState();
   if (blocking) renderOrderStreamSkeleton();
@@ -5997,20 +5971,13 @@ async function refreshView(options = {}) {
     ]);
     mergeTerminalQueueFollowRows(queueItems, followRows);
     const mergedOrders = mergeFollowQueueOrdersForDisplay(data.orders || [], queueItems);
-    state.orders = applyOrderEventSnapshotsForDisplay(await enrichOrdersWithLiveMatches(mergedOrders));
-    await refreshRetainedHgMatches({ render: false });
-    renderOrdersView();
-    loadReportMetrics().catch(() => {});
-    await loadArsenal();
-    await loadStatuses();
-    renderAccountsSidebar();
-    if (state.view === "arsenal") renderPoolManagement();
-    if (state.view === "follow-settings" || state.view === "system-center") {
-      await loadFollowSettings();
-      renderFollowForm();
-    }
+    state.orders = applyOrderEventSnapshotsForDisplay(mergedOrders);
     orderStreamReady = true;
+    lastOrderRefreshAt = Date.now();
+    renderOrdersView();
     updateStreamMeta();
+    loadReportMetrics().catch(() => {});
+    refreshOrderLiveContext(state.orders, refreshSeq).catch(() => {});
   } catch (e) {
     console.error("refreshView error:", e);
     if ((blocking || !state.orders.length) && canShowOrderStreamState()) {
@@ -6020,6 +5987,26 @@ async function refreshView(options = {}) {
   } finally {
     if (btn) btn.classList.remove("is-loading");
     refreshViewInFlight = false;
+  }
+}
+
+async function refreshOrderLiveContext(orders, refreshSeq) {
+  const rows = Array.isArray(orders) ? orders : [];
+  const now = Date.now();
+  if (!rows.length || liveContextRefreshInFlight || now - lastLiveContextRefreshAt < LIVE_CONTEXT_REFRESH_MS) return;
+  liveContextRefreshInFlight = true;
+  lastLiveContextRefreshAt = now;
+  try {
+    const enriched = await enrichOrdersWithLiveMatches(rows);
+    if (refreshSeq === orderRefreshSeq) {
+      state.orders = applyOrderEventSnapshotsForDisplay(enriched);
+      if (state.view === "orders") renderOrdersView();
+    }
+    if ((state.matchSearch.retained || []).length) {
+      await refreshRetainedHgMatches({ render: refreshSeq === orderRefreshSeq && state.view === "orders" });
+    }
+  } finally {
+    liveContextRefreshInFlight = false;
   }
 }
 
@@ -6158,6 +6145,24 @@ function applyViewVisibility() {
   }
 }
 
+function syncQueueFrameActivity(viewName = state.view) {
+  const frame = document.querySelector('.view[data-view="queue"] iframe');
+  if (!frame) return;
+  const notify = () => {
+    try {
+      frame.contentWindow?.postMessage(
+        { type: "hdproc:queue-visibility", active: viewName === "queue" },
+        window.location.origin,
+      );
+    } catch (_) {}
+  };
+  if (frame.dataset.queueActivityBound !== "true") {
+    frame.dataset.queueActivityBound = "true";
+    frame.addEventListener("load", () => syncQueueFrameActivity(state.view));
+  }
+  notify();
+}
+
 function setHeaderTitle(viewName) {
   const el = $("header-title");
   if (el) el.textContent = VIEW_TITLES[viewName] || viewName || "实时订单流";
@@ -6213,6 +6218,7 @@ function ensureViewData(viewName) {
   if (viewName === "system-center") {
     loadTelegramConfig().catch(() => {});
     loadFollowSettings().then(() => renderFollowForm()).catch(() => {});
+    loadStatuses().catch(() => {});
     if (typeof window.loadTelegramSignalPopup === "function") window.loadTelegramSignalPopup();
   }
   if (viewName === "telegram") loadTelegramConfig().catch(() => {});
@@ -6223,7 +6229,13 @@ function ensureViewData(viewName) {
   if (viewName === "follow-settings") {
     loadFollowSettings().then(() => renderFollowForm()).catch(() => {});
   }
-  if (viewName === "arsenal") renderPoolManagement();
+  if (viewName === "arsenal") {
+    renderPoolManagement();
+    Promise.allSettled([loadAccounts(), loadArsenal(), loadStatuses()]).then(() => renderPoolManagement());
+  }
+  if (viewName === "orders" && Date.now() - lastOrderRefreshAt > ORDER_AUTO_REFRESH_MS) {
+    refreshView().catch(() => {});
+  }
 }
 
 function activateView(viewName, options = {}) {
@@ -6231,6 +6243,7 @@ function activateView(viewName, options = {}) {
   state.view = viewName;
   if (document.body) document.body.dataset.view = viewName || "orders";
   applyViewVisibility();
+  syncQueueFrameActivity(viewName);
   if (syncNav) {
     document.querySelectorAll(".sb-nav-item, .sidebar-nav-item").forEach((b) => {
       const same = b.getAttribute("data-view") === viewName;
@@ -6241,6 +6254,8 @@ function activateView(viewName, options = {}) {
   ensureViewData(viewName);
   if (viewName === "system-center") renderSystemCenterStatusBar();
 }
+
+if (typeof window !== "undefined") window.activateView = activateView;
 
 // ── Init ───────────────────────────────────────────────────────
 async function loadInitial(opts = {}) {
@@ -6253,6 +6268,7 @@ async function loadInitial(opts = {}) {
   bindPoolTabs();
   bindAddNodeModalControls();
   bindMemberModalControls();
+  bindAccountDeleteDialogControls();
   bindOrderDashboardControls();
   bindExecutionRailControls();
   renderOrderDashboard();
@@ -6272,12 +6288,12 @@ async function loadInitial(opts = {}) {
   };
   updateTopnavClock();
   window.setInterval(updateTopnavClock, 1000);
-  await loadSignalPullConfig();
-  await loadAccounts();
-  await loadStatuses();
-  // Render the member pool independently before order enrichment. A slow
-  // live-odds request must not make the account pool appear empty.
-  await loadArsenal();
+  await Promise.allSettled([
+    loadSignalPullConfig(),
+    loadAccounts(),
+    loadStatuses(),
+    loadArsenal(),
+  ]);
   await refreshView();
 
   document.querySelectorAll(".top-config-btn[data-config-view]").forEach((btn) => {
@@ -6344,6 +6360,12 @@ async function loadInitial(opts = {}) {
   $("follow-mode")?.addEventListener("change", applyFollowMode);
   $("follow-split-delay")?.addEventListener("input", syncFollowSplitDelayOutput);
   $("follow-split-delay")?.addEventListener("change", syncFollowSplitDelayOutput);
+  $("follow-only-live")?.addEventListener("click", () => {
+    const button = $("follow-only-live");
+    const next = button?.getAttribute("aria-pressed") !== "true";
+    setFollowOnlyLiveValue(next);
+    markFollowFormDirty();
+  });
   bindFollowFormDirtyTracking();
   $("follow-save")?.addEventListener("click", saveFollowSettings);
   $("follow-refresh-settings")?.addEventListener("click", async () => {
@@ -6387,11 +6409,16 @@ async function loadInitial(opts = {}) {
 
   // Auto refresh
   setInterval(() => {
+    if (document.visibilityState === "hidden" || state.view !== "orders") return;
     const autoRefresh = $("auto");
     if (!autoRefresh || autoRefresh.checked) {
       refreshView().catch(() => {});
     }
-  }, 2000);
+  }, ORDER_AUTO_REFRESH_MS);
+  setInterval(() => {
+    if (document.visibilityState === "hidden") return;
+    loadStatuses().catch(() => {});
+  }, STATUS_AUTO_REFRESH_MS);
   setInterval(() => {
     if (state.view === "orders") updateVisibleMatchClocks();
   }, 1000);
@@ -6401,4 +6428,20 @@ async function loadInitial(opts = {}) {
   loadSignalPullConfig().catch(() => {});
 }
 
-window.addEventListener("DOMContentLoaded", () => { loadInitial(); });
+let initialLoadPromise = null;
+
+function startInitialLoad() {
+  if (!initialLoadPromise) {
+    initialLoadPromise = loadInitial().catch((error) => {
+      console.error("WebUI 初始化失败", error);
+      throw error;
+    });
+  }
+  return initialLoadPromise;
+}
+
+// app.js is loaded after the complete application markup. Start immediately so
+// controls are bound even when an iframe or optional visual resource is slow.
+if (typeof document !== "undefined" && typeof document.readyState === "string") {
+  startInitialLoad();
+}

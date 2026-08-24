@@ -621,3 +621,154 @@ body.queuePage { background: var(--ec-bg); }
   .orderGroup.orderSummaryCard,
   .orderDetailLink { transition: none; }
 }
+
+/* Dense order queue: keep the identifying context in one scan line so the
+   bounded workbench can show at least five orders without hiding the metrics. */
+.orderGroup.orderSummaryCard {
+  border-radius: 5px;
+}
+
+.orderCardTop {
+  min-height: 31px;
+  padding: 4px 9px;
+  gap: 8px;
+}
+
+.orderCardTitle {
+  gap: 6px;
+  flex: 1 1 auto;
+}
+
+.orderCardTitle span:first-child {
+  font-size: 10px;
+}
+
+.orderCardTitle strong {
+  font-size: 12px;
+}
+
+.orderCardTitle i {
+  height: 14px;
+}
+
+.orderCardTitle b {
+  font-size: 10px;
+}
+
+.orderCardTags {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.orderCardTags .orderTag {
+  min-height: 18px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 8px;
+}
+
+.orderCardTime {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ec-muted);
+  font: 500 8px var(--ec-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.orderCardTime i {
+  color: var(--ec-blue);
+  font-size: 9px;
+}
+
+.orderSummaryCard .orderStatusBadge {
+  min-height: 23px;
+  padding: 0 7px;
+  font-size: 8px;
+}
+
+.orderMatchPanel {
+  min-height: 39px;
+  padding: 4px 8px;
+  grid-template-columns: minmax(0, minmax(120px, 36%)) 30px minmax(0, minmax(120px, 36%));
+  justify-content: center;
+  gap: 5px;
+}
+
+.orderMatchPanel.singleMatch {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.orderTeam {
+  text-align: center;
+}
+
+.orderTeam span {
+  display: inline;
+  margin-right: 5px;
+  font-size: 7px;
+}
+
+.orderTeam strong {
+  display: inline;
+  margin-top: 0;
+  font-size: 11px;
+  vertical-align: baseline;
+}
+
+.orderVersus {
+  font-size: 11px;
+}
+
+.orderMetricGrid {
+  min-height: 43px;
+  padding: 4px 0;
+}
+
+.orderMetricGrid > div {
+  padding: 0 8px;
+}
+
+.orderMetricGrid span {
+  font-size: 7px;
+}
+
+.orderMetricGrid strong {
+  margin-top: 2px;
+  font-size: 10px;
+}
+
+.orderMetricGrid .countMetric,
+.orderMetricGrid .amountMetric {
+  font-size: 11px;
+}
+
+.orderMetricGrid .oddsMetric {
+  font-size: 13px;
+}
+
+/* The previous footer carried duplicate metadata and a removed 查水 action. */
+.orderCardFooter,
+.orderTagRow {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .orderCardTime {
+    display: none;
+  }
+
+  .orderCardTitle {
+    flex-wrap: wrap;
+  }
+
+  .orderMatchPanel {
+    grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr);
+  }
+}

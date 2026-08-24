@@ -13,6 +13,16 @@ if str(APP) not in sys.path:
 
 
 class TestFollowSettingsMerge(unittest.TestCase):
+    def test_global_only_live_switch_is_tri_state_and_saves_boolean(self) -> None:
+        from hdzz.api.webui.follow_settings import ensure_follow_settings_defaults, merge_follow_settings
+
+        legacy = ensure_follow_settings_defaults({"targets": [{"name": "legacy", "only_live": True}]})
+        self.assertIsNone(legacy["only_live"])
+        saved_off = merge_follow_settings(legacy, {"only_live": False})
+        self.assertIs(saved_off["only_live"], False)
+        saved_on = merge_follow_settings(saved_off, {"only_live": True})
+        self.assertIs(saved_on["only_live"], True)
+
     def test_merge_updates_only_explicit_fields(self) -> None:
         from hdzz.api.webui.follow_settings import merge_follow_settings
 
@@ -155,6 +165,23 @@ class TestFollowSettingsMerge(unittest.TestCase):
         self.assertEqual(enabled["bet_context_mode"], "diagnostic_order_view")
         disabled = merge_follow_settings({}, {"bet_context_mode": "legacy"})
         self.assertEqual(disabled["bet_context_mode"], "disabled")
+
+    def test_market_reject_retry_settings_preserve_explicit_zero_delay(self) -> None:
+        from hdzz.api.webui.follow_settings import ensure_follow_settings_defaults, merge_follow_settings
+
+        merged = merge_follow_settings(
+            {},
+            {
+                "market_reject_max_attempts": 0,
+                "market_reject_retry_delay_seconds": 0,
+            },
+        )
+        self.assertEqual(merged["market_reject_max_attempts"], 1)
+        self.assertEqual(merged["market_reject_retry_delay_seconds"], 0.0)
+
+        normalized = ensure_follow_settings_defaults(merged)
+        self.assertEqual(normalized["market_reject_max_attempts"], 1)
+        self.assertEqual(normalized["market_reject_retry_delay_seconds"], 0.0)
 
     def test_merge_market_rules(self) -> None:
         from hdzz.api.webui.follow_settings import merge_follow_settings

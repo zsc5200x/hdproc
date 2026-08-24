@@ -13,6 +13,46 @@ if str(APP) not in sys.path:
 
 
 class OddsSnapshotWatchTest(unittest.TestCase):
+    def test_global_only_live_keeps_early_orders_out_of_snapshot_demand(self) -> None:
+        import json
+        import odds_snapshot_watch as worker
+
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            orders_dir = root / "orders"
+            data_dir = root / "data"
+            orders_dir.mkdir()
+            data_dir.mkdir()
+            (data_dir / "follow_settings.json").write_text(
+                json.dumps({"only_live": True}), encoding="utf-8"
+            )
+            rows = [
+                {
+                    "ts": now, "orderId": "early-1", "gid": "early-gid",
+                    "market": "fu", "betType": "让球", "line": "主队 -0.5",
+                    "raw": {"_EVENT": "early-gid", "MARKET": "fu", "WAGERSTYPE": "让球"},
+                },
+                {
+                    "ts": now, "orderId": "live-1", "gid": "live-gid",
+                    "market": "rb", "betType": "(滚球) 让球", "line": "主队 -0.5",
+                    "raw": {"_EVENT": "live-gid", "MARKET": "rb", "WAGERSTYPE": "(滚球) 让球"},
+                },
+            ]
+            (orders_dir / "target.jsonl").write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+
+            demands = worker.collect_market_demands(
+                orders_dir=orders_dir,
+                state_path=data_dir / "follow_state.json",
+                now=now,
+                active_seconds=120,
+            )
+
+        self.assertEqual({item["gid"] for item in demands}, {"live-gid"})
+
     def test_flatten_active_markets_uses_exact_market_key(self) -> None:
         from odds_snapshot_watch import flatten_active_markets
 
@@ -135,7 +175,7 @@ class OddsSnapshotWatchTest(unittest.TestCase):
         self.assertEqual(demand["fixture_locator"]["team_c"], "戴戈福斯")
         self.assertEqual(demand["fixture_locator"]["gnum_h"], "701572")
 
-    def test_market_scheduler_detaches_expired_attempt_without_global_barrier(self) -> None:
+    def test_market_scheduler_keeps_expired_attempt_owned_until_it_finishes(self) -> None:
         import odds_snapshot_watch as worker
 
         slow = {
@@ -178,15 +218,65 @@ class OddsSnapshotWatchTest(unittest.TestCase):
                     scheduler.poll(now=0.13)
                     slow_state = scheduler.states["live|slow|FULL_TIME|TOTAL|UNDER|3.5"]
                     fast_state = scheduler.states["live|fast|FULL_TIME|TOTAL|OVER|2.5"]
-                    self.assertIsNone(slow_state.inflight)
+                    self.assertIsNotNone(slow_state.inflight)
                     self.assertIsNone(fast_state.inflight)
                     self.assertEqual(slow_state.consecutive_failures, 1)
-                    # The expired slow attempt does not hold the scheduler
-                    # barrier; a new due attempt can be launched immediately.
+                    first_attempt = slow_state.inflight
+                    # The timeout is recorded for diagnostics, but the same
+                    # market cannot submit a replacement while its socket is
+                    # still consuming an executor slot.
+                    # Another due market may use the free second slot.
                     scheduler.start_due(now=0.24)
-                    self.assertIsNotNone(slow_state.inflight)
+                    self.assertIs(slow_state.inflight, first_attempt)
             finally:
                 scheduler.close()
+
+    def test_market_scheduler_never_queues_more_than_executor_capacity(self) -> None:
+        import odds_snapshot_watch as worker
+        from threading import Event
+
+        release = Event()
+        markets = [
+            {
+                "gid": f"g{index}",
+                "mode": "live",
+                "requirements": [],
+                "requirement": {},
+                "active_market_key": f"live|g{index}",
+                "priority": 100,
+            }
+            for index in range(3)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            scheduler = worker.ActiveMarketScheduler(
+                data_dir=Path(tmp), member_id="", max_workers=1,
+                requested_interval_ms=50, deadline_ms=50, public_timeout_s=1,
+            )
+            try:
+                with patch.object(worker, "refresh_subscription", side_effect=lambda **_kwargs: release.wait(1)):
+                    scheduler.sync(markets, now=0.0)
+                    self.assertEqual(scheduler.start_due(now=0.0), 1)
+                    self.assertEqual(sum(state.inflight is not None for state in scheduler.states.values()), 1)
+                    self.assertEqual(scheduler.start_due(now=0.1), 0)
+            finally:
+                release.set()
+                scheduler.close()
+
+    def test_snapshot_worker_file_lock_allows_only_one_process_owner(self) -> None:
+        import odds_snapshot_watch as worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "watch.lock"
+            first = worker.SingleInstanceFileLock(path)
+            second = worker.SingleInstanceFileLock(path)
+            self.assertTrue(first.acquire())
+            try:
+                self.assertFalse(second.acquire())
+            finally:
+                first.release()
+            self.assertTrue(second.acquire())
+            second.release()
 
     def test_member_quote_events_do_not_pollute_public_refresh_metrics(self) -> None:
         from hdzz.core.follower.snapshot_metrics import summarise_snapshot_watch_events

@@ -36,6 +36,7 @@ class TestAppRuntimeBootstrap(unittest.TestCase):
             seen_app_root = ""
             try:
                 with mock.patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop("HDZZ_APP_DIR", None)
                     sys.path[:] = [p for p in sys.path if str(repo_root) not in str(p)]
                     app_root = bootstrap_app_runtime(wrapper)
                     seen_path = list(sys.path)

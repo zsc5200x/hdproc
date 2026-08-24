@@ -58,12 +58,21 @@ def _is_live(value: Any) -> bool:
 
 
 def _parse_line(value: Any, *, signed: bool = False) -> Optional[float]:
-    """Parse a single or split line without accidentally using the odds value."""
+    """Parse the handicap/total at the end of the order text.
+
+    Team names are user/provider supplied and may contain digits (for example
+    ``波特兰木材2队``).  Searching for the first number therefore turns a team
+    name into a fake handicap.  The line is the trailing numeric token; an
+    optional ``@odds`` suffix is removed before parsing.
+    """
     text = _strip_markup(value)
     if not text:
         return None
+    # Odds are sometimes included in the raw order text. They are not part of
+    # the requested market line and must never become the target line.
+    text = re.sub(r"\s*@\s*[+-]?\d+(?:\.\d+)?\s*$", "", text).strip()
     split = re.search(
-        r"(?P<sign>[+-])?\s*(?P<a>\d+(?:\.\d+)?)\s*(?:/|至|～|~)\s*(?P<b>\d+(?:\.\d+)?)",
+        r"(?P<sign>[+-])?\s*(?P<a>\d+(?:\.\d+)?)\s*(?:/|至|～|~)\s*(?P<b>\d+(?:\.\d+)?)\s*$",
         text,
     )
     if split:
@@ -71,7 +80,7 @@ def _parse_line(value: Any, *, signed: bool = False) -> Optional[float]:
         if signed and split.group("sign") == "-":
             avg = -avg
         return avg
-    match = re.search(r"(?P<sign>[+-])?\s*(?P<n>\d+(?:\.\d+)?)", text)
+    match = re.search(r"(?P<sign>[+-])?\s*(?P<n>\d+(?:\.\d+)?)\s*$", text)
     if not match:
         return None
     value0 = float(match.group("n"))

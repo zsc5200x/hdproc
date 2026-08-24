@@ -5,11 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>会员执行调度中心</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet" media="print" onload="this.media='all'">
+  <noscript>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  </noscript>
   <link rel="stylesheet" href="/chashui/style.css"/>
   <link rel="stylesheet" href="/chashui/queue.css"/>
-  <link rel="stylesheet" href="/chashui/redesign-queue.css?v=20260824-strategy-queue-11"/>
+  <link rel="stylesheet" href="/chashui/redesign-queue.css?v=20260824-strategy-queue-14"/>
 </head>
 <body class="queuePage executionCenterPage">
   <header class="commandBar" aria-label="策略队列摘要" hidden>
@@ -41,7 +45,7 @@
             <div><strong>执行策略设置</strong><span id="stConfigStatus" class="settingsStatus">未修改</span></div>
             <button id="btnResetConfig" class="iconButton" type="button" title="重置推荐参数" aria-label="重置推荐参数"><i class="fa-solid fa-rotate-left"></i></button>
           </div>
-          <label class="settingsField"><span>查水账号</span><select id="selMember" aria-label="查水账号"></select></label>
+          <div class="settingsField"><span>盘口来源</span><strong>后台 Snapshot（唯一生产链）</strong></div>
           <div class="settingsGrid">
             <label class="settingsField"><span>页面刷新（毫秒）</span><input id="inQueueRefresh" type="number" value="1000" min="300" max="10000"/></label>
             <label class="settingsField"><span>分单数量</span><input id="inSplitCount" type="number" min="1" max="5" value="3"/></label>
@@ -158,11 +162,11 @@
 
     <div class="systemFooter" aria-live="polite">
       <span id="stErr" class="systemState"><i class="fa-solid fa-circle-check"></i>运行正常</span>
-      <span id="stQuoteMember">查水账号：-</span><span id="stQueueUpdatedAt">队列更新：-</span>
+      <span id="stQuoteMember">盘口来源：后台 Snapshot</span><span id="stQueueUpdatedAt">队列更新：-</span>
       <span id="stServerTime">服务器时间：-</span><span id="stLastUpdate">本页刷新：-</span>
       <span id="stCounts" class="visuallyHidden">待入队：0 · 队列中：0</span>
     </div>
   </main>
-  <script src="/chashui/queue.js?v=20260824-strategy-queue-11"></script>
+  <script src="/chashui/queue.js?v=20260824-strategy-queue-14"></script>
 </body>
 </html>

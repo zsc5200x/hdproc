@@ -7,7 +7,6 @@ import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
-from urllib import parse, request
 
 from .ingest import MatchResolutionError, build_follow_order, find_recent_confirmed_match, resolve_signal_match
 from .parser import SignalParseError, parse_telegram_bet_signal
@@ -142,31 +141,9 @@ def process_signal_message(
     return {"status": "injected", "order": order, "path": str(out_path)}
 
 
-def _fetch_json(url: str, timeout_s: int = 12) -> Dict[str, Any]:
-    req = request.Request(url, headers={"Accept": "application/json"}, method="GET")
-    with request.urlopen(req, timeout=max(3, int(timeout_s))) as response:
-        payload = json.loads((response.read() or b"{}").decode("utf-8", errors="replace"))
-    if not isinstance(payload, dict):
-        raise RuntimeError("invalid_webui_response")
-    if payload.get("ok") is False:
-        raise RuntimeError(_text(payload.get("message") or payload.get("error")) or "webui_request_failed")
-    return payload
-
-
 def load_games_from_webui(signal: Dict[str, Any], *, base_url: str) -> List[Dict[str, Any]]:
-    base = _text(base_url).rstrip("/") or "http://127.0.0.1:2299"
-    status = _fetch_json(f"{base}/api/chashui/status?lane=games")
-    member = status.get("member") if isinstance(status.get("member"), dict) else {}
-    member_id = _text(member.get("id"))
-    if not member_id:
-        raise RuntimeError("readonly_member_unavailable")
-    modes = ["live"] if _text(signal.get("mode")) == "live" else ["today", "early"]
-    games: List[Dict[str, Any]] = []
-    for mode in modes:
-        query = parse.urlencode({"member_id": member_id, "mode": mode})
-        payload = _fetch_json(f"{base}/api/chashui/games?{query}")
-        games.extend([item for item in (payload.get("games") or []) if isinstance(item, dict)])
-    return games
+    """查水已移除；信号处理只允许使用最近已确认订单兜底。"""
+    return []
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

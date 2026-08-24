@@ -18,17 +18,17 @@ class OrderReportStatsUITest(unittest.TestCase):
         self.assertIsNotNone(panel)
         body = panel.group("body")
 
-        stats_pos = body.find('id="od-report-stats-grid"')
+        stats_pos = body.find('id="od-kpi-row"')
         filters_pos = body.find('class="od-filter-rows"')
         self.assertGreaterEqual(stats_pos, 0)
         self.assertGreater(filters_pos, stats_pos)
 
         for metric_id in (
             "od-rpt-pnl",
-            "od-rpt-order-count",
-            "od-rpt-settled-orders",
-            "od-rpt-pending-tickets",
-            "od-rpt-win-rate",
+            "od-kpi-pending",
+            "od-kpi-done-ok",
+            "od-kpi-done-failed",
+            "od-kpi-rate",
         ):
             self.assertIn(f'id="{metric_id}"', body)
 

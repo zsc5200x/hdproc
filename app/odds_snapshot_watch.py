@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
 import threading
 import time
@@ -38,6 +39,60 @@ _MEMBER_QUOTE_INFLIGHT: set[Tuple[str, str, str]] = set()
 _MEMBER_QUOTE_INFLIGHT_LOCK = threading.RLock()
 _PRIORITY_REQUEST_LOCK = threading.RLock()
 _MEMBER_QUOTE_METRICS_LOCK = threading.RLock()
+
+
+class SingleInstanceFileLock:
+    """Cross-process lock that is released automatically when the worker exits."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._handle: Optional[Any] = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt  # type: ignore
+
+                handle.seek(0)
+                if not handle.read(1):
+                    handle.write(b"0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            handle.seek(0)
+            handle.truncate()
+            handle.write(str(os.getpid()).encode("ascii"))
+            handle.flush()
+        except (OSError, IOError):
+            handle.close()
+            return False
+        self._handle = handle
+        return True
+
+    def release(self) -> None:
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt  # type: ignore
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except (OSError, IOError):
+            pass
+        handle.close()
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -255,8 +310,8 @@ class MemberQuoteState:
     last_success_at: Optional[float] = None
     last_quote_age_ms: Optional[float] = None
     inflight: Optional[Future] = None
-    orphaned: List[Future] = field(default_factory=list)
     deadline_at: Optional[float] = None
+    deadline_recorded: bool = False
     failure_count: int = 0
     previous_attempt_at: Optional[float] = None
     queue_delay_ms: float = 0.0
@@ -272,11 +327,14 @@ class MemberQuoteScheduler:
         requested_interval_ms: float = 400.0,
         deadline_ms: float = 2000.0,
         active_ttl_s: float = 120.0,
+        max_workers: Optional[int] = None,
     ) -> None:
         self.executor = executor
         self.requested_interval_ms = max(50.0, float(requested_interval_ms or 400.0))
         self.deadline_ms = max(100.0, float(deadline_ms or 2000.0))
         self.active_ttl_s = max(1.0, float(active_ttl_s or 120.0))
+        executor_workers = int(getattr(executor, "_max_workers", 1) or 1)
+        self.max_workers = max(1, int(max_workers or executor_workers))
         self.states: Dict[Tuple[str, str, str], MemberQuoteState] = {}
         self._lock = threading.RLock()
 
@@ -316,15 +374,13 @@ class MemberQuoteScheduler:
                 state.next_refresh_at = min(state.next_refresh_at, now_value)
             return state
 
-    def _reap(self, state: MemberQuoteState) -> None:
-        state.orphaned = [future for future in state.orphaned if not future.done()]
-
     def _submit(self, state: MemberQuoteState, now_value: float) -> None:
         state.previous_attempt_at = state.last_attempt_at
         state.last_attempt_at = now_value
         scheduled_at = state.next_refresh_at
         state.queue_delay_ms = round(max(0.0, now_value - scheduled_at) * 1000.0, 3)
         state.deadline_at = now_value + state.deadline_ms / 1000.0
+        state.deadline_recorded = False
         request = dict(state.request)
         request["_scheduled_at"] = now_value
         request["requested_interval_ms"] = state.requested_interval_ms
@@ -370,7 +426,6 @@ class MemberQuoteScheduler:
         now_value = float(time.time() if now is None else now)
         with self._lock:
             for key, state in list(self.states.items()):
-                self._reap(state)
                 if state.inflight is None and now_value > state.active_until:
                     self.states.pop(key, None)
                     continue
@@ -378,39 +433,46 @@ class MemberQuoteScheduler:
                 if future is None:
                     continue
                 if not future.done():
-                    if state.deadline_at and now_value >= state.deadline_at:
-                        state.orphaned.append(future)
-                        state.inflight = None
-                        state.deadline_at = None
+                    if state.deadline_at and now_value >= state.deadline_at and not state.deadline_recorded:
+                        state.deadline_recorded = True
                         self._record_completion(
                             state,
                             now_value,
                             {"ok": False, "error_code": "READ_TIMEOUT", "elapsed_ms": state.deadline_ms},
                         )
-                        state.next_refresh_at = now_value + state.requested_interval_ms / 1000.0
                     continue
                 state.inflight = None
+                late = bool(state.deadline_recorded) or bool(state.deadline_at and now_value >= state.deadline_at)
                 state.deadline_at = None
-                try:
-                    result = future.result()
-                except BaseException as exc:
-                    result = {"ok": False, "error_code": _classify_snapshot_error(exc), "error": str(exc)}
-                self._record_completion(state, now_value, result if isinstance(result, dict) else {"ok": False})
-                backoff = min(4.0, 1.0 + max(0, state.failure_count - 1) * 0.5)
+                if late and not state.deadline_recorded:
+                    state.deadline_recorded = True
+                    self._record_completion(
+                        state,
+                        now_value,
+                        {"ok": False, "error_code": "READ_TIMEOUT", "elapsed_ms": state.deadline_ms},
+                    )
+                if not late:
+                    try:
+                        result = future.result()
+                    except BaseException as exc:
+                        result = {"ok": False, "error_code": _classify_snapshot_error(exc), "error": str(exc)}
+                    self._record_completion(state, now_value, result if isinstance(result, dict) else {"ok": False})
+                backoff = min(12.0, 2.0 ** max(0, state.failure_count - 1))
                 state.next_refresh_at = now_value + state.requested_interval_ms / 1000.0 * backoff
 
     def start_due(self, now: Optional[float] = None) -> int:
         now_value = float(time.time() if now is None else now)
         started = 0
         with self._lock:
+            active = sum(1 for state in self.states.values() if state.inflight is not None and not state.inflight.done())
+            available = max(0, self.max_workers - active)
             for state in sorted(
                 self.states.values(),
                 key=lambda item: (-int(bool(item.request.get("priority_refresh"))), item.next_refresh_at, item.key),
             ):
-                self._reap(state)
+                if started >= available:
+                    break
                 if now_value > state.active_until or state.inflight is not None or now_value < state.next_refresh_at:
-                    continue
-                if len(state.orphaned) >= 2:
                     continue
                 self._submit(state, now_value)
                 started += 1
@@ -442,6 +504,23 @@ def _is_live(value: Any) -> bool:
         return value
     text = str(value or "").strip().lower()
     return text in {"1", "true", "yes", "live", "滚球", "rb"} or "滚球" in text or "live" in text
+
+
+def _global_only_live_enabled(state_path: Path) -> bool:
+    """Read the explicit master filter without affecting order ingestion.
+
+    Early orders must remain in ``orders/*.jsonl`` and in the WebUI.  When the
+    master switch is on, only avoid spending snapshot-worker capacity on
+    those orders because the follow engine will record them as skipped.
+    ``None`` keeps legacy per-target behavior unchanged.
+    """
+    settings = _read_json(Path(state_path).parent / "follow_settings.json")
+    if "only_live" not in settings or settings.get("only_live") is None:
+        return False
+    value = settings.get("only_live")
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def order_subscription(order: Dict[str, Any]) -> Optional[Tuple[str, str]]:
@@ -517,12 +596,18 @@ def _order_fixture_locator(order: Dict[str, Any]) -> Dict[str, str]:
         r"\[(\d+)\]",
         str(raw.get("SHOWTEXT_TEAM_NUM") or raw.get("TNAME") or ""),
     )
+    gnum_h = str(
+        raw.get("GNUM_H") or raw.get("GNUMH") or raw.get("TEAM_H_NUM") or order.get("gnum_h") or ""
+    ).strip()
+    gnum_c = str(
+        raw.get("GNUM_C") or raw.get("GNUMC") or raw.get("TEAM_C_NUM") or order.get("gnum_c") or ""
+    ).strip()
     return {
         "league": league,
         "team_h": team_h,
         "team_c": team_c,
-        "gnum_h": numbers[0] if len(numbers) >= 1 else "",
-        "gnum_c": numbers[1] if len(numbers) >= 2 else "",
+        "gnum_h": gnum_h or (numbers[0] if len(numbers) >= 1 else ""),
+        "gnum_c": gnum_c or (numbers[1] if len(numbers) >= 2 else ""),
     }
 
 
@@ -609,10 +694,19 @@ def collect_market_demands(
     now: Optional[float] = None,
     active_seconds: float = 120.0,
 ) -> List[Dict[str, Any]]:
-    """Group active orders by match while retaining every requested market."""
+    """Group active orders by match while retaining every requested market.
+
+    The explicit global only-live switch only changes snapshot demand; it does
+    not remove or mutate the source order.
+    """
     now_value = float(time.time() if now is None else now)
+    only_live = _global_only_live_enabled(state_path)
     grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for order in _active_orders(orders_dir=orders_dir, state_path=state_path, now=now_value, active_seconds=active_seconds):
+        if only_live:
+            subscription = order_subscription(order)
+            if subscription and subscription[1] != "live":
+                continue
         item = market_demand(order)
         if item is None:
             sub = order_subscription(order)
@@ -916,9 +1010,17 @@ def _run_public_member_hedged(
 
     for future in pending:
         future.cancel()
-    if last_error is not None:
-        raise last_error
-    raise TimeoutError("public_snapshot_deadline_exceeded")
+    if last_error is None:
+        last_error = TimeoutError("public_snapshot_deadline_exceeded")
+    # Preserve failover telemetry on the exception path. The scheduler may
+    # record a failure after hedge futures have been unwound.
+    try:
+        setattr(last_error, "attempted_member_ids", attempted[:])
+        setattr(last_error, "failover_count", max(0, len(attempted) - 1))
+        setattr(last_error, "hedged", len(attempted) > 1)
+    except Exception:
+        pass
+    raise last_error
 
 
 def _resolve_game_cached(
@@ -958,14 +1060,20 @@ def refresh_subscription(
     force: bool = True,
     requirements: Optional[List[Dict[str, Any]]] = None,
     fixture_locator: Optional[Dict[str, Any]] = None,
-    public_timeout_s: float = 10.0,
+    public_timeout_s: float = 2.0,
+    resolve_timeout_s: Optional[float] = None,
+    snapshot_timeout_s: Optional[float] = None,
     public_deadline_s: Optional[float] = None,
     hedge_delay_s: float = 0.35,
 ) -> Dict[str, Any]:
     members = _load_quote_members(data_dir)
+    resolve_timeout = max(1.0, float(resolve_timeout_s if resolve_timeout_s is not None else public_timeout_s))
+    snapshot_timeout = max(1.0, float(snapshot_timeout_s if snapshot_timeout_s is not None else public_timeout_s))
+    # Resolution and board retrieval are independent network phases. The
+    # default deadline covers both phases plus a small scheduling margin.
     request_deadline_s = max(
         0.1,
-        float(public_deadline_s if public_deadline_s is not None else public_timeout_s),
+        float(public_deadline_s if public_deadline_s is not None else resolve_timeout + snapshot_timeout + 0.5),
     )
 
     def fetch_for_member(selected: Dict[str, Any]) -> Dict[str, Any]:
@@ -982,7 +1090,7 @@ def refresh_subscription(
             member=selected,
             gid=gid,
             mode=mode,
-            timeout_s=max(1, int(round(float(public_timeout_s or 1.0)))),
+            timeout_s=max(1, int(round(resolve_timeout))),
             fixture_locator=fixture_locator,
         )
         snapshot = webui_server._chashui_get_odds_snapshot_with_empty_retry(
@@ -991,7 +1099,7 @@ def refresh_subscription(
             resolved=resolved,
             include_raw=True,
             confirm_odds=False,
-            timeout_s=max(1, int(round(float(public_timeout_s or 1.0)))),
+            timeout_s=max(1, int(round(snapshot_timeout))),
             required_markets=list(requirements or []),
         )
         fetch_finished_at = float(time.time())
@@ -1014,7 +1122,14 @@ def refresh_subscription(
     if time.monotonic() - float(run.get("started_at") or time.monotonic()) > request_deadline_s:
         # Do not publish a response that completed after this Market's
         # deadline. The scheduler may already have started a newer attempt.
-        raise TimeoutError("public_snapshot_deadline_exceeded")
+        exc = TimeoutError("public_snapshot_deadline_exceeded")
+        try:
+            setattr(exc, "attempted_member_ids", list(run.get("attempted_member_ids") or []))
+            setattr(exc, "failover_count", int(run.get("failover_count") or 0))
+            setattr(exc, "hedged", bool(run.get("hedged")))
+        except Exception:
+            pass
+        raise exc
     selected = run.get("member") if isinstance(run.get("member"), dict) else {}
     snapshot = run.get("result") if isinstance(run.get("result"), dict) else {}
     snapshot_for_cache = dict(snapshot)
@@ -1197,6 +1312,24 @@ def _classify_snapshot_error(exc: BaseException) -> str:
     return type(exc).__name__ or "UNKNOWN_ERROR"
 
 
+def _snapshot_failure_summary(counts: Dict[str, int]) -> str:
+    """Render bounded, human-readable watcher diagnostics for the WebUI/logs."""
+    labels = {
+        "READ_TIMEOUT": "盘口采集超时",
+        "GAME_NOT_FOUND": "未找到赛事",
+        "TARGET_LINE_MISSING": "目标盘口不存在",
+        "CONNECTION_ERROR": "连接中断",
+        "PROXY_ERROR": "代理错误",
+        "UPSTREAM_502": "上游502",
+    }
+    parts = [
+        f"{labels.get(code, code)} {int(count)} 次"
+        for code, count in counts.items()
+        if int(count or 0) > 0
+    ]
+    return "，".join(parts) if parts else "盘口采集失败"
+
+
 @dataclass
 class ActiveMarketState:
     key: str
@@ -1210,7 +1343,6 @@ class ActiveMarketState:
     last_fetched_at: Optional[float] = None
     last_revision: int = 0
     inflight: Optional[Future] = None
-    orphaned: List[Future] = field(default_factory=list)
     deadline_at: Optional[float] = None
     consecutive_failures: int = 0
     queue_delay_ms: float = 0.0
@@ -1218,6 +1350,7 @@ class ActiveMarketState:
     attempt_no: int = 0
     previous_attempt_at: Optional[float] = None
     last_event_at: Optional[float] = None
+    failure_counts: Dict[str, int] = field(default_factory=dict)
 
 
 class ActiveMarketScheduler:
@@ -1230,28 +1363,30 @@ class ActiveMarketScheduler:
         member_id: str,
         max_workers: int,
         requested_interval_ms: float = 400.0,
-        deadline_ms: float = 2000.0,
+        deadline_ms: float = 5000.0,
         public_timeout_s: float = 2.0,
+        resolve_timeout_s: float = 2.0,
+        snapshot_timeout_s: float = 2.5,
         hedge_delay_s: float = 0.35,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.member_id = str(member_id or "")
         self.requested_interval_ms = max(50.0, float(requested_interval_ms or 400.0))
-        self.deadline_ms = max(100.0, float(deadline_ms or 2000.0))
+        self.deadline_ms = max(100.0, float(deadline_ms or 5000.0))
         self.public_timeout_s = max(1.0, float(public_timeout_s or 2.0))
+        self.resolve_timeout_s = max(1.0, float(resolve_timeout_s or self.public_timeout_s))
+        self.snapshot_timeout_s = max(1.0, float(snapshot_timeout_s or self.public_timeout_s))
         self.hedge_delay_s = max(0.0, float(hedge_delay_s or 0.0))
+        self.max_workers = max(1, min(8, int(max_workers or 1)))
         self.states: Dict[str, ActiveMarketState] = {}
         self.executor = ThreadPoolExecutor(
-            max_workers=max(1, min(8, int(max_workers or 1))),
+            max_workers=self.max_workers,
             thread_name_prefix="snapshot-market",
         )
         self._event_no = 0
 
     def close(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=True)
-
-    def _reap_orphaned(self, state: ActiveMarketState) -> None:
-        state.orphaned = [future for future in state.orphaned if not future.done()]
 
     def sync(self, markets: List[Dict[str, Any]], now: Optional[float] = None) -> None:
         now_value = float(time.time() if now is None else now)
@@ -1265,8 +1400,6 @@ class ActiveMarketScheduler:
                 state = self.states.pop(key)
                 if state.inflight is not None:
                     state.inflight.cancel()
-                for future in state.orphaned:
-                    future.cancel()
         for key, item in desired.items():
             state = self.states.get(key)
             if state is None:
@@ -1298,6 +1431,8 @@ class ActiveMarketScheduler:
             requirements=state.item.get("requirements") if isinstance(state.item.get("requirements"), list) else [],
             fixture_locator=state.item.get("fixture_locator") if isinstance(state.item.get("fixture_locator"), dict) else {},
             public_timeout_s=self.public_timeout_s,
+            resolve_timeout_s=self.resolve_timeout_s,
+            snapshot_timeout_s=self.snapshot_timeout_s,
             public_deadline_s=self.deadline_ms / 1000.0,
             hedge_delay_s=self.hedge_delay_s,
         )
@@ -1330,6 +1465,9 @@ class ActiveMarketScheduler:
         state.last_failure_at = now_value
         state.consecutive_failures += 1
         error_class = "READ_TIMEOUT" if deadline else _classify_snapshot_error(exc)
+        state.failure_counts[error_class] = int(state.failure_counts.get(error_class) or 0) + 1
+        attempted_member_ids = list(getattr(exc, "attempted_member_ids", []) or [])
+        failover_count = int(getattr(exc, "failover_count", max(0, len(attempted_member_ids) - 1)) or 0)
         event = self._base_event(state, now_value)
         event.update({
             "finished_at": now_value,
@@ -1343,7 +1481,12 @@ class ActiveMarketScheduler:
             "error": str(exc or "public_snapshot_deadline_exceeded")[:500],
             "deadline_exceeded": bool(deadline),
             "consecutive_failures": state.consecutive_failures,
-            "failover_count": 0,
+            "failover_count": failover_count,
+            "hedged": bool(getattr(exc, "hedged", len(attempted_member_ids) > 1)),
+            "attempted_member_ids": attempted_member_ids,
+            "failure_counts": dict(state.failure_counts),
+            "failure_summary": _snapshot_failure_summary(state.failure_counts),
+            "submission": "none",
         })
         record_snapshot_watch_event(self.data_dir, event)
     def _record_success(self, state: ActiveMarketState, now_value: float, rec: Dict[str, Any], *, late: bool = False) -> None:
@@ -1415,7 +1558,6 @@ class ActiveMarketScheduler:
     def poll(self, now: Optional[float] = None) -> None:
         now_value = float(time.time() if now is None else now)
         for state in list(self.states.values()):
-            self._reap_orphaned(state)
             future = state.inflight
             if future is None:
                 continue
@@ -1423,14 +1565,10 @@ class ActiveMarketScheduler:
                 if state.deadline_at and now_value >= state.deadline_at and not state.deadline_recorded:
                     state.deadline_recorded = True
                     self._record_failure(state, now_value, TimeoutError("public_snapshot_deadline_exceeded"), deadline=True)
-                    # Detach the expired attempt from this Market immediately.
-                    # The worker may still be unwinding an HTTP socket in the
-                    # bounded executor, but it must not block this Market's
-                    # next deadline or any other Market's scheduling.
-                    state.orphaned.append(future)
-                    state.inflight = None
-                    state.deadline_at = None
-                    state.next_refresh_at = now_value + state.requested_interval_ms / 1000.0
+                    # Keep ownership of the underlying request until the HTTP
+                    # call actually unwinds. Detaching it would allow a second
+                    # request for the same market while the first one is still
+                    # consuming an executor slot and upstream capacity.
                 continue
             state.inflight = None
             late = bool(state.deadline_recorded) or bool(state.deadline_at and now_value >= state.deadline_at)
@@ -1443,7 +1581,8 @@ class ActiveMarketScheduler:
                         TimeoutError("public_snapshot_deadline_exceeded"),
                         deadline=True,
                     )
-                state.next_refresh_at = now_value + state.requested_interval_ms / 1000.0
+                backoff = min(12.0, 2.0 ** max(0, state.consecutive_failures - 1))
+                state.next_refresh_at = now_value + (state.requested_interval_ms / 1000.0) * backoff
                 continue
             try:
                 rec = future.result()
@@ -1451,23 +1590,21 @@ class ActiveMarketScheduler:
             except BaseException as exc:
                 if not state.deadline_recorded:
                     self._record_failure(state, now_value, exc)
-            backoff = min(4.0, 1.0 + max(0, state.consecutive_failures - 1) * 0.5)
+            backoff = min(12.0, 2.0 ** max(0, state.consecutive_failures - 1))
             state.next_refresh_at = now_value + (state.requested_interval_ms / 1000.0) * backoff
 
     def start_due(self, now: Optional[float] = None) -> int:
         now_value = float(time.time() if now is None else now)
         started = 0
+        active = sum(1 for state in self.states.values() if state.inflight is not None and not state.inflight.done())
+        available = max(0, self.max_workers - active)
         for state in sorted(
             self.states.values(),
             key=lambda item: (-int(item.item.get("priority") or 0), item.next_refresh_at, item.key),
         ):
-            self._reap_orphaned(state)
+            if started >= available:
+                break
             if state.inflight is not None or now_value < state.next_refresh_at:
-                continue
-            # A timed-out attempt may still be unwinding a socket. Permit one
-            # replacement attempt, but never create an unbounded request storm
-            # for the same Market.
-            if len(state.orphaned) >= 2:
                 continue
             self._submit(state, now_value)
             started += 1
@@ -1491,13 +1628,19 @@ def main() -> int:
     parser.add_argument("--member-id", default="")
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--target-interval-ms", type=float, default=400.0)
-    parser.add_argument("--market-deadline-ms", type=float, default=2000.0)
+    parser.add_argument("--market-deadline-ms", type=float, default=5000.0)
     parser.add_argument("--public-timeout-s", type=float, default=2.0)
+    parser.add_argument("--resolve-timeout-s", type=float, default=2.0)
+    parser.add_argument("--snapshot-timeout-s", type=float, default=2.5)
     parser.add_argument("--hedge-delay-ms", type=float, default=350.0)
     parser.add_argument("--scheduler-tick-ms", type=float, default=50.0)
     args = parser.parse_args()
     data_dir = Path(args.data_dir)
     orders_dir = Path(args.orders_dir)
+    instance_lock = SingleInstanceFileLock(data_dir / ".odds_snapshot_watch.lock")
+    if not instance_lock.acquire():
+        print("odds_snapshot_watch already running for this data directory", flush=True)
+        return 2
     state_path = data_dir / "follow_state.json"
     print(
         f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] odds_snapshot_watch started "
@@ -1512,6 +1655,8 @@ def main() -> int:
         requested_interval_ms=args.target_interval_ms,
         deadline_ms=args.market_deadline_ms,
         public_timeout_s=args.public_timeout_s,
+        resolve_timeout_s=args.resolve_timeout_s,
+        snapshot_timeout_s=args.snapshot_timeout_s,
         hedge_delay_s=max(0.0, float(args.hedge_delay_ms) / 1000.0),
     )
     last_demand_scan = 0.0
@@ -1539,6 +1684,7 @@ def main() -> int:
     finally:
         _MEMBER_QUOTE_SCHEDULER.close()
         scheduler.close()
+        instance_lock.release()
 
 
 if __name__ == "__main__":

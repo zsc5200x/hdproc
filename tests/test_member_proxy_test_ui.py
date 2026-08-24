@@ -35,7 +35,7 @@ class TestMemberProxyTestUi(unittest.TestCase):
 
         load_initial_start = script.index("async function loadInitial")
         bind_dialog_call = script.index("bindMemberModalControls();", load_initial_start)
-        first_network_load = script.index("await loadSignalPullConfig();", load_initial_start)
+        first_network_load = script.index("await Promise.allSettled([", load_initial_start)
         self.assertIn("function bindMemberModalControls()", script)
         self.assertLess(bind_dialog_call, first_network_load)
 

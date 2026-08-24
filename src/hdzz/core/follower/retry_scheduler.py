@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 from typing import Any, Dict, List, Optional, Tuple
 
 from .models import RetryJob
@@ -222,7 +224,11 @@ def build_independent_split_jobs(
                 order_id=str(order_id or ""),
                 target=str(target or ""),
                 stake=float(total_stake),
-                order=order,
+                # Each concurrently running split mutates private scheduler
+                # metadata on its order (UNKNOWN_RESULT, Snapshot waits, and
+                # context retries). Sharing the same dict lets one split
+                # clear another split's recovery state.
+                order=copy.deepcopy(order),
                 created_at=float(created_at),
                 next_try_at=float(created_at),
                 split_count=split_count,

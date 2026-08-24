@@ -142,13 +142,11 @@ test('recognizes read-only members and excludes them from betting', () => {
   assert.equal(context.memberCanBet({ usage: 'bet', status: 'online' }), true);
 });
 
-test('marks the configured data-only account as read-only', () => {
-  const arsenal = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'app', 'data', 'arsenal.json'), 'utf8'));
-  const member = (arsenal.members || []).find((item) => item.label === 'claude777');
+test('does not couple queue tests to the ignored runtime arsenal', () => {
+  const queuePage = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'queue.html'), 'utf8');
 
-  assert.ok(member, 'claude777 should exist in the member arsenal');
-  assert.equal(String(member.usage || '').toLowerCase(), 'read');
-  assert.equal(String(member.role || '').toLowerCase(), 'quote');
+  assert.match(queuePage, /后台 Snapshot（唯一生产链）/);
+  assert.doesNotMatch(queuePage, /id="selMember"/);
 });
 
 test('expands independent split jobs into execution task models', () => {
@@ -183,6 +181,28 @@ test('expands independent split jobs into execution task models', () => {
   assert.deepEqual(groups[0].tasks.map((task) => task.amount), [100, 100, 100]);
   assert.deepEqual(groups[0].tasks.map((task) => task.label), ['拆分单一', '拆分单二', '拆分单三']);
   assert.equal(groups[0].tasks[0].market, '大 / 小 大 2 / 2.5 @ 1.09');
+});
+
+test('shows the source team and line instead of generic home/away labels', () => {
+  const context = loadQueueContext();
+  const groups = context.buildExecutionTaskModels([
+    {
+      key: 'source|OID-TEAM-DIGIT',
+      status: 'job',
+      order: {
+        orderId: 'OID-TEAM-DIGIT',
+        sides: '文图拉 v 波特兰木材2队 (2 - 2)',
+        betType: '(滚球) 让球',
+        line: '波特兰木材2队 0',
+        odds: '0.94',
+        raw: { TEAM_H: '文图拉', TEAM_C: '波特兰木材2队' },
+      },
+      job: { split_count: 1, split_tasks: [{}] },
+    },
+  ]);
+
+  assert.equal(context.orderCardMarket(groups[0]).direction, '波特兰木材2队 0');
+  assert.doesNotMatch(context.orderCardMarket(groups[0]).direction, /客队|主队/);
 });
 
 test('uses terminal split_total for display without inventing split amounts', () => {
@@ -274,50 +294,13 @@ test('classifies betError as odds change instead of score change', () => {
   assert.doesNotMatch(context.formatError('ODDS_CHANGED', '跟单失败：当前水位已变化'), /比分已变化/);
 });
 
-test('renders every over line as a single pick for an over order', () => {
-  const context = loadQueueContext();
-  const box = makeElement();
-  const lines = [
-    { wtype: 'ROU', rawLine: '2', over: { label: '大', line: '2', odd: '0.73' }, under: { label: '小', line: '2', odd: '1.14' } },
-    { wtype: 'ROU', rawLine: '2/2.5', over: { label: '大', line: '2/2.5', odd: '1.03' }, under: { label: '小', line: '2/2.5', odd: '0.83' } },
-  ];
+test('keeps legacy live chashui requests out of the execution queue', () => {
+  const queueJs = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'queue.js'), 'utf8');
 
-  context.renderOverUnder(
-    box,
-    lines,
-    { wtype: 'ROU', target_line_val: 2.25, is_over: true },
-    'order-1'
-  );
-
-  assert.equal(box.children.length, 2);
-  assert.deepEqual(box.children.map((row) => row.children.length), [1, 1]);
-  assert.ok(box.children.every((row) => row.className.includes('singleRow')));
-});
-
-test('builds all current over snapshot badges and highlights the submit target', () => {
-  const context = loadQueueContext();
-  const badges = context.buildMarketSnapshotBadges(
-    {
-      overUnder: {
-        lines: [
-          { wtype: 'OU', rawLine: '2.5', over: { label: '大', line: '2.5', odd: '0.81' } },
-          { wtype: 'OU', rawLine: '2.5/3', over: { label: '大', line: '2.5/3', odd: '0.73' } },
-          { wtype: 'OU', rawLine: '3', over: { label: '大', line: '3', odd: '1.04' } },
-          { wtype: 'OU', rawLine: '3.5', over: { label: '大', line: '3.5', odd: '1.22' } },
-        ],
-      },
-    },
-    { wtype: 'OU', target_line_val: 2.75, is_over: true }
-  );
-
-  assert.equal(badges.length, 4);
-  assert.deepEqual(Array.from(badges, (item) => item.text), [
-    '大 2.5 @ 0.81',
-    '大 2.5/3 @ 0.73',
-    '大 3 @ 1.04',
-    '大 3.5 @ 1.22',
-  ]);
-  assert.deepEqual(Array.from(badges, (item) => item.isTarget), [false, true, false, false]);
+  assert.doesNotMatch(queueJs, /\/api\/chashui\/odds/);
+  assert.doesNotMatch(queueJs, /function\s+renderOverUnder\s*\(/);
+  assert.doesNotMatch(queueJs, /function\s+buildMarketSnapshotBadges\s*\(/);
+  assert.doesNotMatch(queueJs, /function\s+shouldRequestTaskSnapshot\s*\(/);
 });
 
 test('exposes snapshot request failures instead of treating them as pending', () => {
@@ -326,18 +309,6 @@ test('exposes snapshot request failures instead of treating them as pending', ()
   assert.equal(context.formatSnapshotError('game_not_found'), '比赛已不在当前盘口列表');
   assert.equal(context.formatSnapshotError('readonly_pool_empty'), '没有可用查水会员');
   assert.equal(context.formatSnapshotError('network timeout'), '查水请求超时');
-});
-
-test('requests one snapshot for a failed task so terminal cards show diagnosis', () => {
-  const context = loadQueueContext();
-  const state = { lastFollowSnapshotCtx: '', lastFollowOddsAt: 0 };
-
-  assert.equal(context.shouldRequestTaskSnapshot('failed', state, 'today|8871239'), true);
-  state.lastFollowSnapshotCtx = 'today|8871239';
-  state.lastFollowOddsAt = Date.now();
-  assert.equal(context.shouldRequestTaskSnapshot('failed', state, 'today|8871239'), false);
-  assert.equal(context.shouldRequestTaskSnapshot('done', state, 'today|8871239'), false);
-  assert.equal(context.shouldRequestTaskSnapshot('pending', state, 'today|8871239', Date.now() + 2500), true);
 });
 
 test('formats the original follow market without rendering market snapshots', () => {
@@ -353,46 +324,13 @@ test('formats the original follow market without rendering market snapshots', ()
   );
 });
 
-test('renders original follow market followed by every current over line', () => {
+test('renders only the original follow market in the queue card', () => {
   const context = loadQueueContext();
   const box = makeElement();
   const order = { betType: '(滚球) 大 / 小', line: '大 3', odds: '1.09' };
-  const derived = { wtype: 'ROU', target_line_val: 3, is_over: true };
-  const simple = {
-    overUnder: {
-      lines: [
-        { wtype: 'ROU', rawLine: '2.5', over: { label: '大', line: '2.5', odd: '0.90' }, under: { label: '小', line: '2.5', odd: '1.02' } },
-        { wtype: 'ROU', rawLine: '3', over: { label: '大', line: '3', odd: '1.09' }, under: { label: '小', line: '3', odd: '0.81' } },
-      ],
-    },
-  };
 
-  context.renderFollowMarketSnapshot(box, order, derived, simple, 'order-1');
+  context.renderFollowMarketSnapshot(box, order);
 
+  assert.equal(box.children.length, 1);
   assert.match(box.children[0].textContent, /原单：大 \/ 小 大 3 @ 1.09/);
-  assert.equal(box.children[1].textContent, '当前盘口');
-  assert.equal(box.children[2].children.length, 2);
-  assert.deepEqual(box.children[2].children.map((row) => row.children.length), [1, 1]);
-});
-
-test('renders every current handicap line for the selected side', () => {
-  const context = loadQueueContext();
-  const box = makeElement();
-  const order = { betType: '(滚球) 让球', line: '主队 -0.5', odds: '0.85' };
-  const derived = { wtype: 'RE', target_line_val: -0.5, chose_team: 'H' };
-  const simple = {
-    handicap: {
-      lines: [
-        { wtype: 'RE', home: { team: '主队', line: '-0.5', odd: '0.85' }, away: { team: '客队', line: '+0.5', odd: '1.01' } },
-        { wtype: 'RE', home: { team: '主队', line: '-1', odd: '1.12' }, away: { team: '客队', line: '+1', odd: '0.72' } },
-      ],
-    },
-  };
-
-  context.renderFollowMarketSnapshot(box, order, derived, simple, 'order-2');
-
-  assert.equal(box.children[2].children.length, 2);
-  assert.deepEqual(box.children[2].children.map((row) => row.children.length), [1, 1]);
-  assert.equal(box.children[2].children[0].children[0].children[0].children[0].textContent, '主队');
-  assert.equal(box.children[2].children[0].children.length, 1);
 });

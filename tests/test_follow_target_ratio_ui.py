@@ -15,6 +15,15 @@ class TestFollowTargetRatioUi(unittest.TestCase):
         self.assertNotIn('id="follow-results-tbody"', page)
         self.assertNotIn('id="follow-refresh-results"', page)
 
+    def test_follow_settings_includes_global_only_live_toggle(self) -> None:
+        page = (ROOT / "app" / "webui" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="follow-only-live"', page)
+        self.assertIn('aria-pressed="false"', page)
+        self.assertIn("只跟滚球", page)
+        self.assertIn("早盘订单仍接收并记录，但不执行跟单", page)
+        self.assertNotIn("只接收滚球订单", page)
+
     def test_app_renders_and_saves_target_ratio_percent(self) -> None:
         script = (ROOT / "app" / "webui" / "app.js").read_text(encoding="utf-8")
 
@@ -27,6 +36,15 @@ class TestFollowTargetRatioUi(unittest.TestCase):
         self.assertIn("远端交易节点", script)
         self.assertIn('document.querySelectorAll(".target-ratio-row[data-name]")', script)
         self.assertIn("ratio_percent", script)
+
+    def test_app_renders_and_saves_global_only_live(self) -> None:
+        script = (ROOT / "app" / "webui" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function setFollowOnlyLiveValue(value)", script)
+        self.assertIn('const onlyLive    = $("follow-only-live")?.getAttribute("aria-pressed") === "true";', script)
+        self.assertIn("only_live: onlyLive", script)
+        self.assertIn("早盘订单仍会接收并记录，但不会执行跟单", script)
+        self.assertIn("早盘和滚球订单都会接收并执行跟单", script)
 
     def test_target_ratio_global_button_switches_to_custom_ratio(self) -> None:
         script = (ROOT / "app" / "webui" / "app.js").read_text(encoding="utf-8")

@@ -316,6 +316,32 @@ class TestFollowQueueHelpers(unittest.TestCase):
         self.assertIn("ReadTimeout", out["23650069461"]["message"])
         self.assertIn("slow", out["23650069461"]["exception"])
 
+    def test_latest_snapshot_watch_failure_includes_failover_and_submission_details(self) -> None:
+        from hdzz.api.webui.server import _load_latest_snapshot_watch_by_market
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "snapshot_watch_metrics.jsonl"
+            path.write_text(
+                json.dumps({
+                    "gid": "8995633",
+                    "mode": "live",
+                    "ok": False,
+                    "error_code": "READ_TIMEOUT",
+                    "failure_summary": "盘口采集超时 25 次，未找到赛事 1 次",
+                    "failure_counts": {"READ_TIMEOUT": 25, "GAME_NOT_FOUND": 1},
+                    "failover_count": 1,
+                    "attempted_member_ids": ["read-1", "read-2"],
+                    "submission": "none",
+                    "ts": 100,
+                }, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            out = _load_latest_snapshot_watch_by_market(path, {("8995633", "live")})
+
+        self.assertEqual(out[("8995633", "live")]["failover_count"], 1)
+        self.assertEqual(out[("8995633", "live")]["attempted_member_ids"], ["read-1", "read-2"])
+        self.assertEqual(out[("8995633", "live")]["submission"], "none")
+
     def test_clear_follow_queue_state_removes_pending_and_jobs_only(self) -> None:
         from hdzz.api.webui.server import _clear_follow_queue_state, read_json_file
 

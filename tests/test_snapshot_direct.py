@@ -187,6 +187,37 @@ class SnapshotDirectTest(unittest.TestCase):
         self.assertNotIn("ioratio", intent.to_dict())
         self.assertFalse(hasattr(intent, "uid"))
 
+    def test_team_digits_do_not_become_handicap_line(self):
+        from hdzz.core.follower.snapshot_direct import MarketIntent
+
+        order = self._order(line="波特兰木材2队 0")
+        order["sides"] = "文图拉 v 波特兰木材2队 (2 - 2)"
+        order["raw"].update({
+            "TEAM_H": "文图拉",
+            "TEAM_C": "波特兰木材2队",
+            "ORDER_TYPE": "波特兰木材2队",
+        })
+
+        intent = MarketIntent.from_order(order)
+
+        self.assertEqual(intent.side, "AWAY")
+        self.assertEqual(intent.target_line, 0.0)
+
+    def test_trailing_line_parser_ignores_score_and_odds_numbers(self):
+        from hdzz.core.follower.snapshot_direct import MarketIntent
+
+        order = self._order(line="波特兰木材2队 0 @0.94")
+        order["sides"] = "文图拉 v 波特兰木材2队 (2 - 2)"
+        order["raw"].update({
+            "TEAM_H": "文图拉",
+            "TEAM_C": "波特兰木材2队",
+            "ORDER_TYPE": "波特兰木材2队",
+        })
+
+        intent = MarketIntent.from_order(order)
+
+        self.assertEqual(intent.target_line, 0.0)
+
     def test_corner_half_integer_display_matches_crown_half_line(self):
         from hdzz.core.follower.odds_snapshot import store_snapshot
         from hdzz.core.follower.snapshot_direct import (

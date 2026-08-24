@@ -143,6 +143,80 @@ class ChashuiGamesCacheTest(unittest.TestCase):
         self.assertEqual(resolved["requestedMode"], "live")
         self.assertTrue(resolved["modeFallback"])
 
+    def test_resolve_today_order_falls_back_to_early_feed(self) -> None:
+        from hdzz.api.webui import server
+
+        today_xml = "<serverresponse><game><GID>other</GID></game></serverresponse>"
+        early_xml = (
+            "<serverresponse><game><GID>early-gid</GID><ECID>ec-early</ECID>"
+            "<LID>lid-early</LID><TEAM_H>文图拉</TEAM_H><TEAM_C>波特兰木材2队</TEAM_C>"
+            "</game></serverresponse>"
+        )
+        modes = []
+
+        def fetch(**kwargs):
+            modes.append(kwargs["mode"])
+            return early_xml if kwargs["mode"] == "early" else today_xml
+
+        with patch.object(server, "_chashui_get_game_list_xml", side_effect=fetch):
+            resolved = server._chashui_resolve_game_by_gid(
+                session=object(),
+                member={"base_url": "https://example.test", "ver": "v", "uid": "u"},
+                requested_gid="early-gid",
+                mode="today",
+                timeout_s=1,
+            )
+
+        self.assertEqual(modes, ["today", "early"])
+        self.assertEqual(resolved["mode"], "early")
+        self.assertTrue(resolved["modeFallback"])
+
+    def test_resolve_continues_to_early_after_today_request_timeout(self) -> None:
+        from hdzz.api.webui import server
+
+        early_xml = "<serverresponse><game><GID>early-gid</GID></game></serverresponse>"
+        modes = []
+
+        def fetch(**kwargs):
+            modes.append(kwargs["mode"])
+            if kwargs["mode"] == "today":
+                raise TimeoutError("today read timeout")
+            return early_xml if kwargs["mode"] == "early" else "<serverresponse></serverresponse>"
+
+        with patch.object(server, "_chashui_get_game_list_xml", side_effect=fetch):
+            resolved = server._chashui_resolve_game_by_gid(
+                session=object(),
+                member={"base_url": "https://example.test", "ver": "v", "uid": "u"},
+                requested_gid="early-gid",
+                mode="today",
+                timeout_s=1,
+            )
+
+        self.assertEqual(modes, ["today", "early"])
+        self.assertEqual(resolved["mode"], "early")
+
+    def test_resolve_fixture_can_use_provider_team_numbers(self) -> None:
+        from hdzz.api.webui import server
+
+        xml = (
+            "<serverresponse><game><GID>parent-gid</GID><ECID>ec-1</ECID>"
+            "<LID>lid-1</LID><GNUM_H>700336</GNUM_H><GNUM_C>700335</GNUM_C>"
+            "</game></serverresponse>"
+        )
+        with patch.object(server, "_chashui_get_game_list_xml", return_value=xml):
+            resolved = server._chashui_resolve_game_by_gid(
+                session=object(),
+                member={"base_url": "https://example.test", "ver": "v", "uid": "u"},
+                requested_gid="child-gid",
+                mode="today",
+                timeout_s=1,
+                fixture_locator={"gnum_h": "700336", "gnum_c": "700335"},
+            )
+
+        self.assertEqual(resolved["gid"], "parent-gid")
+        self.assertTrue(resolved["resolvedByFixture"])
+        self.assertTrue(resolved["resolvedByTeamNumber"])
+
     def test_resolve_corner_child_gid_via_exact_parent_fixture(self) -> None:
         from hdzz.api.webui import server
 

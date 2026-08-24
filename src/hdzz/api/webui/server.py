@@ -39,7 +39,6 @@ from hdzz.core.follower.strategy import encode_handicap_line as _encode_handicap
 from hdzz.core.follower.strategy import encode_total_line as _encode_total_line
 from hdzz.core.follower.strategy import format_handicap_line_value as _format_handicap_line_value
 from hdzz.core.follower.strategy import format_total_line_value as _format_total_line_value
-from hdzz.core.follower.odds_snapshot import load_or_refresh_snapshot as _load_or_refresh_odds_snapshot
 from hdzz.core.watcher.order_filter import normalize_member_names
 from hdzz.api.webui.follow_settings import FOLLOW_SETTINGS_DEFAULTS, ensure_follow_settings_defaults, merge_follow_settings
 from hdzz.api.webui.manual_signal import build_manual_signal_payload, send_manual_signal
@@ -95,13 +94,16 @@ ensure_playwright_browsers_path(APP_ROOT)
 ACCOUNT_RELOGIN_PENDING_MSG = "已发起浏览器登录，请在弹出的 Chrome 窗口完成验证码/登录。"
 CHASHUI_GAMES_CACHE_TTL_S = 2.0
 CHASHUI_GAMES_CACHE_STALE_TTL_S = 30.0
-CHASHUI_ODDS_SNAPSHOT_TTL_S = 1.5
-CHASHUI_ODDS_SNAPSHOT_STALE_TTL_S = 15.0
 CHASHUI_GAMES_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 CHASHUI_GAMES_CACHE_LOCK = threading.Lock()
 CHASHUI_WARMUP_CACHE_TTL_S = 30.0
 CHASHUI_WARMUP_CACHE: Dict[Tuple[int, str, str, str], float] = {}
 CHASHUI_WARMUP_CACHE_LOCK = threading.Lock()
+FOLLOW_RESULTS_HTTP_CACHE: Dict[Tuple[str, int, int], Tuple[float, bytes]] = {}
+FOLLOW_RESULTS_HTTP_CACHE_LOCK = threading.Lock()
+FOLLOW_QUEUE_HTTP_CACHE: Dict[Tuple[str, int, int, bool, int], Tuple[float, bytes]] = {}
+FOLLOW_QUEUE_HTTP_CACHE_LOCK = threading.Lock()
+FOLLOW_HTTP_CACHE_TTL_S = 0.75
 
 
 def _as_float(value: Any) -> float:
@@ -447,22 +449,66 @@ def follow_engine_running_flag() -> Tuple[bool, Optional[int]]:
 
 
 SNAPSHOT_WATCH_PID_FILE = Path(".run/odds_snapshot_watch.pid.json")
+SNAPSHOT_WATCH_LIFECYCLE_LOCK = threading.Lock()
+
+
+def _snapshot_watch_candidate_pids() -> List[int]:
+    seen: set[int] = set()
+    candidates: List[int] = []
+    for path in (SNAPSHOT_WATCH_PID_FILE, Path(".run/pids_core.json"), Path(".run/pids.json")):
+        try:
+            obj = json.loads(path.read_text(encoding="utf-8-sig") or "{}")
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        for raw_pid in obj.get("pids") or []:
+            try:
+                pid = int(raw_pid)
+            except (TypeError, ValueError):
+                continue
+            if pid not in seen:
+                seen.add(pid)
+                candidates.append(pid)
+    return candidates
+
+
+def _is_snapshot_watch_pid(pid: int) -> bool:
+    if not is_pid_running(pid):
+        return False
+    command = _pid_command_line(pid).lower()
+    return "odds_snapshot_watch.py" in command or "--hdzz-worker odds_snapshot_watch" in command
 
 
 def snapshot_watch_running_flag() -> Tuple[bool, Optional[int]]:
     try:
-        if not SNAPSHOT_WATCH_PID_FILE.exists():
+        alive = [pid for pid in _snapshot_watch_candidate_pids() if _is_snapshot_watch_pid(pid)]
+        if not alive:
             return False, None
-        obj = json.loads(SNAPSHOT_WATCH_PID_FILE.read_text(encoding="utf-8-sig") or "{}")
-        if not isinstance(obj, dict):
-            return False, None
-        alive = [int(pid) for pid in (obj.get("pids") or []) if is_pid_running(int(pid))]
-        return (True, alive[0]) if alive else (False, None)
+        pid = int(alive[0])
+        # Heal a stale dedicated PID file so subsequent status checks and stop
+        # operations see the worker that was launched by start/start-core.
+        try:
+            dedicated = json.loads(SNAPSHOT_WATCH_PID_FILE.read_text(encoding="utf-8-sig") or "{}")
+            dedicated_pids = [int(value) for value in (dedicated.get("pids") or [])]
+        except Exception:
+            dedicated_pids = []
+        if dedicated_pids != [pid]:
+            atomic_write_json(
+                SNAPSHOT_WATCH_PID_FILE,
+                {"recovered_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "live": True, "pids": [pid]},
+            )
+        return True, pid
     except Exception:
         return False, None
 
 
 def ensure_snapshot_watch_running() -> Tuple[bool, bool, str, Optional[int]]:
+    with SNAPSHOT_WATCH_LIFECYCLE_LOCK:
+        return _ensure_snapshot_watch_running()
+
+
+def _ensure_snapshot_watch_running() -> Tuple[bool, bool, str, Optional[int]]:
     """Ensure the per-market public snapshot worker has its own session.
 
     The follow engine can be healthy while the watcher has been reaped with
@@ -513,10 +559,10 @@ def ensure_snapshot_watch_running() -> Tuple[bool, bool, str, Optional[int]]:
             SNAPSHOT_WATCH_PID_FILE,
             {"started_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "live": True, "pids": [proc.pid]},
         )
-        deadline = time.time() + 1.0
+        deadline = time.time() + 0.75
         while time.time() < deadline:
-            if is_pid_running(int(proc.pid)):
-                return True, True, "", int(proc.pid)
+            if not is_pid_running(int(proc.pid)):
+                break
             time.sleep(0.1)
         if not is_pid_running(int(proc.pid)):
             atomic_write_json(
@@ -588,6 +634,17 @@ def _spawn_app_command(args: List[str]) -> None:
 
 def _pid_command_line(pid: int) -> str:
     try:
+        if os.name == "nt":
+            command = (
+                f"$p=Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\";"
+                "if($p){[Console]::OutputEncoding=[Text.Encoding]::UTF8;Write-Output $p.CommandLine}"
+            )
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command", command],
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+            return str(out.decode("utf-8", "ignore") or "").strip()
         out = subprocess.check_output(
             ["ps", "-p", str(int(pid)), "-o", "command="],
             stderr=subprocess.DEVNULL,
@@ -1635,23 +1692,39 @@ def _public_signal_from_order(row: Dict[str, Any]) -> Dict[str, Any]:
 def read_jsonl_file(path: Path, limit: int = 200) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
+    limit_i = max(1, int(limit))
     out: List[Dict[str, Any]] = []
     try:
-        with path.open("r", encoding="utf-8-sig") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                if isinstance(obj, dict):
-                    out.append(obj)
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            position = f.tell()
+            pending = b""
+            while position > 0 and len(out) < limit_i:
+                chunk_size = min(64 * 1024, position)
+                position -= chunk_size
+                f.seek(position)
+                block = f.read(chunk_size) + pending
+                lines = block.split(b"\n")
+                if position > 0:
+                    pending = lines.pop(0)
+                else:
+                    pending = b""
+                for raw_line in reversed(lines):
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line.decode("utf-8-sig"))
+                    except Exception:
+                        continue
+                    if isinstance(obj, dict):
+                        out.append(obj)
+                        if len(out) >= limit_i:
+                            break
     except Exception:
         return []
     out.sort(key=lambda x: int(x.get("ts") or 0), reverse=True)
-    return out[: max(1, int(limit))]
+    return out[:limit_i]
 
 def read_jsonl_file_filtered(
     path: Path,
@@ -2247,6 +2320,35 @@ def _follow_queue_simplify_result(row: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _load_latest_snapshot_watch_by_market(
+    path: Path,
+    market_keys: Set[Tuple[str, str]],
+) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """Return the newest Snapshot watcher event for each queued market."""
+    wanted = {(str(gid or "").strip(), str(mode or "").strip().lower()) for gid, mode in market_keys if str(gid or "").strip()}
+    if not wanted or not path.exists():
+        return {}
+    out: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in read_jsonl_file(path, limit=2000):
+        if not isinstance(row, dict):
+            continue
+        key = (str(row.get("gid") or "").strip(), str(row.get("mode") or "").strip().lower())
+        if key not in wanted or key in out:
+            continue
+        out[key] = {
+            "ok": bool(row.get("ok")),
+            "error_code": str(row.get("error_code") or "").strip() or None,
+            "failure_summary": str(row.get("failure_summary") or "").strip() or None,
+            "failure_counts": row.get("failure_counts") if isinstance(row.get("failure_counts"), dict) else {},
+            "failover_count": int(row.get("failover_count") or 0),
+            "attempted_member_ids": row.get("attempted_member_ids") if isinstance(row.get("attempted_member_ids"), list) else [],
+            "target_line_found": row.get("target_line_found"),
+            "submission": str(row.get("submission") or "").strip() or None,
+            "ts": row.get("ts"),
+        }
+    return out
+
+
 def _load_ok_follow_avg_odds_by_order(path: Path, wanted_order_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     """
     从 follow_results.jsonl 聚合每个 orderId 的成功跟单平均水位。
@@ -2314,6 +2416,77 @@ def _load_ok_follow_avg_odds_by_order(path: Path, wanted_order_ids: List[str]) -
             continue
         out[oid] = {"avg": float(sums.get(oid) or 0.0) / float(c), "count": c}
     return out
+
+
+def _load_follow_order_summaries(
+    path: Path,
+    wanted_order_ids: List[str],
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """一次扫描同时生成成功水位汇总和每个订单的最新成功记录。"""
+    wanted = {str(x).strip() for x in wanted_order_ids if str(x).strip()}
+    if not wanted or not path.exists():
+        return {}, {}
+
+    sums: Dict[str, float] = {oid: 0.0 for oid in wanted}
+    counts: Dict[str, int] = {oid: 0 for oid in wanted}
+    seen: Dict[str, set] = {oid: set() for oid in wanted}
+    latest: Dict[str, Dict[str, Any]] = {}
+    latest_ts: Dict[str, float] = {}
+
+    try:
+        with path.open("r", encoding="utf-8-sig") as f:
+            for line in f:
+                line = (line or "").strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(obj, dict) or not bool(obj.get("ok")):
+                    continue
+
+                order_id = _extract_order_id_from_row(obj)
+                if not order_id or order_id not in wanted:
+                    continue
+
+                ts = _to_float_or_none(obj.get("ts_ms"))
+                if ts is None:
+                    ts = _to_float_or_none(obj.get("ts")) or 0.0
+                if order_id not in latest or float(ts) >= float(latest_ts.get(order_id) or 0.0):
+                    latest[order_id] = obj
+                    latest_ts[order_id] = float(ts)
+
+                odd = _extract_follow_result_ioratio(obj)
+                if odd is None:
+                    continue
+                ticket_id = _digits_only(obj.get("ticket_id") or obj.get("w_id") or "")
+                dedup_key = f"ticket:{ticket_id}" if ticket_id else "|".join(
+                    [
+                        str(obj.get("member") or "").strip(),
+                        str(obj.get("ts_ms") or obj.get("ts") or "").strip(),
+                        str(obj.get("split_index") or "").strip(),
+                        str(obj.get("attempt") or "").strip(),
+                        f"{odd:.5f}",
+                    ]
+                )
+                if dedup_key in seen[order_id]:
+                    continue
+                seen[order_id].add(dedup_key)
+                sums[order_id] += float(odd)
+                counts[order_id] += 1
+    except Exception:
+        return {}, {}
+
+    averages: Dict[str, Dict[str, Any]] = {}
+    for order_id in wanted:
+        count = int(counts.get(order_id) or 0)
+        if count > 0:
+            averages[order_id] = {
+                "avg": float(sums.get(order_id) or 0.0) / float(count),
+                "count": count,
+            }
+    return averages, latest
 
 
 def build_follow_trace_download_bundle(
@@ -3135,9 +3308,6 @@ def _clear_follow_queue_state(data_dir: Path, *, req_at: Optional[float] = None)
 # 查水（cc/WUI 融合）：只读盘口/水位接口（不下注）
 # ---------------------------------------------------------------------------
 
-_CHASHUI_ORDER_VIEW_CACHE_LOCK = threading.Lock()
-_CHASHUI_ORDER_VIEW_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-_CHASHUI_ORDER_VIEW_CACHE_TTL_S = 1.8
 _GISMO_FEED_BASE_URL = "https://ws-fn-cdn001.akamaized.net/188bet/zh/Etc:UTC/gismo"
 _GISMO_BETRADAR_BASE_URL = "https://betradar.hgapp0003.com"
 _GISMO_WIDGET_KEY_ID = "2370877a0ce04fbfdc9678dae41d4210"
@@ -4260,177 +4430,6 @@ def _chashui_build_simple_markets(boards: List[Dict[str, Any]], meta: Dict[str, 
     }
 
 
-def _chashui_ft_order_view(
-    *,
-    session: requests.Session,
-    base_url: str,
-    ver: str,
-    uid: str,
-    gid: str,
-    wtype: str,
-    chose_team: str,
-    timeout_s: int,
-) -> Dict[str, Any]:
-    base0 = str(base_url or "").strip().rstrip("/")
-    uid0 = str(uid or "").strip()
-    ver0 = str(ver or "").strip()
-    gid0 = str(gid or "").strip()
-    wt0 = str(wtype or "").strip().upper()
-    side0 = str(chose_team or "").strip().upper()
-
-    cache_key = f"{base0}|{uid0}|{ver0}|{gid0}|{wt0}|{side0}"
-    now = float(time.time())
-    with _CHASHUI_ORDER_VIEW_CACHE_LOCK:
-        hit = _CHASHUI_ORDER_VIEW_CACHE.get(cache_key)
-    if hit:
-        exp, val = hit
-        if exp > now:
-            return dict(val)
-
-    text = _member_post_session(
-        session=session,
-        base_url=base0,
-        ver=ver0,
-        form={
-            "p": "FT_order_view",
-            "uid": uid0,
-            "ver": ver0,
-            "langx": "zh-cn",
-            "odd_f_type": "H",
-            "gid": gid0,
-            "gtype": "FT",
-            "wtype": wt0,
-            "chose_team": side0,
-        },
-        timeout_s=timeout_s,
-    )
-    t = (text or "").strip()
-    if not t:
-        raise RuntimeError("order_view_empty_response")
-    if not t.startswith("<"):
-        head = t[:200]
-        low = head.lower()
-        if "checkemnu" in low or "checkmenu" in low:
-            raise RuntimeError("order_view_menu_check_failed")
-        raise RuntimeError("order_view_non_xml")
-
-    out = {
-        "code": _xml_tag_value(t, "code") or None,
-        "ioratio": _xml_tag_value(t, "ioratio") or None,
-        "spread": _xml_tag_value(t, "spread") or None,
-        "strong": _xml_tag_value(t, "strong") or None,
-        "fastCheck": _xml_tag_value(t, "fast_check") or None,
-        "errormsg": _xml_tag_value(t, "errormsg") or None,
-        "msg": _xml_tag_value(t, "msg") or None,
-    }
-    if out.get("ioratio"):
-        with _CHASHUI_ORDER_VIEW_CACHE_LOCK:
-            _CHASHUI_ORDER_VIEW_CACHE[cache_key] = (now + float(_CHASHUI_ORDER_VIEW_CACHE_TTL_S), dict(out))
-            # 简单防护：避免缓存无限增长
-            if len(_CHASHUI_ORDER_VIEW_CACHE) > 1000:
-                _CHASHUI_ORDER_VIEW_CACHE.clear()
-                _CHASHUI_ORDER_VIEW_CACHE[cache_key] = (now + float(_CHASHUI_ORDER_VIEW_CACHE_TTL_S), dict(out))
-    return out
-
-
-def _chashui_confirm_simple_markets(
-    *,
-    session: requests.Session,
-    base_url: str,
-    ver: str,
-    uid: str,
-    simple: Dict[str, Any],
-    timeout_s: int,
-) -> None:
-    if not isinstance(simple, dict):
-        return
-
-    reqs: Dict[str, Dict[str, str]] = {}
-
-    def add(gid0: Any, wtype0: Any, side0: Any) -> None:
-        gid2 = str(gid0 or "").strip()
-        wt2 = str(wtype0 or "").strip().upper()
-        sd2 = str(side0 or "").strip().upper()
-        if not gid2 or not wt2 or sd2 not in {"H", "C", "N"}:
-            return
-        k = f"{gid2}|{wt2}|{sd2}"
-        if k in reqs:
-            return
-        reqs[k] = {"gid": gid2, "wtype": wt2, "side": sd2}
-
-    handicap_lines = ((simple.get("handicap") or {}).get("lines") if isinstance(simple.get("handicap"), dict) else None) or []
-    if isinstance(handicap_lines, list):
-        for row in handicap_lines:
-            if not isinstance(row, dict):
-                continue
-            wt = row.get("wtype") or "RE"
-            add(row.get("gid"), wt, "H")
-            add(row.get("gid"), wt, "C")
-
-    ou_lines = ((simple.get("overUnder") or {}).get("lines") if isinstance(simple.get("overUnder"), dict) else None) or []
-    if isinstance(ou_lines, list):
-        for row in ou_lines:
-            if not isinstance(row, dict):
-                continue
-            wt = row.get("wtype") or "ROU"
-            add(row.get("gid"), wt, "C")  # 大
-            add(row.get("gid"), wt, "H")  # 小
-
-    sliced = list(reqs.items())[:40]
-    out: Dict[str, Dict[str, Any]] = {}
-
-    def worker(req: Dict[str, str]) -> Tuple[str, Dict[str, Any]]:
-        k = f"{req.get('gid')}|{req.get('wtype')}|{req.get('side')}"
-        val = _chashui_ft_order_view(
-            session=session,
-            base_url=base_url,
-            ver=ver,
-            uid=uid,
-            gid=req.get("gid") or "",
-            wtype=req.get("wtype") or "",
-            chose_team=req.get("side") or "",
-            timeout_s=timeout_s,
-        )
-        return k, val
-
-    # 并发请求可显著降低 confirm 耗时，但要控制并发避免站点限流。
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = [ex.submit(worker, req) for _, req in sliced]
-        for fut in futures:
-            try:
-                k, v = fut.result()
-                if isinstance(v, dict) and v.get("ioratio"):
-                    out[k] = v
-            except Exception:
-                continue
-
-    if isinstance(handicap_lines, list):
-        for row in handicap_lines:
-            if not isinstance(row, dict):
-                continue
-            wt = str(row.get("wtype") or "RE").strip().upper()
-            gid2 = str(row.get("gid") or "").strip()
-            h = out.get(f"{gid2}|{wt}|H")
-            c = out.get(f"{gid2}|{wt}|C")
-            if h and isinstance(row.get("home"), dict) and h.get("ioratio"):
-                row["home"]["odd"] = str(h.get("ioratio"))
-            if c and isinstance(row.get("away"), dict) and c.get("ioratio"):
-                row["away"]["odd"] = str(c.get("ioratio"))
-
-    if isinstance(ou_lines, list):
-        for row in ou_lines:
-            if not isinstance(row, dict):
-                continue
-            wt = str(row.get("wtype") or "ROU").strip().upper()
-            gid2 = str(row.get("gid") or "").strip()
-            over = out.get(f"{gid2}|{wt}|C")
-            under = out.get(f"{gid2}|{wt}|H")
-            if over and isinstance(row.get("over"), dict) and over.get("ioratio"):
-                row["over"]["odd"] = str(over.get("ioratio"))
-            if under and isinstance(row.get("under"), dict) and under.get("ioratio"):
-                row["under"]["odd"] = str(under.get("ioratio"))
-
-
 def _chashui_warmup(
     *,
     session: requests.Session,
@@ -4573,7 +4572,12 @@ def _chashui_resolve_game_by_gid(
     if mode2 == "live":
         modes.append("today")
     elif mode2 == "today":
-        modes.append("live")
+        # Early fixtures are returned by a separate ``showtype=early``
+        # endpoint. Keep today as the first request, then immediately try the
+        # early feed before the live list.
+        modes.extend(["early", "live"])
+    elif mode2 == "early":
+        modes.extend(["today", "live"])
 
     def _field_ci(game: Mapping[str, Any], *names: str) -> str:
         values = {str(key).lower(): value for key, value in game.items()}
@@ -4587,6 +4591,7 @@ def _chashui_resolve_game_by_gid(
     resolved_parent = False
     resolved_by_fixture = False
     resolved_mode = mode2
+    last_lookup_error: Optional[BaseException] = None
     locator = fixture_locator if isinstance(fixture_locator, Mapping) else {}
 
     def _fixture_text(value: Any, *, strip_corner: bool = False) -> str:
@@ -4599,15 +4604,25 @@ def _chashui_resolve_game_by_gid(
     wanted_league = _fixture_text(locator.get("league"))
     wanted_home = _fixture_text(locator.get("team_h"), strip_corner=True)
     wanted_away = _fixture_text(locator.get("team_c"), strip_corner=True)
+    wanted_num_h = _fixture_text(locator.get("gnum_h"))
+    wanted_num_c = _fixture_text(locator.get("gnum_c"))
 
     def _fixture_candidates(games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if not (wanted_home and wanted_away):
+        if not ((wanted_home and wanted_away) or (wanted_num_h and wanted_num_c)):
             return []
         matches: List[Dict[str, Any]] = []
         for game in games:
             actual_home = _fixture_text(_field_ci(game, "TEAM_H"), strip_corner=True)
             actual_away = _fixture_text(_field_ci(game, "TEAM_C"), strip_corner=True)
-            if actual_home != wanted_home or actual_away != wanted_away:
+            actual_num_h = _fixture_text(_field_ci(game, "GNUM_H", "GNUMH", "TEAM_H_NUM"))
+            actual_num_c = _fixture_text(_field_ci(game, "GNUM_C", "GNUMC", "TEAM_C_NUM"))
+            names_match = bool(wanted_home and wanted_away and actual_home == wanted_home and actual_away == wanted_away)
+            numbers_match = bool(wanted_num_h and wanted_num_c and actual_num_h == wanted_num_h and actual_num_c == wanted_num_c)
+            if not (names_match or numbers_match):
+                continue
+            if wanted_home and wanted_away and actual_home and actual_away and not names_match:
+                continue
+            if wanted_num_h and wanted_num_c and actual_num_h and actual_num_c and not numbers_match:
                 continue
             actual_league = _fixture_text(_field_ci(game, "LEAGUE"))
             if wanted_league and actual_league and actual_league != wanted_league:
@@ -4616,19 +4631,29 @@ def _chashui_resolve_game_by_gid(
         return matches
 
     for candidate_mode in modes:
-        xml_text = _chashui_get_game_list_xml(
-            session=session,
-            base_url=str(member.get("base_url") or ""),
-            ver=str(member.get("ver") or ""),
-            uid=str(member.get("uid") or ""),
-            mode=candidate_mode,
-            timeout_s=timeout_s,
-        )
+        try:
+            xml_text = _chashui_get_game_list_xml(
+                session=session,
+                base_url=str(member.get("base_url") or ""),
+                ver=str(member.get("ver") or ""),
+                uid=str(member.get("uid") or ""),
+                mode=candidate_mode,
+                timeout_s=timeout_s,
+            )
+        except BaseException as exc:
+            last_lookup_error = exc
+            continue
         t = str(xml_text or "").strip()
         if not t:
-            raise RuntimeError("game_list_empty_response")
+            last_lookup_error = RuntimeError("game_list_empty_response")
+            continue
         if not t.startswith("<"):
-            raise RuntimeError(f"game_list_non_xml: {t[:160]}")
+            last_lookup_error = RuntimeError(f"game_list_non_xml: {t[:160]}")
+            continue
+        # A valid list response supersedes an earlier mode's transport error;
+        # if the fixture is absent from every valid list, report game_not_found
+        # rather than an unrelated timeout from the first mode.
+        last_lookup_error = None
         games = _chashui_parse_game_list_original(t) or _chashui_parse_game_list_xml_games(t)
         for g in games:
             if str(g.get("GID") or "").strip() == gid:
@@ -4652,6 +4677,8 @@ def _chashui_resolve_game_by_gid(
             resolved_mode = candidate_mode
             break
     if not found:
+        if last_lookup_error is not None:
+            raise last_lookup_error
         raise RuntimeError("game_not_found")
 
     return {
@@ -4668,6 +4695,7 @@ def _chashui_resolve_game_by_gid(
         "modeFallback": resolved_mode != mode2,
         "resolvedFromHalfGid": resolved_parent,
         "resolvedByFixture": resolved_by_fixture,
+        "resolvedByTeamNumber": bool(resolved_by_fixture and wanted_num_h and wanted_num_c),
         "fixtureLocator": {
             "league": str(locator.get("league") or "").strip(),
             "teamH": str(locator.get("team_h") or "").strip(),
@@ -4879,18 +4907,6 @@ def _chashui_get_odds_snapshot_by_resolved(
     }
 
     simple = _chashui_build_simple_markets(boards, meta)
-    if confirm_odds:
-        try:
-            _chashui_confirm_simple_markets(
-                session=session,
-                base_url=str(member.get("base_url") or ""),
-                ver=str(member.get("ver") or ""),
-                uid=str(member.get("uid") or ""),
-                simple=simple,
-                timeout_s=max(2, min(8, int(timeout_s))),
-            )
-        except Exception:
-            pass
 
     out: Dict[str, Any] = {
         "meta": meta,
@@ -4992,6 +5008,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._send_json_bytes(status, body)
+
+    def _send_json_bytes(self, status: int, body: bytes) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -5111,8 +5130,10 @@ class Handler(SimpleHTTPRequestHandler):
                 if len(order_ids) >= 300:
                     break
 
-            avg_odds_by_order = _load_ok_follow_avg_odds_by_order(self._data_dir / "follow_results.jsonl", order_ids)
-            latest_follow_by_order = _load_latest_success_follow_rows_by_order(self._data_dir / "follow_results.jsonl", order_ids)
+            avg_odds_by_order, latest_follow_by_order = _load_follow_order_summaries(
+                self._data_dir / "follow_results.jsonl",
+                order_ids,
+            )
             for row in orders:
                 if not isinstance(row, dict):
                     continue
@@ -5155,6 +5176,38 @@ class Handler(SimpleHTTPRequestHandler):
             done_limit = max(0, min(200, int(done_limit)))
 
             state_path = self._data_dir / "follow_state.json"
+            results_path = self._data_dir / "follow_results.jsonl"
+            try:
+                state_stat = state_path.stat()
+                state_revision = (int(state_stat.st_mtime_ns), int(state_stat.st_size))
+            except OSError:
+                state_revision = (0, 0)
+            try:
+                results_stat = results_path.stat()
+                results_revision = int(results_stat.st_mtime_ns)
+            except OSError:
+                results_revision = 0
+            snapshot_metrics_path = self._data_dir / "snapshot_watch_metrics.jsonl"
+            try:
+                snapshot_stat = snapshot_metrics_path.stat()
+                snapshot_revision = (int(snapshot_stat.st_mtime_ns), int(snapshot_stat.st_size))
+            except OSError:
+                snapshot_revision = (0, 0)
+            queue_cache_key = (
+                str(self._data_dir.resolve()),
+                state_revision[0] ^ results_revision,
+                state_revision[1],
+                snapshot_revision[0] ^ snapshot_revision[1],
+                include_done,
+                done_limit,
+            )
+            now_cache = time.monotonic()
+            with FOLLOW_QUEUE_HTTP_CACHE_LOCK:
+                cached_queue = FOLLOW_QUEUE_HTTP_CACHE.get(queue_cache_key)
+                if cached_queue and (now_cache - cached_queue[0] <= FOLLOW_HTTP_CACHE_TTL_S):
+                    self._send_json_bytes(200, cached_queue[1])
+                    return
+
             st = read_json_file(state_path, {})
             pending_raw = st.get("pending_orders") if isinstance(st, dict) else None
             jobs_raw = st.get("jobs") if isinstance(st, dict) else None
@@ -5212,12 +5265,51 @@ class Handler(SimpleHTTPRequestHandler):
                 order_ids,
                 ok_only=False,
             )
+            snapshot_market_keys: Set[Tuple[str, str]] = set()
+            for it in items:
+                order0 = it.get("order") if isinstance(it.get("order"), dict) else {}
+                derived = order0.get("derived") if isinstance(order0.get("derived"), dict) else {}
+                gid0 = str(order0.get("gid") or derived.get("gid") or "").strip()
+                mode0 = str(derived.get("mode") or ("live" if _is_live_backend_order(order0) else "today")).strip().lower()
+                if gid0:
+                    snapshot_market_keys.add((gid0, mode0))
+            latest_snapshot_by_market = _load_latest_snapshot_watch_by_market(
+                self._data_dir / "snapshot_watch_metrics.jsonl",
+                snapshot_market_keys,
+            )
             for it in items:
                 order0 = it.get("order") if isinstance(it.get("order"), dict) else {}
                 oid = str(order0.get("orderId") or "").strip()
                 row = latest_fail_by_order.get(oid)
                 if row:
                     order0["last_result"] = _follow_queue_simplify_result(row)
+                derived = order0.get("derived") if isinstance(order0.get("derived"), dict) else {}
+                gid0 = str(order0.get("gid") or derived.get("gid") or "").strip()
+                mode0 = str(derived.get("mode") or ("live" if _is_live_backend_order(order0) else "today")).strip().lower()
+                snapshot_diag = latest_snapshot_by_market.get((gid0, mode0)) if gid0 else None
+                if snapshot_diag and (
+                    snapshot_diag.get("ok") is False
+                    or snapshot_diag.get("target_line_found") is False
+                    or snapshot_diag.get("failure_summary")
+                ):
+                    order0["snapshot_diagnostics"] = snapshot_diag
+                    result0 = order0.get("last_result") if isinstance(order0.get("last_result"), dict) else None
+                    if result0 is None:
+                        result0 = {
+                            "ok": False,
+                            "message": snapshot_diag.get("failure_summary") or snapshot_diag.get("error_code") or "盘口采集失败",
+                            "error_type": snapshot_diag.get("error_code"),
+                            "exception": None,
+                            "response_head": None,
+                        }
+                        order0["last_result"] = result0
+                    summary = str(snapshot_diag.get("failure_summary") or "").strip()
+                    if snapshot_diag.get("submission") == "none" and summary and "未提交下注" not in summary:
+                        summary = f"{summary}，未提交下注"
+                    result0["snapshot_failure_summary"] = summary or None
+                    result0["snapshot_failover_count"] = snapshot_diag.get("failover_count")
+                    result0["snapshot_attempted_member_ids"] = snapshot_diag.get("attempted_member_ids")
+                    result0["snapshot_submission"] = snapshot_diag.get("submission") or "none"
 
             def sort_key(it: Dict[str, Any]) -> Tuple[int, float, float]:
                 st0 = str(it.get("status") or "")
@@ -5304,9 +5396,7 @@ class Handler(SimpleHTTPRequestHandler):
             if done_items:
                 items.extend(done_items)
 
-            self._send_json(
-                200,
-                {
+            queue_payload = {
                     "ok": True,
                     "items": items,
                     "counts": {
@@ -5320,8 +5410,15 @@ class Handler(SimpleHTTPRequestHandler):
                     "done_recent": done_list,
                     "updated_at": st.get("updated_at") if isinstance(st, dict) else None,
                     "server_time": now_iso(),
-                },
-            )
+                }
+            queue_body = json.dumps(queue_payload, ensure_ascii=False).encode("utf-8")
+            with FOLLOW_QUEUE_HTTP_CACHE_LOCK:
+                FOLLOW_QUEUE_HTTP_CACHE[queue_cache_key] = (time.monotonic(), queue_body)
+                if len(FOLLOW_QUEUE_HTTP_CACHE) > 24:
+                    oldest = sorted(FOLLOW_QUEUE_HTTP_CACHE.items(), key=lambda item: item[1][0])[:8]
+                    for old_key, _ in oldest:
+                        FOLLOW_QUEUE_HTTP_CACHE.pop(old_key, None)
+            self._send_json_bytes(200, queue_body)
             return
 
         if u.path == "/api/accounts":
@@ -5468,57 +5565,28 @@ class Handler(SimpleHTTPRequestHandler):
         # 查水（实时盘口/水位，只读）
         # -------------------------
         if u.path == "/api/chashui/status":
-            qs = parse_qs(u.query)
-            member_id = str((qs.get("member_id") or [""])[0]).strip()
-            exclude_member_ids = {
-                str(x).strip()
-                for x in ",".join(qs.get("exclude_member_ids") or [""]).split(",")
-                if str(x).strip()
-            }
-            lane = str((qs.get("lane") or ["games"])[0]).strip().lower() or "games"
+            # 查水已移除：只返回本地会员状态，严禁展示层通过此路由触发上游访问。
             doc = read_json_file(self._arsenal_path, {"members": []})
             members_raw = doc.get("members") if isinstance(doc, dict) else []
-            members: List[Dict[str, Any]] = [m for m in (members_raw or []) if isinstance(m, dict)]
-
-            selected = select_chashui_member_from_members(members, member_id=member_id)
-            if selected and str(selected.get("id") or "").strip() in exclude_member_ids:
-                selected = None
-
-            def sanitize(m: Dict[str, Any]) -> Dict[str, Any]:
-                disp = _proxy_display(m.get("proxy") or "")
-                return {
-                    "id": str(m.get("id") or ""),
-                    "label": str(m.get("label") or (m.get("username") or "")),
-                    "username": str(m.get("username") or ""),
-                    "role": str(m.get("role") or ""),
-                    "usage": member_usage_from_row(m),
-                    "status": str(m.get("status") or "unknown"),
-                    "base_url": str(m.get("base_url") or ""),
-                    "uidMasked": _mask_uid(str(m.get("uid") or "")),
-                    "ver": str(m.get("ver") or ""),
-                    "proxy": str(disp.get("label") or ""),
-                    "lastError": str(m.get("last_error") or m.get("lastError") or ""),
-                }
-
-            # 展示所有可用于查水的会话：优先只读会员；没有只读会员时，在线普通会员也可作为查询会话。
-            out_members = [
-                sanitize(m)
-                for m in members
-                if member_usage_from_row(m) == "read" or _is_online_session_member(m)
-            ]
-            payload: Dict[str, Any] = {
-                "ok": True,
-                "members": out_members,
-                "server_time": now_iso(),
-                "pool_type": "quote_readonly_or_online_fallback",
-                "sticky": False,
-                "fallback_used": False,
-                "eligible_count": len(_build_readonly_failover_candidates(members)),
-                "lane": lane,
-            }
-            if selected:
-                payload["member"] = sanitize(selected)
-            self._send_json(200, payload)
+            members = []
+            for row in members_raw or []:
+                if not isinstance(row, dict):
+                    continue
+                # 兼容旧页面的会员选择，但不再把密码、uid、代理等凭据
+                # 通过查水兼容接口回传给浏览器。
+                members.append(
+                    {
+                        "id": str(row.get("id") or ""),
+                        "label": str(row.get("label") or row.get("username") or row.get("id") or ""),
+                        "username": str(row.get("username") or ""),
+                        "status": str(row.get("status") or "unknown"),
+                        "role": str(row.get("role") or ""),
+                        "usage": str(row.get("usage") or ""),
+                        "base_url": str(row.get("base_url") or ""),
+                        "last_error": str(row.get("last_error") or row.get("lastError") or ""),
+                    }
+                )
+            self._send_json(200, {"ok": True, "members": members, "server_time": now_iso(), "disabled": True})
             return
 
         if u.path == "/api/manual-signal/session":
@@ -5546,192 +5614,21 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if u.path == "/api/chashui/games":
+            # 比赛列表查水已移除；空列表响应避免旧页面重试时访问上游。
             qs = parse_qs(u.query)
-            member_id = str((qs.get("member_id") or [""])[0]).strip()
             mode = _chashui_normalize_mode(str((qs.get("mode") or ["live"])[0]).strip())
-            if not member_id:
-                self._send_json(400, {"ok": False, "message": "missing_member_id", "server_time": now_iso()})
-                return
-
-            doc = read_json_file(self._arsenal_path, {"members": []})
-            members_raw = doc.get("members") if isinstance(doc, dict) else []
-            members = [m for m in (members_raw or []) if isinstance(m, dict)]
-            def load_games_for_member(member: Dict[str, Any]) -> Dict[str, Any]:
-                current_member_id = str(member.get("id") or "").strip()
-                base_url = str(member.get("base_url") or "").strip()
-                uid = str(member.get("uid") or "").strip()
-                ver = str(member.get("ver") or "").strip()
-                cookie = str(member.get("cookie") or "").strip()
-                proxy = str(member.get("proxy") or "").strip()
-                if not (base_url and uid and ver and cookie):
-                    raise RuntimeError("member_missing_uid_cookie_ver")
-
-                cached = _get_chashui_games_cache(current_member_id, mode)
-                if cached:
-                    return {
-                        "mode": mode,
-                        "games": cached["games"],
-                        "cached": True,
-                        "stale": False,
-                    }
-
-                sess = _make_member_session(base_url=base_url, proxy=proxy, cookie=cookie)
-                last_error: Optional[Exception] = None
-                xml_text = ""
-                for attempt in range(2):
-                    try:
-                        xml_text = _chashui_get_game_list_xml(session=sess, base_url=base_url, ver=ver, uid=uid, mode=mode, timeout_s=10)
-                        last_error = None
-                        break
-                    except Exception as e:
-                        last_error = e
-                        if attempt == 0:
-                            time.sleep(0.25)
-                if last_error is not None:
-                    raise last_error
-                t = str(xml_text or "").strip()
-                if not t:
-                    raise RuntimeError("game_list_empty_response")
-                if not t.startswith("<"):
-                    raise RuntimeError(f"game_list_non_xml: {t[:160]}")
-                games_raw = _chashui_parse_game_list_original(t) or _chashui_parse_game_list_xml_games(t)
-                games = _chashui_simplify_games(games_raw)
-                _set_chashui_games_cache(current_member_id, mode, games)
-                return {"mode": mode, "games": games}
-
-            run = _run_readonly_member_with_failover(
-                arsenal_path=self._arsenal_path,
-                members=members,
-                preferred_member_id=member_id,
-                lane="games",
-                runner=load_games_for_member,
-            )
-            if run.get("ok"):
-                payload = dict(run.get("result") or {})
-                payload.update(
-                    {
-                        "ok": True,
-                        "server_time": now_iso(),
-                        "readonly_member": _readonly_member_ref(run.get("member")),
-                        "fallback_used": bool(run.get("fallback_used")),
-                    }
-                )
-                self._send_json(200, payload)
-                return
-
-            for attempted_member_id in run.get("attempted_member_ids") or []:
-                stale = _get_chashui_games_cache(attempted_member_id, mode, allow_stale_s=CHASHUI_GAMES_CACHE_STALE_TTL_S)
-                if not stale:
-                    continue
-                stale_member = next((m for m in members if str(m.get("id") or "").strip() == str(attempted_member_id or "").strip()), None)
-                self._send_json(
-                    200,
-                    {
-                        "ok": True,
-                        "mode": mode,
-                        "games": stale["games"],
-                        "cached": True,
-                        "stale": True,
-                        "warning": f"get_game_list_failed: {run.get('error')}",
-                        "server_time": now_iso(),
-                        "readonly_member": _readonly_member_ref(stale_member),
-                        "fallback_used": bool(run.get("fallback_used")),
-                    },
-                )
-                return
-
-            message = str(run.get("error") or "readonly_pool_empty")
-            status = 404 if message == "readonly_pool_empty" else 502
-            self._send_json(
-                status,
-                {
-                    "ok": False,
-                    "message": "readonly_pool_empty" if message == "readonly_pool_empty" else f"get_game_list_failed: {message}",
-                    "server_time": now_iso(),
-                    "fallback_used": bool(run.get("fallback_used")),
-                },
-            )
+            self._send_json(200, {"ok": True, "mode": mode, "games": [], "disabled": True, "server_time": now_iso()})
             return
 
         if u.path == "/api/chashui/odds":
-            qs = parse_qs(u.query)
-            member_id = str((qs.get("member_id") or [""])[0]).strip()
-            gid = str((qs.get("gid") or [""])[0]).strip()
-            mode = _chashui_normalize_mode(str((qs.get("mode") or ["live"])[0]).strip())
-            include_raw = bool(re.match(r"^(1|true|yes)$", str((qs.get("raw") or ["0"])[0]), flags=re.IGNORECASE))
-            confirm_odds = bool(re.match(r"^(1|true|yes)$", str((qs.get("confirm") or ["0"])[0]), flags=re.IGNORECASE))
-            force_refresh = bool(re.match(r"^(1|true|yes)$", str((qs.get("refresh") or ["0"])[0]), flags=re.IGNORECASE))
-            if not gid:
-                self._send_json(400, {"ok": False, "message": "missing_gid", "server_time": now_iso()})
-                return
-
-            doc = read_json_file(self._arsenal_path, {"members": []})
-            members_raw = doc.get("members") if isinstance(doc, dict) else []
-            members = [m for m in (members_raw or []) if isinstance(m, dict)]
-            def load_snapshot_for_member(member: Dict[str, Any]) -> Dict[str, Any]:
-                base_url = str(member.get("base_url") or "").strip()
-                uid = str(member.get("uid") or "").strip()
-                ver = str(member.get("ver") or "").strip()
-                cookie = str(member.get("cookie") or "").strip()
-                proxy = str(member.get("proxy") or "").strip()
-                if not (base_url and uid and ver and cookie):
-                    raise RuntimeError("member_missing_uid_cookie_ver")
-                sess = _make_member_session(base_url=base_url, proxy=proxy, cookie=cookie)
-                resolved = _chashui_resolve_game_by_gid(session=sess, member=member, requested_gid=gid, mode=mode, timeout_s=10)
-                return _chashui_get_odds_snapshot_with_empty_retry(
-                    session=sess,
-                    member=member,
-                    resolved=resolved,
-                    include_raw=include_raw,
-                    confirm_odds=confirm_odds,
-                    timeout_s=10,
-                )
-
-            run_state: Dict[str, Any] = {}
-
-            def fetch_shared_snapshot() -> Dict[str, Any]:
-                run = _run_readonly_member_with_failover(
-                    arsenal_path=self._arsenal_path,
-                    members=members,
-                    preferred_member_id=member_id,
-                    lane="odds",
-                    runner=load_snapshot_for_member,
-                )
-                run_state.update(run)
-                if not run.get("ok"):
-                    raise RuntimeError(str(run.get("error") or "readonly_pool_empty"))
-                return {
-                    **dict(run.get("result") or {}),
-                    "readonly_member": _readonly_member_ref(run.get("member")),
-                    "fallback_used": bool(run.get("fallback_used")),
-                }
-
-            try:
-                payload = _load_or_refresh_odds_snapshot(
-                    self._data_dir / "odds_snapshot_cache.json",
-                    gid=gid,
-                    mode=mode,
-                    fetcher=fetch_shared_snapshot,
-                    max_age_s=CHASHUI_ODDS_SNAPSHOT_TTL_S,
-                    allow_stale_s=CHASHUI_ODDS_SNAPSHOT_STALE_TTL_S,
-                    force_refresh=bool(force_refresh or include_raw or confirm_odds),
-                )
-                self._send_json(200, {"ok": True, **payload, "server_time": now_iso()})
-            except Exception as exc:
-                message = str(run_state.get("error") or exc or "readonly_pool_empty")
-                status = 404 if message == "readonly_pool_empty" else 502
-                self._send_json(
-                    status,
-                    {
-                        "ok": False,
-                        "message": message,
-                        "server_time": now_iso(),
-                        "fallback_used": bool(run_state.get("fallback_used")),
-                    },
-                )
+            # 展示查水已移除，避免任何页面请求绕过 Snapshot watcher 触发上游盘口访问。
+            self._send_json(410, {"ok": False, "message": "chashui_disabled", "server_time": now_iso()})
             return
 
         if u.path == "/api/chashui/capture-event-token":
+            self._send_json(410, {"ok": False, "message": "chashui_disabled", "server_time": now_iso()})
+            return
+
             qs = parse_qs(u.query)
             member_id = str((qs.get("member_id") or [""])[0]).strip()
             match_id = str(
@@ -5763,6 +5660,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if u.path == "/api/chashui/events":
+            self._send_json(410, {"ok": False, "message": "chashui_disabled", "server_time": now_iso()})
+            return
+
             qs = parse_qs(u.query)
             member_id = str((qs.get("member_id") or [""])[0]).strip()
             gid = str((qs.get("gid") or [""])[0]).strip()
@@ -5931,169 +5831,6 @@ class Handler(SimpleHTTPRequestHandler):
                 self._send_json(502, {"ok": False, "message": detail, "server_time": now_iso()})
             return
 
-        if u.path == "/api/chashui/stream":
-            qs = parse_qs(u.query)
-            member_id = str((qs.get("member_id") or [""])[0]).strip()
-            gid = str((qs.get("gid") or [""])[0]).strip()
-            mode = _chashui_normalize_mode(str((qs.get("mode") or ["live"])[0]).strip())
-            include_raw = bool(re.match(r"^(1|true|yes)$", str((qs.get("raw") or ["0"])[0]), flags=re.IGNORECASE))
-            confirm_odds = bool(re.match(r"^(1|true|yes)$", str((qs.get("confirm") or ["0"])[0]), flags=re.IGNORECASE))
-            try:
-                refresh_ms = int(float(str((qs.get("refreshMs") or ["3000"])[0]).strip() or "3000"))
-            except Exception:
-                refresh_ms = 3000
-            refresh_ms = max(1000, min(30000, int(refresh_ms)))
-
-            if not (member_id and gid):
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": False, "message": "missing_member_id_or_gid"}, ensure_ascii=False).encode("utf-8"))
-                return
-
-            doc = read_json_file(self._arsenal_path, {"members": []})
-            members_raw = doc.get("members") if isinstance(doc, dict) else []
-            member = None
-            for m in (members_raw or []):
-                if isinstance(m, dict) and str(m.get("id") or "").strip() == member_id:
-                    member = m
-                    break
-            if not member:
-                self.send_response(404)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": False, "message": "member_not_found"}, ensure_ascii=False).encode("utf-8"))
-                return
-
-            base_url = str(member.get("base_url") or "").strip()
-            uid = str(member.get("uid") or "").strip()
-            ver = str(member.get("ver") or "").strip()
-            cookie = str(member.get("cookie") or "").strip()
-            proxy = str(member.get("proxy") or "").strip()
-            if not (base_url and uid and ver and cookie):
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": False, "message": "member_missing_uid_cookie_ver"}, ensure_ascii=False).encode("utf-8"))
-                return
-
-            # SSE headers
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache, no-transform")
-            self.send_header("Connection", "keep-alive")
-            self.end_headers()
-
-            def send(event: str, data: Dict[str, Any]) -> bool:
-                """
-                SSE 写入：客户端断开是正常行为（curl 超时/页面切换），不要打印异常堆栈。
-                返回：是否写入成功；失败应直接结束处理线程。
-                """
-                try:
-                    if event:
-                        self.wfile.write(f"event: {event}\n".encode("utf-8"))
-                    self.wfile.write(f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8"))
-                    try:
-                        self.wfile.flush()
-                    except Exception:
-                        pass
-                    return True
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    return False
-
-            sess = _make_member_session(base_url=base_url, proxy=proxy, cookie=cookie)
-            try:
-                resolved = _chashui_resolve_game_by_gid(session=sess, member=member, requested_gid=gid, mode=mode, timeout_s=10)
-            except Exception as e:
-                send("error", {"message": str(e)})
-                return
-
-            if not send("status", {"ok": True, "refreshMs": refresh_ms, "gid": resolved.get("gid"), "mode": resolved.get("mode"), "confirmOdds": bool(confirm_odds)}):
-                return
-
-            def send_comment(text: str) -> bool:
-                try:
-                    self.wfile.write(f": {text}\n\n".encode("utf-8"))
-                    try:
-                        self.wfile.flush()
-                    except Exception:
-                        pass
-                    return True
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    return False
-
-            err_streak = 0
-            last_ping_at = time.time()
-            ping_interval_s = 15.0
-
-            while True:
-                # Keep-alive ping：部分网络环境下若长期无数据会被中间层断开
-                try:
-                    now0 = time.time()
-                    if (now0 - last_ping_at) >= float(ping_interval_s):
-                        if not send_comment("ping"):
-                            return
-                        last_ping_at = now0
-                except Exception:
-                    pass
-
-                try:
-                    snapshot = _chashui_get_odds_snapshot_by_resolved(
-                        session=sess,
-                        member=member,
-                        resolved=resolved,
-                        include_raw=include_raw,
-                        confirm_odds=confirm_odds,
-                        timeout_s=10,
-                    )
-                    if not send("data", snapshot):
-                        return
-                    err_streak = 0
-                except Exception as e:
-                    err_streak += 1
-                    if not send("error", {"message": str(e), "streak": int(err_streak)}):
-                        return
-                    # 不中断 SSE：瞬时网络抖动/站点负载时，直接 return 会导致前端看起来“老断开”
-                    try:
-                        backoff_s = min(5.0, 0.4 * (2 ** min(int(err_streak), 4)))
-                        time.sleep(float(backoff_s))
-                    except Exception:
-                        pass
-                    # 连续错误较多：重建 session + 重新 resolve（防止 cookie/上下文/比赛迁移导致一直失败）
-                    if int(err_streak) >= 3:
-                        try:
-                            sess = _make_member_session(base_url=base_url, proxy=proxy, cookie=cookie)
-                            resolved = _chashui_resolve_game_by_gid(
-                                session=sess,
-                                member=member,
-                                requested_gid=gid,
-                                mode=mode,
-                                timeout_s=10,
-                            )
-                            err_streak = 0
-                            if not send(
-                                "status",
-                                {
-                                    "ok": True,
-                                    "refreshMs": refresh_ms,
-                                    "gid": resolved.get("gid"),
-                                    "mode": resolved.get("mode"),
-                                    "confirmOdds": bool(confirm_odds),
-                                    "recovered": True,
-                                },
-                            ):
-                                return
-                        except Exception as e2:
-                            # 继续留在循环里，等待下一次重试
-                            if not send("error", {"message": str(e2), "streak": int(err_streak), "recover": False}):
-                                return
-                    continue
-
-                try:
-                    time.sleep(float(refresh_ms) / 1000.0)
-                except Exception:
-                    return
-
         if u.path == "/api/arsenal":
             doc = read_json_file(self._arsenal_path, {"members": []})
             members = doc.get("members") or []
@@ -6190,15 +5927,49 @@ class Handler(SimpleHTTPRequestHandler):
 
         if u.path == "/api/follow-results":
             qs = parse_qs(u.query)
-            limit = int((qs.get("limit") or ["80"])[0])
+            try:
+                requested_limit = int((qs.get("limit") or ["80"])[0])
+            except Exception:
+                requested_limit = 80
+            # 兼容旧版队列页：它会固定请求 1000 条并每秒重复拉取，
+            # 返回最近 100 条即可满足旧页面展示，同时避免大 JSON 响应拖慢 WebUI。
+            limit = max(1, min(100 if requested_limit >= 1000 else 300, requested_limit))
             path = self._data_dir / "follow_results.jsonl"
             deleted_order_ids = load_deleted_order_ids(self._data_dir)
+            try:
+                result_stat = path.stat()
+                result_revision = (int(result_stat.st_mtime_ns), int(result_stat.st_size))
+            except OSError:
+                result_revision = (0, 0)
+            try:
+                deleted_stat = (self._data_dir / "deleted_orders.json").stat()
+                deleted_revision = int(deleted_stat.st_mtime_ns)
+            except OSError:
+                deleted_revision = 0
+            results_cache_key = (str(path.resolve()), result_revision[0] ^ deleted_revision, int(limit))
+            now_cache = time.monotonic()
+            with FOLLOW_RESULTS_HTTP_CACHE_LOCK:
+                cached_results = FOLLOW_RESULTS_HTTP_CACHE.get(results_cache_key)
+                if cached_results and (now_cache - cached_results[0] <= FOLLOW_HTTP_CACHE_TTL_S):
+                    self._send_json_bytes(200, cached_results[1])
+                    return
+
             scan_limit = max(1, int(limit)) * 5
             results = read_jsonl_file(path, limit=scan_limit)
             if deleted_order_ids:
                 results = [row for row in results if _extract_order_id_from_row(row) not in deleted_order_ids]
             results = results[: max(1, int(limit))]
-            self._send_json(200, {"ok": True, "results": results, "server_time": now_iso()})
+            results_body = json.dumps(
+                {"ok": True, "results": results, "server_time": now_iso()},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            with FOLLOW_RESULTS_HTTP_CACHE_LOCK:
+                FOLLOW_RESULTS_HTTP_CACHE[results_cache_key] = (time.monotonic(), results_body)
+                if len(FOLLOW_RESULTS_HTTP_CACHE) > 12:
+                    oldest = sorted(FOLLOW_RESULTS_HTTP_CACHE.items(), key=lambda item: item[1][0])[:4]
+                    for old_key, _ in oldest:
+                        FOLLOW_RESULTS_HTTP_CACHE.pop(old_key, None)
+            self._send_json_bytes(200, results_body)
             return
 
         if u.path == "/api/follow-settlement-status":

@@ -39,6 +39,7 @@ class TestFollowEngineLauncherControl(unittest.TestCase):
                 patch.object(launcher, "_follow_engine_worker_spec", return_value=spec), \
                 patch.object(launcher, "read_follow_engine_pid_info", return_value=None), \
                 patch.object(launcher, "build_worker_process_command", return_value=["python3", "follow_engine.py"]), \
+                patch.object(launcher, "is_pid_running", return_value=True), \
                 patch("app.subprocess.Popen", return_value=_FakeProc(43210)):
                 rc = launcher.start_follow_engine()
 

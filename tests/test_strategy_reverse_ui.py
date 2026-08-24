@@ -31,8 +31,10 @@ class TestStrategyReverseUi(unittest.TestCase):
         page = (Path(__file__).resolve().parents[1] / "app" / "webui" / "index.html").read_text(encoding="utf-8")
         self.assertIn("最低跟单水位", page)
         self.assertIn("最高跟单水位", page)
-        self.assertIn("低于该水位直接跳过", page)
-        self.assertIn("高于该水位直接跳过", page)
+        self.assertIn("低于该水位跳过", page)
+        self.assertIn("高于该水位跳过", page)
+        self.assertIn('id="follow-min-odds"', page)
+        self.assertIn('id="follow-max-odds"', page)
 
 
 if __name__ == "__main__":

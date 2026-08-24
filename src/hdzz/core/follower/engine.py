@@ -2136,10 +2136,17 @@ def target_ratio_percent_override(settings: Dict[str, Any], target: str) -> Opti
 
 def target_only_live(settings: Dict[str, Any], target: str) -> bool:
     """
-    per-target 过滤：只跟滚球。
+    只跟滚球过滤：全局开关优先，旧配置回退到后台级规则。
+    - settings["only_live"] 为 True：所有后台只跟滚球。
+    - settings["only_live"] 为 False：明确关闭全局过滤，早盘和滚球都跟。
+    - settings["only_live"] 为 None/缺失：沿用旧的 per-target 规则。
     - settings["targets"] 约定为：[{ "name": "<target>", "only_live": true/false }, ...]
-    - 未配置则默认 False（保持旧行为：全跟）
     """
+    if isinstance(settings, dict) and "only_live" in settings and settings.get("only_live") is not None:
+        raw = settings.get("only_live")
+        if isinstance(raw, str):
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(raw)
     rule = _find_target_rule(settings, target)
     return bool(rule.get("only_live") or False) if isinstance(rule, dict) else False
 
@@ -3914,6 +3921,9 @@ def apply_market_rule_to_stake(
 def load_settings(data_dir: Path) -> Dict[str, Any]:
     defaults: Dict[str, Any] = {
             "enabled": False,
+            # Tri-state migration: None keeps legacy per-target only_live
+            # rules active until the new global switch is explicitly saved.
+            "only_live": None,
             "mode": "fixed",
             "fixed_amount": 50,
             "ratio_percent": 100,
@@ -3960,6 +3970,11 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             # CONFIRMED_FAILED 或 STILL_UNKNOWN，绝不降级成普通失败换会员重下。
             "unknown_result_reconcile_max_seconds": 120,
             "unknown_result_reconcile_max_attempts": 5,
+            # FT_bet 明确返回 betError* 且没有票号时可以安全重试。
+            # 与 UNKNOWN_RESULT 不同，这类响应已确认没有成交；使用独立
+            # 上限防止通用 retry_max_attempts=0 时无限提交。
+            "market_reject_max_attempts": 3,
+            "market_reject_retry_delay_seconds": 0.5,
             "member_error_cooldown_seconds": 30,
             # 会员登录失效（1X014）冷却；设为 0 表示不做额外冷却（失效会话仍会标记离线并重登）。
             "member_cooldown_1X014_seconds": 0,
@@ -4320,14 +4335,16 @@ def is_retryable_follow_result(result: Dict[str, Any]) -> bool:
     direct_status = str(result.get("snapshot_direct_result_status") or "").strip().upper()
     if direct_status == UNKNOWN_RESULT:
         return True
-    # The diagnostic A/B experiment permits at most one real FT_bet per
-    # split. A context-only failure can retry. Once FT_bet was sent, only the
-    # UNKNOWN_RESULT branch above may continue, and it performs no resubmit.
+    # Diagnostic mode normally permits at most one real FT_bet per split.
+    # A structured betError* response is the exception: the upstream has
+    # explicitly rejected the bet and returned no ticket, so a bounded retry
+    # cannot duplicate a successful wager. UNKNOWN_RESULT remains reconcile
+    # only and is handled above.
     if (
         str(result.get("bet_context_mode") or "").strip().lower() == "diagnostic_order_view"
         and bool(result.get("snapshot_direct_submission"))
     ):
-        return False
+        return bool(result.get("market_submit_reject_retryable")) and direct_status == MARKET_ERROR
     if direct_status == MARKET_SUBMIT_REJECTED:
         return False
     if direct_status in {
@@ -4383,23 +4400,51 @@ def is_retryable_follow_result(result: Dict[str, Any]) -> bool:
     return True
 
 
-def _apply_market_submit_breaker(job: RetryJob, result: Dict[str, Any]) -> bool:
-    """熔断同一 split + MarketRow 的重复 betError000 提交。
+def _explicit_market_rejection_code(result: Dict[str, Any]) -> str:
+    """Return an upstream betError* only when FT_bet definitely rejected it."""
+    if not isinstance(result, dict) or bool(result.get("ok")):
+        return ""
+    if not bool(result.get("snapshot_direct_submission")):
+        return ""
+    request = result.get("ft_bet_request")
+    if not isinstance(request, dict) or str(request.get("p") or "").strip() != "FT_bet":
+        return ""
+    raw = result.get("ft_bet_raw_response") if isinstance(result.get("ft_bet_raw_response"), dict) else {}
+    try:
+        http_status = int(raw.get("http_status") or 0)
+    except Exception:
+        http_status = 0
+    if http_status < 200 or http_status >= 300:
+        return ""
+    parsed = raw.get("parsed_fields") if isinstance(raw.get("parsed_fields"), dict) else {}
+    bet_head = result.get("bet_head") if isinstance(result.get("bet_head"), dict) else {}
+    if any(
+        str(ticket or "").strip()
+        for ticket in (result.get("ticket_id"), bet_head.get("ticket_id"), parsed.get("ticket_id"))
+    ):
+        return ""
+    code = str(raw.get("errormsg") or result.get("error_code") or "").strip()
+    return code if code.lower().startswith("beterror") else ""
 
-    只有真实发出 FT_bet 且原始 XML 明确为 betError000 才计数；等待
-    MEMBER_IORATIO/SNAPSHOT 状态不会改变计数。盘口行 fingerprint 变化时
-    自动开始新的计数窗口。
+
+def _apply_market_submit_breaker(
+    job: RetryJob,
+    result: Dict[str, Any],
+    *,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 0.5,
+) -> bool:
+    """Bound explicit betError* retries for one split and exact MarketRow.
+
+    Only a real FT_bet with a structured betError* response and no ticket is
+    counted. Transport failures remain UNKNOWN_RESULT and never enter this
+    retry path. A changed MarketRow or error code starts a fresh bounded
+    window because the next request is no longer the same rejected payload.
     """
     if not isinstance(job, RetryJob) or not isinstance(result, dict):
         return False
-    if not bool(result.get("snapshot_direct_submission")):
-        return False
-    request = result.get("ft_bet_request")
-    if not isinstance(request, dict) or str(request.get("p") or "") != "FT_bet":
-        return False
-    raw = result.get("ft_bet_raw_response") if isinstance(result.get("ft_bet_raw_response"), dict) else {}
-    error_code = str(raw.get("errormsg") or result.get("error_code") or "").strip()
-    if error_code != "betError000":
+    error_code = _explicit_market_rejection_code(result)
+    if not error_code:
         return False
     fingerprint = str(
         result.get("market_row_fingerprint")
@@ -4408,6 +4453,12 @@ def _apply_market_submit_breaker(job: RetryJob, result: Dict[str, Any]) -> bool:
         or ""
     ).strip()
     if not fingerprint:
+        request = result.get("ft_bet_request") if isinstance(result.get("ft_bet_request"), dict) else {}
+        fingerprint = "|".join(
+            str(request.get(key) or "").strip()
+            for key in ("gid", "gtype", "wtype", "rtype", "chose_team", "con", "ratio")
+        )
+    if not fingerprint.strip("|"):
         return False
     previous_fp = str(getattr(job, "market_submit_reject_fingerprint", "") or "").strip()
     previous_code = str(getattr(job, "market_submit_reject_code", "") or "").strip()
@@ -4421,7 +4472,13 @@ def _apply_market_submit_breaker(job: RetryJob, result: Dict[str, Any]) -> bool:
     result["market_submit_reject_fingerprint"] = fingerprint
     result["market_submit_reject_code"] = error_code
     result["market_submit_reject_count"] = count
-    if count < 2:
+    limit = max(1, min(20, int(max_attempts)))
+    delay = max(0.0, min(30.0, float(retry_delay_seconds)))
+    result["market_submit_reject_max_attempts"] = limit
+    result["market_submit_reject_retry_delay_seconds"] = delay
+    if count < limit:
+        result["market_submit_reject_retryable"] = True
+        result["message"] = f"平台明确拒绝下注（{error_code}），{delay:g}秒后换会员重试（{count}/{limit}）。"
         return False
     result["market_submit_rejected"] = True
     result["market_submit_original_error_code"] = error_code
@@ -4429,7 +4486,24 @@ def _apply_market_submit_breaker(job: RetryJob, result: Dict[str, Any]) -> bool:
     result["snapshot_direct_result_status"] = MARKET_SUBMIT_REJECTED
     result["result_status"] = MARKET_SUBMIT_REJECTED
     result["error_code"] = MARKET_SUBMIT_REJECTED
-    result["message"] = "同一拆分单同一盘口连续两次返回 betError000，已停止继续 FT_bet（MARKET_SUBMIT_REJECTED）。"
+    result["message"] = (
+        f"同一拆分单同一盘口连续 {count} 次返回 {error_code}，"
+        "已达到平台拒单重试上限，停止继续 FT_bet（MARKET_SUBMIT_REJECTED）。"
+    )
+    return True
+
+
+def _schedule_explicit_market_rejection_retry(job: RetryJob, result: Dict[str, Any], *, now: float) -> bool:
+    """Schedule a bounded betError* retry without waiting for a revision bump."""
+    if not isinstance(job, RetryJob) or not bool(result.get("market_submit_reject_retryable")):
+        return False
+    delay = max(0.0, min(30.0, _safe_float(result.get("market_submit_reject_retry_delay_seconds"), 0.5)))
+    retry_at = float(now) + delay
+    job.order.pop("_wait_for_snapshot_revision", None)
+    job.order["_market_reject_retry_not_before"] = retry_at
+    job.line_not_found_wait_started_at = 0.0
+    job.line_not_found_wait_deadline_at = 0.0
+    job.next_try_at = retry_at
     return True
 
 
@@ -6444,6 +6518,9 @@ def _consume_snapshot_publish_wakeup(
     """
     if not isinstance(job, RetryJob):
         return False
+    reject_retry_not_before = _safe_float(job.order.get("_market_reject_retry_not_before"), 0.0)
+    if reject_retry_not_before > float(now_value):
+        return False
     if str(job.last_err or "").upper() not in {
         SNAPSHOT_MISSING,
         SNAPSHOT_STALE,
@@ -6902,7 +6979,12 @@ def main() -> int:
             )
             _enqueue_follow_notification(job, result)
             return
-        _apply_market_submit_breaker(job, result)
+        _apply_market_submit_breaker(
+            job,
+            result,
+            max_attempts=int(_setting_or_default(meta, "market_reject_max_attempts", 3)),
+            retry_delay_seconds=float(_setting_or_default(meta, "market_reject_retry_delay", 0.5)),
+        )
         result["error_class"] = classify_execution_error(result)
         try:
             result["order_elapsed_s"] = round(float(now_ts()) - float(job.created_at or 0.0), 3)
@@ -7021,6 +7103,22 @@ def main() -> int:
                 _cooldown_member(str(job.member_id or ""), max(0.0, min(600.0, cooldown_s)))
             except Exception:
                 pass
+        if _schedule_explicit_market_rejection_retry(job, result, now=float(now_ts())):
+            _append_trace_jsonl(
+                trace_path,
+                {
+                    "event": "market_reject_retry_scheduled",
+                    "key": job.key,
+                    "orderId": job.order_id,
+                    "attempt": attempt_no,
+                    "member": str(result.get("member") or ""),
+                    "error_code": str(result.get("market_submit_reject_code") or ""),
+                    "reject_count": int(result.get("market_submit_reject_count") or 0),
+                    "reject_limit": int(result.get("market_submit_reject_max_attempts") or 0),
+                    "retry_at": float(job.next_try_at or 0.0),
+                },
+            )
+            return
         if job.last_err == MARKET_ERROR:
             revision = _safe_int(result.get("snapshot_direct_revision"), 0)
             if revision > 0:
@@ -7444,6 +7542,8 @@ def main() -> int:
         wait_1x001_max = float(settings.get("wait_1X001_max_seconds") or 300)
         wait_line_not_found_probe = float(settings.get("wait_line_not_found_probe_seconds") or 2)
         wait_line_not_found_max = float(settings.get("wait_line_not_found_max_seconds") or 30)
+        market_reject_max_attempts = int(_setting_or_default(settings, "market_reject_max_attempts", 3))
+        market_reject_retry_delay = float(_setting_or_default(settings, "market_reject_retry_delay_seconds", 0.5))
         member_cooldown_1x014 = float(_setting_or_default(settings, "member_cooldown_1X014_seconds", 0))
         retry_max_attempts_on_1x001 = int(_setting_or_default(settings, "retry_max_attempts_on_1X001", 5))
         retry_max_seconds_on_1x001 = float(_setting_or_default(settings, "retry_max_seconds_on_1X001", 0))
@@ -7462,6 +7562,8 @@ def main() -> int:
         wait_1x001_max = max(0.0, min(600.0, float(wait_1x001_max)))
         wait_line_not_found_probe = max(0.2, min(60.0, float(wait_line_not_found_probe)))
         wait_line_not_found_max = max(0.0, min(600.0, float(wait_line_not_found_max)))
+        market_reject_max_attempts = max(1, min(20, int(market_reject_max_attempts)))
+        market_reject_retry_delay = max(0.0, min(30.0, float(market_reject_retry_delay)))
         member_cooldown_1x014 = max(0.0, min(600.0, float(member_cooldown_1x014)))
         retry_max_attempts_on_1x001 = max(0, min(5000, retry_max_attempts_on_1x001))
         retry_max_seconds_on_1x001 = max(0.0, float(retry_max_seconds_on_1x001))
@@ -7791,6 +7893,11 @@ def main() -> int:
 
             # 盘口厨房先准备参数，会员池后租用。Snapshot 未就绪时不选择、不占用会员。
             if not in_unknown_result_wait:
+                reject_retry_not_before = _safe_float(job.order.get("_market_reject_retry_not_before"), 0.0)
+                if reject_retry_not_before > float(now):
+                    job.next_try_at = reject_retry_not_before
+                    continue
+                job.order.pop("_market_reject_retry_not_before", None)
                 probe_settings = dict(one_shot_settings)
                 probe_settings["_context_retry"] = bool(last_job_err == CONTEXT_RETRYABLE)
                 probe_settings["_context_retry_fingerprint"] = str(job.order.get("_context_retry_fingerprint") or "")
@@ -8125,6 +8232,8 @@ def main() -> int:
                         "wait_line_not_found_max": float(wait_line_not_found_max),
                         "wait_line_not_found_probe": float(wait_line_not_found_probe),
                         "retry_delay": float(retry_delay_seconds),
+                        "market_reject_max_attempts": int(market_reject_max_attempts),
+                        "market_reject_retry_delay": float(market_reject_retry_delay),
                         "split_min_stake": float(split_min_stake_cfg),
                     }
                     job.trigger_reason = ""
@@ -8279,7 +8388,12 @@ def main() -> int:
             result.setdefault("split_order_id", job.key)
             result["split_index"] = int(job.split_index or 0) + 1
             result["split_count"] = int(job.split_count or 1)
-            _apply_market_submit_breaker(job, result)
+            _apply_market_submit_breaker(
+                job,
+                result,
+                max_attempts=market_reject_max_attempts,
+                retry_delay_seconds=market_reject_retry_delay,
+            )
             result["error_class"] = classify_execution_error(result)
             try:
                 result["split_delay_seconds"] = float(getattr(job, "split_delay_seconds", 0.0) or 0.0)
@@ -8703,6 +8817,28 @@ def main() -> int:
             job.attempts = int(attempt_no)
             job.last_message = str(result.get("message") or "")
             job.last_err = extract_err_from_result(result)
+            if _schedule_explicit_market_rejection_retry(job, result, now=float(now_ts())):
+                _append_trace_jsonl(
+                    trace_path,
+                    {
+                        "event": "market_reject_retry_scheduled",
+                        "key": job.key,
+                        "orderId": job.order_id,
+                        "attempt": int(attempt_no),
+                        "member": str(result.get("member") or ""),
+                        "error_code": str(result.get("market_submit_reject_code") or ""),
+                        "reject_count": int(result.get("market_submit_reject_count") or 0),
+                        "reject_limit": int(result.get("market_submit_reject_max_attempts") or 0),
+                        "retry_at": float(job.next_try_at or 0.0),
+                    },
+                )
+                print(
+                    f"[{now_iso()}] 平台拒单，换会员重试 order={job.order_id} "
+                    f"attempt={job.attempts} code={result.get('market_submit_reject_code')} "
+                    f"next_in={result.get('market_submit_reject_retry_delay_seconds')}s",
+                    flush=True,
+                )
+                continue
             if job.last_err == MARKET_ERROR:
                 revision = _safe_int(result.get("snapshot_direct_revision"), 0)
                 if revision > 0:

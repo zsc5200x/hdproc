@@ -57,7 +57,7 @@ class RetryJob:
     used_member_ids: List[str] = field(default_factory=list)
     # Telegram 展示用：记录每一笔分单（按 split_index）最近一次结果，避免编辑消息时丢失历史
     split_part_results: Dict[int, Dict[str, Any]] = field(default_factory=dict)
-    # 同一精确盘口连续收到两次相同 betError000 后熔断，防止重复提交同一套参数。
+    # 同一精确盘口连续收到明确 betError* 时的有限重试计数。
     market_submit_reject_fingerprint: str = ""
     market_submit_reject_code: str = ""
     market_submit_reject_count: int = 0

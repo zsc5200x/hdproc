@@ -17,7 +17,7 @@ class OrderBetInfoFollowUITest(unittest.TestCase):
         js = APP_JS.read_text(encoding="utf-8")
         html = INDEX_HTML.read_text(encoding="utf-8")
 
-        self.assertIn("/api/follow-results?limit=1000", js)
+        self.assertIn("/api/follow-results?limit=500", js)
         self.assertIn("renderFollowExecutionPanel", js)
         self.assertIn("buildFollowExecutionModel", js)
         self.assertIn("bet-ticket-follow-panel", html)
