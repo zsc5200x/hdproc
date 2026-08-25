@@ -4742,6 +4742,28 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
 <script src="tg_signal_popup.js?v=20260824-system-center-1"></script>
 <script src="app.js?v=20260825-telegram-order-forward-1"></script>
 <script>
+/* ── Tauri window dragging ──────────────────────
+ * The production shell navigates this WebView to the local Python WebUI at
+ * 127.0.0.1:9999. Use the explicitly scoped Tauri IPC bridge instead of
+ * relying only on data-tauri-drag-region, which is not wired for a remote
+ * page. Controls remain above this layer and keep their normal mouse events.
+ */
+(() => {
+  const dragRegion = document.querySelector('.tn-drag-region[data-tauri-drag-region]');
+  if (!dragRegion || dragRegion.dataset.tauriDragBound === 'true') return;
+  dragRegion.addEventListener('mousedown', (event) => {
+    if (event.button !== 0) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target && target.closest('button, input, select, textarea, a, [role="button"]')) return;
+    const currentWindow = window.__TAURI__?.window?.getCurrentWindow?.();
+    const startDragging = currentWindow?.startDragging;
+    if (typeof startDragging !== 'function') return;
+    event.preventDefault();
+    void startDragging.call(currentWindow).catch(() => undefined);
+  });
+  dragRegion.dataset.tauriDragBound = 'true';
+})();
+
 /* ── Extra wiring ─────────────────────────────── */
 const PAGE_TITLES = {
   orders:'实时订单流', queue:'跟单队列',

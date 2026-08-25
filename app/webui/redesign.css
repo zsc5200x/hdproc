@@ -75,14 +75,18 @@ body::before, body::after { display: none; }
   box-shadow: 0 8px 24px rgba(0,0,0,.2); isolation: isolate;
 }
 #topnav .tn-drag-region {
-  position: absolute; inset: 0; z-index: 0; cursor: default;
+  position: absolute; inset: 0; z-index: 0; cursor: grab;
+  -webkit-app-region: drag;
+}
+#topnav .tn-drag-region:active {
+  cursor: grabbing;
 }
 #topnav > .tn-brand,
 #topnav > .tn-nav,
 #topnav > .tn-right {
   position: relative; z-index: 1; width: max-content;
 }
-#topnav > .tn-brand { justify-self: start; }
+#topnav > .tn-brand { justify-self: start; margin-left: 48px; }
 #topnav > .tn-right { justify-self: end; }
 #topnav::after {
   content: ""; position: absolute; left: 28px; right: 28px; bottom: -1px;
