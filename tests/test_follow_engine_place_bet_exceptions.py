@@ -1,3 +1,4 @@
+import json
 import tempfile
 import sys
 import time
@@ -67,6 +68,10 @@ class TestSnapshotRevisionRetry(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
+            (data_dir / "arsenal.json").write_text(
+                json.dumps({"members": [self._member("member-a"), self._member("member-b")]}),
+                encoding="utf-8",
+            )
             cache = data_dir / "odds_snapshot_cache.json"
             first_snapshot = self._snapshot("0.85")
             first = store_snapshot(cache, first_snapshot, gid="snapshot-master-1", mode="live")

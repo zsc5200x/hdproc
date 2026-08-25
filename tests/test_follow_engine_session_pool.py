@@ -2,6 +2,7 @@ import tempfile
 import sys
 import time
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -51,6 +52,10 @@ class TestSnapshotDirectSessionLifecycle(unittest.TestCase):
             mode="live",
             requested_gid="gid-1",
             public_snapshot_revision=stored["revision"],
+        )
+        (path.parent / "arsenal.json").write_text(
+            json.dumps({"members": [self._member()]}),
+            encoding="utf-8",
         )
 
     def test_direct_attempt_does_not_use_session_pool_session(self):

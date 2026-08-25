@@ -1,13 +1,94 @@
 from __future__ import annotations
 
 import random
+import hashlib
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 import requests
 
 from hdzz.common.http import hard_timeout, requests_timeout
 from hdzz.common.parse import parse_cookie_header
+
+
+_SENSITIVE_HEADER_NAMES = {
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+    "set-cookie",
+    "x-api-key",
+    "x-auth-token",
+}
+
+
+def _sha256_text(value: Any) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _safe_url_identity(value: Any) -> Dict[str, Any]:
+    parsed = urlsplit(str(value or "").strip())
+    host = str(parsed.hostname or "").strip().lower()
+    return {
+        "scheme": str(parsed.scheme or "").lower(),
+        "host_sha256": _sha256_text(host) if host else "",
+        "port": parsed.port,
+    }
+
+
+def _safe_header_value(name: str, value: Any) -> Any:
+    lower = str(name or "").lower()
+    if lower in _SENSITIVE_HEADER_NAMES:
+        return None
+    if lower in {"origin", "referer"}:
+        return _safe_url_identity(value)
+    return str(value or "")
+
+
+def _safe_request_headers(headers: Any) -> Dict[str, Any]:
+    values = dict(headers or {})
+    tracked = {
+        "user-agent": "User-Agent",
+        "origin": "Origin",
+        "referer": "Referer",
+        "content-type": "Content-Type",
+        "accept": "Accept",
+        "accept-language": "Accept-Language",
+        "accept-encoding": "Accept-Encoding",
+        "connection": "Connection",
+    }
+    output: Dict[str, Any] = {}
+    other_names = []
+    omitted_sensitive = []
+    for raw_name, raw_value in values.items():
+        name = str(raw_name or "")
+        lower = name.lower()
+        if lower in _SENSITIVE_HEADER_NAMES:
+            omitted_sensitive.append(lower)
+            continue
+        canonical = tracked.get(lower)
+        if canonical:
+            output[canonical] = _safe_header_value(name, raw_value)
+        else:
+            other_names.append(name)
+    for lower, canonical in tracked.items():
+        output.setdefault(canonical, None)
+    output["other_header_names"] = sorted(set(other_names))
+    output["omitted_sensitive_header_names"] = sorted(set(omitted_sensitive))
+    return output
+
+
+def _prepared_request_headers(session: Any, url: str, form: Dict[str, Any], extra_headers: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    """Inspect Requests' prepared headers without sending a second request."""
+
+    try:
+        request = requests.Request("POST", url, data=form, headers=extra_headers or None)
+        prepared = session.prepare_request(request)
+        return _safe_request_headers(prepared.headers)
+    except Exception:
+        merged: Dict[str, Any] = dict(getattr(session, "headers", {}) or {})
+        merged.update(extra_headers or {})
+        return _safe_request_headers(merged)
 
 
 def make_member_session(*, base_url: str, proxy: str, cookie: str) -> requests.Session:
@@ -68,6 +149,8 @@ def member_post_session(
                 response_meta["attempt"] = attempt
             with hard_timeout(hard_s):
                 extra_headers = {"Connection": "close"} if attempt >= 2 else None
+                if response_meta is not None and str(form.get("p") or "") == "FT_bet":
+                    response_meta["request_headers"] = _prepared_request_headers(session, url, form, extra_headers)
                 r = session.post(
                     url,
                     data=form,
@@ -76,8 +159,18 @@ def member_post_session(
                     headers=extra_headers,
                 )
             if response_meta is not None:
+                body = str(r.text or "")
+                headers = getattr(r, "headers", {}) or {}
                 response_meta["http_status"] = int(r.status_code)
-                response_meta["response_body"] = str(r.text or "")
+                response_meta["response_content_type"] = str(headers.get("Content-Type") or "")
+                response_meta["response_server"] = str(headers.get("Server") or "")
+                response_meta["response_via"] = str(headers.get("Via") or "")
+                response_meta["response_header_names"] = sorted(
+                    name for name in (str(k) for k in headers.keys()) if name.lower() not in _SENSITIVE_HEADER_NAMES
+                )
+                response_meta["response_body"] = body
+                response_meta["response_body_length"] = len(body.encode("utf-8"))
+                response_meta["response_body_sha256"] = _sha256_text(body)
             r.raise_for_status()
             text = r.text or ""
             t = str(text or "").strip()
@@ -154,9 +247,19 @@ def member_post_session_once(
                 verify=False,
             )
         if response_meta is not None:
+            body = str(response.text or "")
+            headers = getattr(response, "headers", {}) or {}
             response_meta.clear()
             response_meta["http_status"] = int(response.status_code)
-            response_meta["response_body"] = str(response.text or "")
+            response_meta["response_content_type"] = str(headers.get("Content-Type") or "")
+            response_meta["response_server"] = str(headers.get("Server") or "")
+            response_meta["response_via"] = str(headers.get("Via") or "")
+            response_meta["response_header_names"] = sorted(
+                name for name in (str(k) for k in headers.keys()) if name.lower() not in _SENSITIVE_HEADER_NAMES
+            )
+            response_meta["response_body"] = body
+            response_meta["response_body_length"] = len(body.encode("utf-8"))
+            response_meta["response_body_sha256"] = _sha256_text(body)
         response.raise_for_status()
         return str(response.text or "")
     except BaseException as exc:

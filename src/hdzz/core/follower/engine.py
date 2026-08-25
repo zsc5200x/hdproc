@@ -1,5 +1,6 @@
 import atexit
 import argparse
+import hashlib
 import html
 import json
 import math
@@ -73,6 +74,10 @@ from .executor import (
     member_post_session,
     member_warmup_menu,
     member_warmup_sport_menu,
+)
+from hdzz.core.member.session_state import (
+    session_fingerprint as member_session_fingerprint,
+    session_ready_state,
 )
 from .game_more_resolver import (
     match_handicap_from_game_more_parsed,
@@ -149,6 +154,7 @@ _MARKET_RETRY_ERRORS = frozenset({
 STAKE_EXCEEDS_MAX_ERR = "STAKE_EXCEEDS_MAX"
 _TG_ORDER_CB_PREFIX = "odr"
 _JSON_FILE_CACHE = JsonFileCache()
+NETWORK_COOLDOWN_SECONDS = 30
 _TG_ORDER_BUTTON_SPECS: Dict[str, Dict[str, str]] = {
     "res": {"text": "跟单结果", "style": "primary"},
     "log": {"text": "跟单日志", "style": "primary"},
@@ -4655,7 +4661,53 @@ def _member_has_transient_network_issue(member: Dict[str, Any], *, now_s: Option
         cooldown_until = float((member or {}).get("request_cooldown_until") or 0.0)
     except Exception:
         cooldown_until = 0.0
-    return cooldown_until > now_eff
+    try:
+        network_cooldown_until = float((member or {}).get("network_cooldown_until") or 0.0)
+    except Exception:
+        network_cooldown_until = 0.0
+    return max(cooldown_until, network_cooldown_until) > now_eff
+
+
+def _network_error_class(result: Dict[str, Any]) -> str:
+    """Classify post-submit transport failures without changing result semantics."""
+
+    response = result.get("ft_bet_response_fingerprint") if isinstance(result.get("ft_bet_response_fingerprint"), dict) else {}
+    status = _safe_int(response.get("status") or result.get("http_status"), 0)
+    error_code = str(result.get("error_code") or "").strip().lower()
+    message = str(result.get("error_message") or result.get("message") or "").strip().lower()
+    if status == 502 or "bad gateway" in message:
+        return "UPSTREAM_502"
+    if "readtimeout" in error_code or "read timed out" in message:
+        return "READ_TIMEOUT"
+    if "ssl" in error_code or "ssl eof" in message:
+        return "SSL_EOF"
+    if any(token in error_code for token in ("connectionerror", "proxyerror", "connecttimeout", "chunkedencoding")):
+        return error_code.upper()
+    return ""
+
+
+def _mark_member_network_cooldown(*, data_dir: Path, member_id: str, error_class: str) -> None:
+    """Cool a member's route after an ambiguous transport result.
+
+    This never changes status/session fields and never schedules another FT_bet
+    for the current UNKNOWN_RESULT job. It only keeps unrelated new jobs from
+    immediately selecting the same unhealthy route.
+    """
+
+    if not member_id or not error_class:
+        return
+    try:
+        patch_member(
+            data_dir / "arsenal.json",
+            member_id,
+            {
+                "network_health": "cooldown",
+                "network_last_error": error_class,
+                "network_cooldown_until": now_ts() + NETWORK_COOLDOWN_SECONDS,
+            },
+        )
+    except Exception:
+        return
 
 
 def _member_has_login_seed(member: Dict[str, Any]) -> bool:
@@ -4698,6 +4750,9 @@ def _member_eligible_for_stake(
         str((member or {}).get(key) or "").strip()
         for key in ("base_url", "ver", "uid", "cookie")
     ):
+        return False
+    session_ready, _session_reason = session_ready_state(member)
+    if not session_ready:
         return False
     if member_balance(member) + 1e-9 < float(stake or 0.0):
         return False
@@ -4858,6 +4913,47 @@ def ensure_member_session(
         pass
 
     return member
+
+
+def _final_session_gate(
+    *,
+    data_dir: Path,
+    member: Dict[str, Any],
+    selected_generation: int,
+    selected_fingerprint: str,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Reject a stale BetContext when the member session changed meanwhile."""
+
+    member_id = str(member.get("id") or "").strip()
+    current_doc = load_arsenal(data_dir)
+    current = next(
+        (
+            item
+            for item in (current_doc.get("members") or [])
+            if isinstance(item, dict) and str(item.get("id") or "").strip() == member_id
+        ),
+        None,
+    )
+    if not isinstance(current, dict):
+        return False, "SESSION_MEMBER_MISSING", {}
+    ready, reason = session_ready_state(current)
+    if not ready:
+        return False, str(reason or "SESSION_NOT_READY"), current
+
+    current_generation = _safe_int(current.get("session_generation"), 0)
+    if selected_generation > 0 and current_generation > 0 and current_generation != selected_generation:
+        return False, "SESSION_CHANGED_BEFORE_SUBMIT", current
+
+    current_fingerprint = member_session_fingerprint(current)
+    if selected_fingerprint and current_fingerprint and current_fingerprint != selected_fingerprint:
+        return False, "SESSION_CHANGED_BEFORE_SUBMIT", current
+
+    # Compare the individual identity fields as a final guard for legacy rows
+    # that predate session_fingerprint/session_generation persistence.
+    for key in ("base_url", "uid", "ver", "cookie"):
+        if str(current.get(key) or "").strip() != str(member.get(key) or "").strip():
+            return False, "SESSION_CHANGED_BEFORE_SUBMIT", current
+    return True, "SESSION_READY", current
 
 
 def append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
@@ -5277,12 +5373,32 @@ def _snapshot_direct_result(
             out["nowcredit"] = response.get("nowcredit")
     if result.request:
         out["ft_bet_request"] = dict(result.request)
+    response_fingerprint = result.session_meta.get("ft_bet_response_fingerprint") if isinstance(result.session_meta, dict) else {}
+    if not isinstance(response_fingerprint, dict):
+        response_fingerprint = {}
     out["ft_bet_raw_response"] = {
         "http_status": result.http_status,
-        "response_body": str(result.raw_response or ""),
+        "response_body_length": int(
+            response_fingerprint.get("body_length")
+            or len(str(result.raw_response or "").encode("utf-8"))
+        ),
+        "response_body_sha256": str(
+            response_fingerprint.get("body_sha256")
+            or hashlib.sha256(str(result.raw_response or "").encode("utf-8")).hexdigest()
+        ),
+        "content_type": str(response_fingerprint.get("content_type") or ""),
+        "server": str(response_fingerprint.get("server") or ""),
+        "via": str(response_fingerprint.get("via") or ""),
+        "ticket_present": bool(result.ticket_id),
         "xml_code": str(result.xml_code or ""),
-        "errormsg": str(result.xml_errormsg or ""),
-        "parsed_fields": response,
+        "errormsg": response_fingerprint.get("xml_errormsg", str(result.xml_errormsg or "")),
+        # Keep only fields used by retry/UI decisions.  The full upstream XML
+        # remains in memory for parsing but is never persisted to JSONL.
+        "parsed_fields": {
+            key: response.get(key)
+            for key in ("code", "errormsg", "msg", "ticket_id", "ticketId")
+            if key in response
+        },
     }
     out["execution_member"] = member_id
     if result.ticket_id:
@@ -5343,6 +5459,8 @@ def _snapshot_attempt_trace_fields(result: Dict[str, Any]) -> Dict[str, Any]:
         "market_row_fingerprint": str(result.get("market_row_fingerprint") or template.get("market_row_fingerprint") or ""),
         "ft_bet_request": result.get("ft_bet_request") if isinstance(result.get("ft_bet_request"), dict) else {},
         "ft_bet_raw_response": result.get("ft_bet_raw_response") if isinstance(result.get("ft_bet_raw_response"), dict) else {},
+        "ft_bet_request_fingerprint": result.get("ft_bet_request_fingerprint") if isinstance(result.get("ft_bet_request_fingerprint"), dict) else {},
+        "ft_bet_response_fingerprint": result.get("ft_bet_response_fingerprint") if isinstance(result.get("ft_bet_response_fingerprint"), dict) else {},
         "amount": float(result.get("stake") or 0.0),
         "ft_bet_started_at": result.get("ft_bet_started_at") or result.get("submit_started_at"),
         "ft_bet_elapsed_ms": int(result.get("ft_bet_elapsed_ms") or result.get("submit_elapsed_ms") or 0),
@@ -5353,6 +5471,21 @@ def _snapshot_attempt_trace_fields(result: Dict[str, Any]) -> Dict[str, Any]:
         "session_mode": str(result.get("session_mode") or ""),
         "session_created_at": result.get("session_created_at"),
         "session_object_id": str(result.get("session_object_id") or ""),
+        "build_version": str(result.get("build_version") or ""),
+        "git_commit": str(result.get("git_commit") or ""),
+        "build_id": str(result.get("build_id") or ""),
+        "member_id_hash": str(result.get("member_id_hash") or result.get("member_id_sha256") or ""),
+        "uid_hash": str(result.get("uid_hash") or result.get("uid_sha256") or ""),
+        "ver_sha256": str(result.get("ver_sha256") or ""),
+        "cookie_count": int(result.get("cookie_count") or 0),
+        "trust_env": bool(result.get("trust_env")),
+        "proxy_enabled": bool(result.get("proxy_enabled")),
+        "session_generation": int(result.get("session_generation") or 0),
+        "session_ready": bool(result.get("session_ready")),
+        "session_ready_reason": str(result.get("session_ready_reason") or ""),
+        "session_fingerprint": str(result.get("session_fingerprint") or ""),
+        "network_health": str(result.get("network_health") or ""),
+        "network_error_class": str(result.get("network_error_class") or ""),
         "bet_context_mode": str(result.get("bet_context_mode") or ""),
         "bet_context_request": result.get("bet_context_request") if isinstance(result.get("bet_context_request"), dict) else {},
         "bet_context_http_status": result.get("bet_context_http_status"),
@@ -5560,6 +5693,8 @@ def _place_bet_snapshot_direct(
 ) -> Dict[str, Any]:
     """Execute one Snapshot Direct attempt without querying member-side markets."""
     try:
+        selected_session_generation = _safe_int(member.get("session_generation"), 0)
+        selected_session_fingerprint = member_session_fingerprint(member)
         source_intent = MarketIntent.from_order(order, split_amount=float(stake or 0.0))
         intent = _snapshot_intent_for_settings(source_intent, order=order, settings=settings)
         if not intent.gid:
@@ -5855,7 +5990,8 @@ def _place_bet_snapshot_direct(
                     "session_mode": "fresh_per_attempt",
                     "session_created_at": session_created_at,
                     "session_object_id": str(id(execution_session)),
-                    "proxy": str(member.get("proxy") or ""),
+                    "proxy": "configured" if str(member.get("proxy") or "").strip() else "",
+                    "proxy_enabled": bool(str(member.get("proxy") or "").strip()),
                     **_session_cookie_diagnostics(execution_session),
                 }
                 context_meta["context_started_at"] = float(now_ts())
@@ -6041,6 +6177,92 @@ def _place_bet_snapshot_direct(
                 close_member_session(execution_session)
                 execution_session = None
                 return result
+        # Final freshness gate: queueing/member acquisition/context work must
+        # never turn an old MarketRow into a new FT_bet submission.
+        final_freshness_lookup = service.lookup(
+            intent,
+            max_age_ms=_snapshot_preferred_age_ms(settings),
+        )
+        if final_freshness_lookup.snapshot is None or final_freshness_lookup.status != SNAPSHOT_VALID:
+            if execution_session is not None:
+                close_member_session(execution_session)
+                execution_session = None
+            return _snapshot_waiting_result(
+                status=str(final_freshness_lookup.status or SNAPSHOT_STALE),
+                message=(
+                    "提交前盘口已超过允许 freshness，等待最新盘口。"
+                    if final_freshness_lookup.status == SNAPSHOT_STALE
+                    else final_freshness_lookup.message
+                ),
+                member=member,
+                order=order,
+                stake=stake,
+                intent=intent,
+            )
+        final_freshness_validated = SnapshotValidator().validate(
+            intent,
+            final_freshness_lookup.snapshot,
+            max_age_ms=_snapshot_preferred_age_ms(settings),
+        )
+        if final_freshness_validated.snapshot is None or final_freshness_validated.status != SNAPSHOT_VALID:
+            if execution_session is not None:
+                close_member_session(execution_session)
+                execution_session = None
+            return _snapshot_waiting_result(
+                status=str(final_freshness_validated.status or SNAPSHOT_STALE),
+                message=final_freshness_validated.message,
+                member=member,
+                order=order,
+                stake=stake,
+                intent=intent,
+            )
+        if final_freshness_validated.snapshot.market_row_fingerprint != validated.snapshot.market_row_fingerprint:
+            if execution_session is not None:
+                close_member_session(execution_session)
+                execution_session = None
+            return _snapshot_waiting_result(
+                status=MARKET_ERROR,
+                message="提交前盘口 fingerprint 已变化，禁止使用旧 BetContext。",
+                member=member,
+                order=order,
+                stake=stake,
+                intent=intent,
+            )
+        validated = final_freshness_validated
+
+        session_ok, session_reason, current_member = _final_session_gate(
+            data_dir=data_dir,
+            member=member,
+            selected_generation=selected_session_generation,
+            selected_fingerprint=selected_session_fingerprint,
+        )
+        if not session_ok:
+            if execution_session is not None:
+                close_member_session(execution_session)
+                execution_session = None
+            waiting = _snapshot_waiting_result(
+                status=session_reason,
+                message=f"提交前 Session gate 拒绝旧上下文：{session_reason}",
+                member=member,
+                order=order,
+                stake=stake,
+                intent=intent,
+            )
+            waiting.update(
+                {
+                    "session_ready": False,
+                    "session_ready_reason": session_reason,
+                    "session_generation": selected_session_generation,
+                    "session_fingerprint": selected_session_fingerprint,
+                    "execution_member": str(member.get("id") or ""),
+                }
+            )
+            return waiting
+        # Use only the current identity metadata for telemetry. The actual
+        # payload is still rebuilt from the validated current snapshot below.
+        selected_session_generation = _safe_int(current_member.get("session_generation"), selected_session_generation)
+        selected_session_fingerprint = member_session_fingerprint(current_member)
+
         try:
             submit_kwargs = {
                 "timeout_s": max(2, int(timeout_s or 0)),
@@ -6091,6 +6313,19 @@ def _place_bet_snapshot_direct(
         if isinstance(execution.session_meta, dict):
             result.update(execution.session_meta)
             result["session_mode"] = str(execution.session_meta.get("session_mode") or "")
+        result["session_generation"] = selected_session_generation
+        result["session_fingerprint"] = selected_session_fingerprint
+        result["session_ready"] = True
+        result["session_ready_reason"] = "SESSION_READY"
+        network_error_class = _network_error_class(result)
+        result["network_health"] = "cooldown" if network_error_class else "healthy"
+        result["network_error_class"] = network_error_class
+        if execution.status == UNKNOWN_RESULT and network_error_class:
+            _mark_member_network_cooldown(
+                data_dir=data_dir,
+                member_id=str(member.get("id") or ""),
+                error_class=network_error_class,
+            )
         if context_mode == "diagnostic_order_view":
             result.update(context_meta)
             result.update(execution_session_meta)

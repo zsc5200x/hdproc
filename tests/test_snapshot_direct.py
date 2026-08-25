@@ -1,4 +1,5 @@
 import inspect
+import json
 import sys
 import tempfile
 import time
@@ -45,6 +46,12 @@ class SnapshotDirectTest(unittest.TestCase):
             "proxy": "",
             "maxcredit": "10000",
         }
+
+    def _write_arsenal(self, data_dir: Path, member_ids=("member-1",)):
+        (data_dir / "arsenal.json").write_text(
+            json.dumps({"members": [self._member(member_id) for member_id in member_ids]}),
+            encoding="utf-8",
+        )
 
     def _total_order(self):
         return {
@@ -172,6 +179,7 @@ class SnapshotDirectTest(unittest.TestCase):
                 public_snapshot_revision=stored["revision"],
                 fetched_at=fetched,
             )
+        self._write_arsenal(path.parent, member_ids)
         return stored
 
     def test_market_intent_contains_demand_not_submit_odds(self):
@@ -761,7 +769,7 @@ class SnapshotDirectTest(unittest.TestCase):
         self.assertEqual(result["final_submit_ioratio"], "0.77")
         self.assertEqual(result["ioratio_source"], "ft_order_view")
 
-    def test_diagnostic_context_accepts_stale_candidate_when_structure_is_unchanged(self):
+    def test_diagnostic_context_rejects_stale_candidate_before_submit(self):
         from hdzz.core.follower import engine
         from hdzz.core.follower.member_ioratio import MEMBER_IORATIO_VALID, MemberIoratioLookup
         from hdzz.core.follower.snapshot_direct import BetContextResult, ExecutionResult, SUCCESS
@@ -775,13 +783,18 @@ class SnapshotDirectTest(unittest.TestCase):
                 self.closed = True
 
         stale_session = FakeSession()
+        fake_executor = type(
+            "Exec",
+            (),
+            {"submit": lambda self, *a, **k: ExecutionResult(SUCCESS, "member-1", ticket_id="T-stale")},
+        )()
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             self._store_handicap(data_dir / "odds_snapshot_cache.json", fetched_at=time.time() - 1.2)
             with patch.object(engine, "make_member_session", return_value=stale_session), \
                 patch.object(engine, "MemberIoratioService") as quote_service_cls, \
                 patch.object(engine, "BetContext") as context_cls, \
-                patch.object(engine, "MemberExecutor", return_value=type("Exec", (), {"submit": lambda self, *a, **k: ExecutionResult(SUCCESS, "member-1", ticket_id="T-stale")})()):
+                patch.object(engine, "MemberExecutor", return_value=fake_executor) as executor_patch:
                 quote_service_cls.return_value.lookup.return_value = MemberIoratioLookup(status=MEMBER_IORATIO_VALID, quote=None)
                 context_cls.prepare.return_value = BetContextResult(
                     request={"p": "FT_order_view"},
@@ -796,9 +809,10 @@ class SnapshotDirectTest(unittest.TestCase):
                     settings={"snapshot_max_age_ms": 500, "bet_context_mode": "diagnostic_order_view", "snapshot_structure_max_age_ms": 3000},
                     member=self._member(), order=self._order(), stake=50, timeout_s=2, debug=False,
                 )
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["ticket_id"], "T-stale")
-        self.assertEqual(result["snapshot_candidate_age_ms"], 3000)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["snapshot_direct_status"], "SNAPSHOT_STALE")
+        self.assertEqual(result["real_submission"], "none")
+        executor_patch.assert_not_called()
 
     def test_diagnostic_bet_context_mismatch_blocks_ft_bet(self):
         from hdzz.core.follower import engine
@@ -848,6 +862,50 @@ class SnapshotDirectTest(unittest.TestCase):
         self.assertEqual(submitted, [])
         self.assertTrue(session.closed)
         self.assertEqual(result["bet_context_raw_response"], "<serverresponse><code>501</code><gid>wrong-gid</gid></serverresponse>")
+
+    def test_diagnostic_double_login_context_never_reaches_ft_bet(self):
+        from hdzz.core.follower import engine
+        from hdzz.core.follower.snapshot_direct import BetContextResult
+
+        class FakeSession:
+            def __init__(self):
+                self.cookies = []
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        session = FakeSession()
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self._store_handicap(data_dir / "odds_snapshot_cache.json")
+            with patch.object(engine, "make_member_session", return_value=session), \
+                patch.object(engine, "BetContext") as context_cls, \
+                patch.object(engine, "MemberExecutor") as executor:
+                context_cls.prepare.return_value = BetContextResult(
+                    request={"p": "FT_order_view"},
+                    response={"code": "error", "msg": "doubleLogin"},
+                    raw_response="<serverresponse><code>error</code><msg>doubleLogin</msg></serverresponse>",
+                    http_status=200,
+                    elapsed_ms=2,
+                    error="double_login",
+                    matches_market_row=False,
+                )
+                result = engine.place_bet(
+                    data_dir=data_dir,
+                    settings={"snapshot_max_age_ms": 5000, "bet_context_mode": "diagnostic_order_view"},
+                    member=self._member(),
+                    order=self._order(),
+                    stake=50,
+                    timeout_s=2,
+                    debug=False,
+                )
+
+        executor.assert_not_called()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["real_submission"], "none")
+        self.assertEqual(result["snapshot_direct_status"], "BET_CONTEXT_FAILED")
+        self.assertTrue(session.closed)
 
     def test_bet_error_preserves_raw_response_and_final_params(self):
         from hdzz.core.follower.snapshot_direct import MARKET_ERROR, MemberExecutor, SubmitTemplate
@@ -999,6 +1057,7 @@ class SnapshotDirectTest(unittest.TestCase):
                     requested_gid="8993471",
                     public_snapshot_revision=stored["revision"],
                 )
+            self._write_arsenal(data_dir, ("member-a", "member-b"))
 
             public_text = (data_dir / "odds_snapshot_cache.json").read_text(encoding="utf-8")
             self.assertNotIn('"ioratio"', public_text)
@@ -1062,6 +1121,7 @@ class SnapshotDirectTest(unittest.TestCase):
                 requested_gid="8993471",
                 public_snapshot_revision=stored["revision"],
             )
+            self._write_arsenal(data_dir, ("member-a",))
             with patch.object(engine, "MemberExecutor") as executor, patch.object(
                 engine, "_get_member_session", return_value=object()
             ):
@@ -1098,6 +1158,7 @@ class SnapshotDirectTest(unittest.TestCase):
                 requested_gid="8993471",
                 public_snapshot_revision=stored["revision"],
             )
+            self._write_arsenal(data_dir, ("member-a",))
 
             class FakeExecutor:
                 def submit(self, member, template, amount, **_kwargs):
@@ -1148,6 +1209,8 @@ class SnapshotDirectTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["result_status"], UNKNOWN_RESULT)
         self.assertTrue(result["reconcile_pending"])
+        self.assertEqual(result["network_health"], "cooldown")
+        self.assertEqual(result["network_error_class"], "READ_TIMEOUT")
 
     def test_reconcile_only_path_does_not_construct_member_executor(self):
         from hdzz.core.follower import engine
