@@ -182,6 +182,12 @@ def _force_system_chrome_only() -> bool:
     return _to_bool(os.environ.get("HDZZ_PLAYWRIGHT_SYSTEM_CHROME_ONLY"), False)
 
 
+def _force_bundled_chromium_only() -> bool:
+    """Frozen/Tauri runtimes must not silently fall back to host Chrome."""
+
+    return _to_bool(os.environ.get("HDZZ_PLAYWRIGHT_BUNDLED_ONLY"), False)
+
+
 def _playwright_launch_args(platform_name: str) -> list[str]:
     args = [
         "--disable-blink-features=AutomationControlled",
@@ -205,12 +211,16 @@ def _playwright_launch_candidates(
     platform_name: str,
     prefer_system_chrome: bool,
     force_system_chrome_only: bool,
+    bundled_chromium_only: bool = False,
 ) -> list[tuple[str, dict[str, Any]]]:
     candidates: list[tuple[str, dict[str, Any]]] = [("bundled_chromium", {})]
     platform_name = str(platform_name or "")
 
     if force_system_chrome_only:
         return [("channel_chrome", {"channel": "chrome"})]
+
+    if bundled_chromium_only:
+        return candidates
 
     if platform_name == "darwin":
         if prefer_system_chrome:
@@ -342,10 +352,12 @@ def _launch_persistent_context_with_recovery(
         "proxy": proxy_cfg,
     }
     force_system_chrome_only = _force_system_chrome_only()
+    bundled_chromium_only = _force_bundled_chromium_only()
     candidates = _playwright_launch_candidates(
         platform_name=platform_name,
         prefer_system_chrome=prefer_system_chrome,
         force_system_chrome_only=force_system_chrome_only,
+        bundled_chromium_only=bundled_chromium_only,
     )
 
     launch_errors: list[tuple[str, Exception]] = []

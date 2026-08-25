@@ -9,6 +9,7 @@ from PyInstaller.utils.hooks import collect_submodules
 SOURCE_ROOT = Path(os.environ["HDZZ_SOURCE_ROOT"]).resolve()
 BROWSERS_DIR = Path(os.environ["HDZZ_PLAYWRIGHT_BROWSERS_DIR"]).resolve()
 BROWSERS_ARCHIVE = os.environ.get("HDZZ_PLAYWRIGHT_BROWSERS_ARCHIVE", "").strip()
+BUILD_INFO_PATH = os.environ.get("HDZZ_BUILD_INFO_PATH", "").strip()
 APP_DIR = SOURCE_ROOT / "app"
 SRC_DIR = SOURCE_ROOT / "src"
 OOK_DIR = SOURCE_ROOT / "ook"
@@ -44,6 +45,8 @@ if BROWSERS_ARCHIVE:
     datas.append((str(Path(BROWSERS_ARCHIVE).resolve()), "."))
 else:
     datas.append((str(BROWSERS_DIR), "ms-playwright"))
+if BUILD_INFO_PATH:
+    datas.append((str(Path(BUILD_INFO_PATH).resolve()), "."))
 
 hiddenimports = [
     "app",

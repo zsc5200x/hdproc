@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,6 +57,26 @@ class TauriBackendEntryTest(unittest.TestCase):
             (root / "config.json").write_text('{"targets": [{"name": "existing"}]}', encoding="utf-8")
             backend.seed_runtime(root, bundle)
             self.assertEqual(json.loads((root / "config.json").read_text())["targets"][0]["name"], "existing")
+
+    def test_existing_runtime_webui_is_refreshed_from_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "runtime"
+            bundle = Path(temp) / "bundle"
+            (bundle / "app" / "webui").mkdir(parents=True)
+            (bundle / "app" / "webui" / "index.html").write_text("new", encoding="utf-8")
+            (root / "webui").mkdir(parents=True)
+            (root / "webui" / "index.html").write_text("old", encoding="utf-8")
+            (root / "data").mkdir(parents=True)
+            (root / "data" / "arsenal.json").write_text('{"members": [{"id": "keep-me"}]}', encoding="utf-8")
+            (bundle / "app" / "tauri_config.example.json").write_text('{"targets": []}', encoding="utf-8")
+
+            backend.seed_runtime(root, bundle)
+
+            self.assertEqual((root / "webui" / "index.html").read_text(encoding="utf-8"), "new")
+            self.assertEqual(
+                (root / "data" / "arsenal.json").read_text(encoding="utf-8"),
+                '{"members": [{"id": "keep-me"}]}',
+            )
 
     def test_config_status_marks_empty_targets_as_unconfigured(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -147,6 +168,104 @@ class TauriBackendEntryTest(unittest.TestCase):
     def test_builder_extracts_chromium_revision_from_path(self) -> None:
         path = Path("/tmp/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app")
         self.assertEqual(builder._chromium_revision_from_path(path), "1208")
+
+    @staticmethod
+    def _write_macos_chromium_marker(root: Path, revision: str) -> Path:
+        executable = (
+            root
+            / f"chromium-{revision}"
+            / "chrome-mac-arm64"
+            / "Google Chrome for Testing.app"
+            / "Contents"
+            / "MacOS"
+            / "Google Chrome for Testing"
+        )
+        executable.parent.mkdir(parents=True)
+        executable.write_text("placeholder", encoding="utf-8")
+        return executable
+
+    def test_prepare_playwright_browsers_replaces_stale_runtime_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bundle = root / "bundle"
+            runtime = root / "runtime"
+            self._write_macos_chromium_marker(bundle / "ms-playwright", "1217")
+            stale = self._write_macos_chromium_marker(runtime / ".run" / "ms-playwright", "1208")
+            (runtime / "data").mkdir(parents=True)
+            (runtime / "data" / "arsenal.json").write_text('{"members": []}', encoding="utf-8")
+
+            detected = backend.prepare_playwright_browsers(bundle, runtime)
+
+            self.assertEqual(detected, runtime / ".run" / "ms-playwright")
+            self.assertFalse(stale.exists())
+            self.assertTrue(
+                (runtime / ".run" / "ms-playwright" / "chromium-1217").is_dir()
+            )
+            self.assertEqual((runtime / "data" / "arsenal.json").read_text(encoding="utf-8"), '{"members": []}')
+
+    def test_prepare_playwright_browsers_keeps_matching_runtime_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bundle = root / "bundle"
+            runtime = root / "runtime"
+            self._write_macos_chromium_marker(bundle / "ms-playwright", "1217")
+            current = self._write_macos_chromium_marker(runtime / ".run" / "ms-playwright", "1217")
+            current.write_text("keep", encoding="utf-8")
+
+            detected = backend.prepare_playwright_browsers(bundle, runtime)
+
+            self.assertEqual(detected, runtime / ".run" / "ms-playwright")
+            self.assertEqual(current.read_text(encoding="utf-8"), "keep")
+
+    def test_prepare_playwright_browsers_rebuilds_runtime_from_revisioned_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bundle = root / "bundle"
+            runtime = root / "runtime"
+            staged = root / "staged" / "ms-playwright"
+            archive = bundle / "ms-playwright.tar.gz"
+            self._write_macos_chromium_marker(staged, "1217")
+            archive.parent.mkdir(parents=True)
+            with tarfile.open(archive, "w:gz") as tf:
+                tf.add(staged, arcname="ms-playwright")
+            self._write_macos_chromium_marker(runtime / ".run" / "ms-playwright", "1208")
+
+            detected = backend.prepare_playwright_browsers(bundle, runtime)
+
+            self.assertEqual(detected, runtime / ".run" / "ms-playwright")
+            self.assertTrue(
+                (runtime / ".run" / "ms-playwright" / "chromium-1217").is_dir()
+            )
+            self.assertFalse(
+                (runtime / ".run" / "ms-playwright" / "chromium-1208").exists()
+            )
+
+    def test_builder_collects_non_sensitive_git_build_identity(self) -> None:
+        info = builder.collect_build_info(ROOT)
+        self.assertEqual(info["version"], "1.0.0")
+        self.assertRegex(info["git_commit"], r"^[0-9a-f]{40}$")
+        self.assertIn(info["git_commit"][:12], info["build_id"])
+        self.assertNotIn("config", json.dumps(info).lower())
+
+    def test_build_info_can_be_loaded_from_embedded_metadata(self) -> None:
+        from hdzz.build_info import load_build_info
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "hdzz-build-info.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": "1.0.0",
+                        "git_commit": "a" * 40,
+                        "build_id": "1.0.0+aaaaaaaaaaaa",
+                        "source": "tauri-pyinstaller",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            info = load_build_info(path)
+        self.assertEqual(info["git_commit"], "a" * 40)
+        self.assertEqual(info["build_id"], "1.0.0+aaaaaaaaaaaa")
 
 
 if __name__ == "__main__":

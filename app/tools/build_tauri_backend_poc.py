@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tarfile
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -43,6 +46,60 @@ def _expected_playwright_revision(python: Path) -> str | None:
     return _chromium_revision_from_path(Path(output.strip()))
 
 
+def _git_output(source_root: Path, *args: str) -> str:
+    try:
+        return subprocess.check_output(["git", *args], cwd=str(source_root), text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+
+
+def _backend_source_fingerprint(source_root: Path) -> tuple[bool, str]:
+    """Hash the source inputs that can enter the bundled backend."""
+
+    diff = _git_output(source_root, "diff", "--binary", "HEAD", "--", "app", "src", "ook")
+    untracked = _git_output(source_root, "ls-files", "--others", "--exclude-standard", "--", "app", "src", "ook")
+    digest = hashlib.sha256()
+    digest.update(diff.encode("utf-8"))
+    dirty = bool(diff or untracked)
+    for raw_path in untracked.splitlines():
+        path = (source_root / raw_path).resolve()
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            continue
+        digest.update(raw_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload)
+    return dirty, digest.hexdigest()
+
+
+def collect_build_info(source_root: Path) -> dict[str, str]:
+    """Return non-sensitive identity metadata to embed in the sidecar."""
+
+    commit = _git_output(source_root, "rev-parse", "HEAD") or "unknown"
+    version_text = (source_root / "src" / "hdzz" / "__init__.py").read_text(encoding="utf-8")
+    match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', version_text)
+    version = match.group(1) if match else "unknown"
+    dirty, source_hash = _backend_source_fingerprint(source_root)
+    build_id = f"{version}+{commit[:12]}"
+    if dirty:
+        build_id = f"{build_id}.dirty.{source_hash[:12]}"
+    return {
+        "version": version,
+        "git_commit": commit,
+        "build_id": build_id,
+        "source": "tauri-pyinstaller",
+        "built_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def write_build_info(path: Path, payload: dict[str, str]) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
 def build(source_root: Path, *, python: Path, output_dir: Path, browsers_dir: Path | None = None) -> Path:
     source_root = Path(source_root).resolve()
     python_value = str(python)
@@ -54,14 +111,28 @@ def build(source_root: Path, *, python: Path, output_dir: Path, browsers_dir: Pa
     output_dir = Path(output_dir).resolve()
     if not python.is_file():
         raise FileNotFoundError(f"未找到构建 Python: {python}")
-    if browsers_dir is None:
-        from build_mac_standalone_app import ensure_macos_playwright_browsers
+    from build_mac_standalone_app import (
+        create_playwright_browsers_archive,
+        ensure_macos_playwright_browsers,
+        stage_macos_playwright_browsers,
+    )
 
+    browser_build_root = output_dir / "_browser-build"
+    if browsers_dir is None:
         browsers_dir = ensure_macos_playwright_browsers(
             source_root,
-            output_dir / "_browser-build",
+            browser_build_root,
             python,
             env=os.environ,
+        )
+    else:
+        # Even an explicitly supplied cache is treated as developer input and
+        # filtered into a clean release staging directory before archiving.
+        expected_for_staging = _expected_playwright_revision(python)
+        browsers_dir = stage_macos_playwright_browsers(
+            Path(browsers_dir),
+            browser_build_root / "ms-playwright-macos",
+            expected_revision=expected_for_staging,
         )
     browsers_dir = Path(browsers_dir).resolve()
     if not browsers_dir.is_dir():
@@ -81,12 +152,12 @@ def build(source_root: Path, *, python: Path, output_dir: Path, browsers_dir: Pa
     if dist_dir.exists():
         shutil.rmtree(dist_dir)
 
-    archive_path = output_dir / "_browser-build" / "ms-playwright.tar.gz"
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    if archive_path.exists():
-        archive_path.unlink()
-    with tarfile.open(archive_path, "w:gz") as archive:
-        archive.add(str(browsers_dir), arcname="ms-playwright")
+    archive_path = create_playwright_browsers_archive(browser_build_root, browsers_dir)
+
+    # Keep the generated metadata beside PyInstaller intermediates; both are
+    # ignored build outputs and never become source/runtime data.
+    build_info_path = build_root / "hdzz-build-info.json"
+    write_build_info(build_info_path, collect_build_info(source_root))
 
     env = dict(os.environ)
     env.update(
@@ -94,6 +165,7 @@ def build(source_root: Path, *, python: Path, output_dir: Path, browsers_dir: Pa
             "HDZZ_SOURCE_ROOT": str(source_root),
             "HDZZ_PLAYWRIGHT_BROWSERS_DIR": str(browsers_dir),
             "HDZZ_PLAYWRIGHT_BROWSERS_ARCHIVE": str(archive_path),
+            "HDZZ_BUILD_INFO_PATH": str(build_info_path),
         }
     )
     spec = source_root / "app" / "tools" / "hdzz_tauri_backend.spec"

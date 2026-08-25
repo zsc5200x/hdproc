@@ -161,6 +161,126 @@ def _copy_installed_macos_playwright_browsers(
     return has_macos_chromium_browser(target_dir, expected_revision=expected_revision)
 
 
+_PLAYWRIGHT_PROFILE_NAMES = {
+    "Cookies",
+    "Cookies-journal",
+    "Login Data",
+    "Login Data-journal",
+    "History",
+    "History-journal",
+    "Local Storage",
+    "Session Storage",
+    "GPUCache",
+}
+
+
+def _is_playwright_ffmpeg_name(name: str) -> bool:
+    return bool(re.fullmatch(r"ffmpeg-\d+", str(name or "")))
+
+
+def validate_macos_playwright_staging(
+    browsers_dir: Path,
+    *,
+    expected_revision: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate that a browser directory is safe to embed in a release.
+
+    A developer Playwright cache may contain several browser revisions and
+    persistent MCP/browser profiles.  Those are never valid application
+    resources, so the staging directory is intentionally strict: only the
+    selected Chromium revision, its matching headless shell, and ffmpeg roots
+    are accepted.
+    """
+
+    root = Path(browsers_dir).resolve()
+    if not root.is_dir():
+        raise ValueError(f"Playwright staging 不是目录：{root}")
+    revisions = macos_chromium_revisions(root)
+    if expected_revision:
+        expected = str(expected_revision)
+        if revisions != {expected}:
+            raise ValueError(
+                f"Playwright staging revision 不匹配：需要 chromium-{expected}，实际为 {sorted(revisions) or '无'}"
+            )
+    elif len(revisions) != 1:
+        raise ValueError(f"Playwright staging 必须只有一个 Chromium revision，实际为 {sorted(revisions)}")
+
+    revision = str(expected_revision or next(iter(revisions)))
+    allowed_roots = {
+        f"chromium-{revision}",
+        f"chromium_headless_shell-{revision}",
+    }
+    allowed_roots.update(path.name for path in root.iterdir() if _is_playwright_ffmpeg_name(path.name))
+    unexpected = sorted(path.name for path in root.iterdir() if path.name not in allowed_roots)
+    if unexpected:
+        raise ValueError(f"Playwright staging 含未允许资源：{unexpected}")
+
+    unsafe_paths: List[str] = []
+    for path in root.rglob("*"):
+        name = path.name
+        if name.startswith("mcp-chrome") or name in _PLAYWRIGHT_PROFILE_NAMES:
+            unsafe_paths.append(str(path.relative_to(root)))
+    if unsafe_paths:
+        raise ValueError(f"Playwright staging 含浏览器 profile/敏感运行数据：{unsafe_paths[:12]}")
+
+    file_count = 0
+    total_bytes = 0
+    for path in root.rglob("*"):
+        if path.is_file():
+            file_count += 1
+            try:
+                total_bytes += path.stat().st_size
+            except OSError:
+                pass
+    return {
+        "root": str(root),
+        "revision": revision,
+        "roots": sorted(allowed_roots),
+        "file_count": file_count,
+        "bytes": total_bytes,
+    }
+
+
+def stage_macos_playwright_browsers(
+    source_dir: Path,
+    target_dir: Path,
+    *,
+    expected_revision: Optional[str] = None,
+) -> Path:
+    """Copy only release-safe Playwright roots into a clean staging directory."""
+
+    source = Path(source_dir).resolve()
+    target = Path(target_dir).resolve()
+    if source == target:
+        validate_macos_playwright_staging(target, expected_revision=expected_revision)
+        return target
+    source_revisions = macos_chromium_revisions(source)
+    revision = str(expected_revision or (next(iter(source_revisions)) if len(source_revisions) == 1 else ""))
+    if not revision or revision not in source_revisions:
+        raise ValueError(
+            f"无法从 Playwright 缓存选择唯一 macOS Chromium revision：需要 {expected_revision or '单一 revision'}，"
+            f"实际为 {sorted(source_revisions)}"
+        )
+    selected_names = [f"chromium-{revision}"]
+    headless_name = f"chromium_headless_shell-{revision}"
+    if (source / headless_name).exists():
+        selected_names.append(headless_name)
+    selected_names.extend(sorted(path.name for path in source.iterdir() if _is_playwright_ffmpeg_name(path.name)))
+
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+    for name in selected_names:
+        src = source / name
+        dst = target / name
+        if src.is_dir():
+            shutil.copytree(src, dst, symlinks=True)
+        elif src.is_file():
+            shutil.copy2(src, dst)
+    validate_macos_playwright_staging(target, expected_revision=revision)
+    return target
+
+
 def ensure_macos_playwright_browsers(
     source_root: Path,
     build_root: Path,
@@ -168,27 +288,50 @@ def ensure_macos_playwright_browsers(
     env: Optional[Mapping[str, str]] = None,
 ) -> Path:
     expected_revision = expected_playwright_chromium_revision(build_python, env=env)
-    try:
-        return detect_playwright_browsers_dir(source_root, env=env, expected_revision=expected_revision)
-    except FileNotFoundError:
-        pass
+    target_dir = (Path(build_root) / "ms-playwright-macos").resolve()
 
-    target_dir = build_root / "ms-playwright-macos"
-    if target_dir.exists() and not has_macos_chromium_browser(target_dir, expected_revision=expected_revision):
-        shutil.rmtree(target_dir)
-    if not has_macos_chromium_browser(target_dir, expected_revision=expected_revision):
-        if not _copy_installed_macos_playwright_browsers(
-            build_python,
-            target_dir,
-            env=env,
-            expected_revision=expected_revision,
-        ):
-            install_env = dict(env or os.environ)
-            install_env["PLAYWRIGHT_BROWSERS_PATH"] = str(target_dir)
-            subprocess.run([str(build_python), "-m", "playwright", "install", "chromium"], check=True, env=install_env)
-    if has_macos_chromium_browser(target_dir, expected_revision=expected_revision):
-        return target_dir.resolve()
-    raise FileNotFoundError(f"未能准备 macOS Playwright 浏览器：{target_dir}")
+    # Reuse only a previously validated staging directory.  Never return the
+    # developer's PLAYWRIGHT_BROWSERS_PATH directly: it can contain profiles
+    # and multiple revisions unrelated to this build.
+    if target_dir.is_dir():
+        try:
+            validate_macos_playwright_staging(target_dir, expected_revision=expected_revision)
+            return target_dir
+        except ValueError:
+            shutil.rmtree(target_dir)
+
+    source_dir: Optional[Path] = None
+    try:
+        source_dir = detect_playwright_browsers_dir(source_root, env=env, expected_revision=expected_revision)
+    except FileNotFoundError:
+        source_dir = None
+
+    if source_dir is not None:
+        try:
+            return stage_macos_playwright_browsers(
+                source_dir,
+                target_dir,
+                expected_revision=expected_revision,
+            )
+        except ValueError:
+            # A matching Chromium executable may be discoverable from the
+            # Python installation even when the repository candidate is not.
+            pass
+
+    if not _copy_installed_macos_playwright_browsers(
+        build_python,
+        target_dir,
+        env=env,
+        expected_revision=expected_revision,
+    ):
+        install_env = dict(env or os.environ)
+        install_env["PLAYWRIGHT_BROWSERS_PATH"] = str(target_dir)
+        subprocess.run([str(build_python), "-m", "playwright", "install", "chromium"], check=True, env=install_env)
+    try:
+        validate_macos_playwright_staging(target_dir, expected_revision=expected_revision)
+    except ValueError as exc:
+        raise FileNotFoundError(f"未能准备安全的 macOS Playwright staging：{target_dir}：{exc}") from exc
+    return target_dir
 
 
 def create_playwright_browsers_archive(build_root: Path, browsers_dir: Path) -> Path:
@@ -196,8 +339,13 @@ def create_playwright_browsers_archive(build_root: Path, browsers_dir: Path) -> 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     if archive_path.exists():
         archive_path.unlink()
+    stats = validate_macos_playwright_staging(browsers_dir)
     with tarfile.open(archive_path, "w:gz") as tf:
         tf.add(str(browsers_dir), arcname="ms-playwright")
+    print(
+        "[INFO] Playwright staging: "
+        f"revision={stats['revision']} files={stats['file_count']} bytes={stats['bytes']} archive={archive_path.stat().st_size}"
+    )
     return archive_path
 
 

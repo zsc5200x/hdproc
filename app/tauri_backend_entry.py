@@ -14,6 +14,7 @@ import importlib
 import inspect
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -22,6 +23,14 @@ import time
 from urllib import request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    from hdzz.build_info import current_build_info
+except ModuleNotFoundError:  # source-mode direct invocation from app/
+    _SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+    if str(_SOURCE_ROOT) not in sys.path:
+        sys.path.insert(0, str(_SOURCE_ROOT))
+    from hdzz.build_info import current_build_info
 
 
 DEFAULT_RUNTIME_NAME = "HD跟单系统"
@@ -168,32 +177,95 @@ def _safe_extract_tar(archive: Path, destination: Path) -> None:
         tf.extractall(root)
 
 
-def _has_macos_chromium(root: Path) -> bool:
+def _macos_chromium_revisions(root: Path) -> set[str]:
+    """Return the Playwright Chromium revisions with a usable macOS binary."""
+
+    root = Path(root)
+    if not root.is_dir():
+        return set()
     pattern = "chromium-*/chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-    return any(path.is_file() for path in root.glob(pattern))
+    revisions: set[str] = set()
+    for executable in root.glob(pattern):
+        if not executable.is_file():
+            continue
+        for parent in executable.parents:
+            match = re.fullmatch(r"chromium-(\d+)", parent.name or "")
+            if match:
+                revisions.add(match.group(1))
+                break
+    return revisions
+
+
+def _has_macos_chromium(root: Path) -> bool:
+    return bool(_macos_chromium_revisions(root))
+
+
+def _archive_macos_chromium_revisions(archive: Path) -> set[str]:
+    """Inspect an archive without extracting it, keeping the check read-only."""
+
+    archive = Path(archive)
+    if not archive.is_file():
+        return set()
+    pattern = re.compile(
+        r"(?:^|/)ms-playwright/chromium-(\d+)/chrome-mac[^/]*/"
+        r"Google Chrome for Testing\.app/Contents/MacOS/Google Chrome for Testing$"
+    )
+    revisions: set[str] = set()
+    try:
+        with tarfile.open(archive, "r:gz") as tf:
+            for member in tf.getmembers():
+                match = pattern.search(str(member.name or ""))
+                if match:
+                    revisions.add(match.group(1))
+    except (OSError, tarfile.TarError):
+        return set()
+    return revisions
 
 
 def prepare_playwright_browsers(bundle_root: Path, runtime_root: Path) -> Optional[Path]:
-    """Copy or extract the bundled Chromium into the writable runtime once."""
+    """Copy the bundled Chromium into runtime, replacing stale revisions safely.
+
+    Playwright resolves its executable by revision (for example, chromium-1217).
+    A previous app version may have left another revision in Application Support;
+    treating any Chromium directory as valid makes relogin fail later with a
+    missing executable.  Only the generated ``.run/ms-playwright`` cache is ever
+    replaced here; user config, accounts, orders, and state remain untouched.
+    """
 
     bundled = bundle_root / "ms-playwright"
     archive = bundle_root / "ms-playwright.tar.gz"
     runtime = runtime_root / ".run" / "ms-playwright"
-    if _has_macos_chromium(runtime):
-        return runtime
-    if _has_macos_chromium(bundled):
-        if runtime.exists():
-            shutil.rmtree(runtime)
-        runtime.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(bundled, runtime, symlinks=True)
-        return runtime
-    if archive.is_file():
-        if runtime.exists():
-            shutil.rmtree(runtime)
-        _safe_extract_tar(archive, runtime)
-        if _has_macos_chromium(runtime):
-            return runtime
-    return None
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = runtime.parent / ".ms-playwright.prepare.lock"
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            bundled_revisions = _macos_chromium_revisions(bundled)
+            archive_revisions = _archive_macos_chromium_revisions(archive)
+            expected_revisions = bundled_revisions or archive_revisions
+            runtime_revisions = _macos_chromium_revisions(runtime)
+            runtime_usable = bool(runtime_revisions)
+            if expected_revisions and runtime_usable and not (runtime_revisions & expected_revisions):
+                runtime_usable = False
+
+            if bundled_revisions and not runtime_usable:
+                if runtime.exists():
+                    shutil.rmtree(runtime)
+                shutil.copytree(bundled, runtime, symlinks=True)
+                return runtime
+
+            if not runtime_usable and archive.is_file():
+                if runtime.exists():
+                    shutil.rmtree(runtime)
+                _safe_extract_tar(archive, runtime)
+                if _has_macos_chromium(runtime):
+                    return runtime
+
+            if runtime_usable:
+                return runtime
+            return None
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def seed_runtime(root: Path, bundle_root: Optional[Path] = None) -> Path:
@@ -206,7 +278,10 @@ def seed_runtime(root: Path, bundle_root: Optional[Path] = None) -> Path:
 
     webui_src = bundle / "app" / "webui"
     webui_dst = root / "webui"
-    if webui_src.is_dir() and not webui_dst.exists():
+    # WebUI is application code, not user data.  Always refresh it from the
+    # bundled resources so an upgraded app cannot keep serving an older
+    # index/app.js from a previous Application Support runtime.
+    if webui_src.is_dir():
         _copy_tree(webui_src, webui_dst)
 
     config_dst = root / "config.json"
@@ -327,6 +402,7 @@ def acquire_ownership(runtime_root: Path) -> bool:
         "owner": "tauri-bundled-backend" if is_frozen_runtime() else "tauri-dev-backend",
         "backend_path": str(Path(sys.executable).resolve()),
         "started_at": _datetime.datetime.now(_datetime.timezone.utc).isoformat(),
+        **current_build_info(),
     }
     _atomic_json(ownership_path(runtime_root), owner)
     return True
@@ -427,6 +503,9 @@ def _supervise(runtime_root: Path, argv: List[str]) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "--build-info":
+        print(json.dumps(current_build_info(), ensure_ascii=False, sort_keys=True))
+        return 0
     runtime_root = bootstrap_runtime_environment()
     worker_name, worker_argv = split_worker_mode_args(args)
     if worker_name:

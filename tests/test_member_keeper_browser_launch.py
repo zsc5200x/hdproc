@@ -45,6 +45,17 @@ class TestMemberKeeperBrowserLaunch(unittest.TestCase):
         )
         self.assertEqual(candidates[0][0], "channel_chrome")
 
+    def test_macos_bundled_only_mode_never_adds_system_chrome(self) -> None:
+        from hdzz.core.member.keeper import _playwright_launch_candidates
+
+        candidates = _playwright_launch_candidates(
+            platform_name="darwin",
+            prefer_system_chrome=True,
+            force_system_chrome_only=False,
+            bundled_chromium_only=True,
+        )
+        self.assertEqual(candidates, [("bundled_chromium", {})])
+
     def test_launch_retries_with_clean_profile_after_target_closed(self) -> None:
         from hdzz.core.member.keeper import _launch_persistent_context_with_recovery
 
