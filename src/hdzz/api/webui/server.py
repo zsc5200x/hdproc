@@ -893,6 +893,7 @@ def apply_telegram_config_update(cfg: Dict[str, Any], data: Dict[str, Any]) -> D
     allow_chat = (str(data.get("allow_chat") or "").strip() if "allow_chat" in data else None)
     proxy = str(data.get("proxy") or "").strip()
     clear_token = bool(data.get("clear_token") or False)
+    order_forward_enabled = data.get("order_forward_enabled", None)
     status_push_enabled = data.get("status_push_enabled", None)
     # status_* 仅在请求显式携带字段时才更新，避免被其它保存动作“误清空”
     status_bot_token = (str(data.get("status_bot_token") or "").strip() if "status_bot_token" in data else None)
@@ -910,6 +911,8 @@ def apply_telegram_config_update(cfg: Dict[str, Any], data: Dict[str, Any]) -> D
         out["telegram_allow_chat"] = allow_chat
     if proxy or proxy == "":
         out["telegram_proxy"] = proxy
+    if order_forward_enabled is not None:
+        out["telegram_order_forward_enabled"] = bool(order_forward_enabled)
     if status_push_enabled is not None:
         out["telegram_status_push_enabled"] = bool(status_push_enabled)
     if clear_status_token:
@@ -5450,6 +5453,7 @@ class Handler(SimpleHTTPRequestHandler):
             chat_id = str(cfg.get("telegram_chat_id") or "").strip()
             allow_chat = str(cfg.get("telegram_allow_chat") or "").strip()
             proxy = str(cfg.get("telegram_proxy") or "").strip()
+            order_forward_enabled = bool(cfg.get("telegram_order_forward_enabled", True))
             status_push_enabled = bool(cfg.get("telegram_status_push_enabled") or False)
             status_bot_token = str(cfg.get("telegram_status_bot_token") or "").strip()
             status_chat_id = str(cfg.get("telegram_status_chat_id") or "").strip()
@@ -5463,6 +5467,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "chat_id": chat_id,
                     "allow_chat": allow_chat,
                     "proxy": proxy,
+                    "order_forward_enabled": order_forward_enabled,
                     "status_push_enabled": status_push_enabled,
                     "status_configured": bool(status_bot_token and status_chat_id),
                     "status_token_mask": mask_secret(status_bot_token, keep=4) if status_bot_token else "",
@@ -7323,6 +7328,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "chat_id": cid,
                     "allow_chat": allow_chat2,
                     "proxy": str(cfg.get("telegram_proxy") or "").strip(),
+                    "order_forward_enabled": bool(cfg.get("telegram_order_forward_enabled", True)),
                     "status_push_enabled": bool(cfg.get("telegram_status_push_enabled") or False),
                     "status_configured": bool(sbt and scid),
                     "status_token_mask": mask_secret(sbt, keep=4) if sbt else "",

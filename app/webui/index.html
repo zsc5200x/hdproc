@@ -4169,6 +4169,16 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
         <div class="panel">
           <div class="panel-title"><div class="panel-dot"></div>机器人凭证</div>
           <div class="form-grid" style="gap:12px">
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-label">启用来单推送</div>
+                <div class="toggle-sub">后台抓到新单后立即推送，不等待跟单结果</div>
+              </div>
+              <label class="toggle-sw">
+                <input type="checkbox" id="tg-order-forward" checked>
+                <span class="toggle-track"></span>
+              </label>
+            </div>
             <div class="form-group">
               <label class="form-label" for="tg-token">Bot Token</label>
               <div class="sc-secret-field">
@@ -4730,7 +4740,7 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
 <script src="match_search.js?v=20260430-1045"></script>
 <script src="order_realtime_bridge.js?v=20260430-1045"></script>
 <script src="tg_signal_popup.js?v=20260824-system-center-1"></script>
-<script src="app.js?v=20260824-performance-14-no-chashui"></script>
+<script src="app.js?v=20260825-telegram-order-forward-1"></script>
 <script>
 /* ── Extra wiring ─────────────────────────────── */
 const PAGE_TITLES = {

@@ -1,7 +1,7 @@
 {
   "telegram_bot_token": "",
   "telegram_chat_id": "",
-  "telegram_order_forward_enabled": false,
+  "telegram_order_forward_enabled": true,
   "telegram_allow_chat": "",
   "telegram_proxy": "",
   "telegram_status_push_enabled": false,

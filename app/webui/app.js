@@ -3177,6 +3177,8 @@ async function loadTelegramConfig() {
   if ($("tg-token-hint")) $("tg-token-hint").textContent = data.token_mask || (configured ? "Token 已设置" : "");
   if ($("tg-chat"))  $("tg-chat").value  = String(data.chat_id || "");
   if ($("tg-proxy")) $("tg-proxy").value = String(data.proxy || "");
+  const orderForwardEl = $("tg-order-forward");
+  if (orderForwardEl) orderForwardEl.checked = data.order_forward_enabled !== false;
   const pushEl = $("tg-status-push"); if (pushEl) pushEl.checked = !!data.status_push_enabled;
   const sHint  = $("tg-status-token-hint"); if (sHint) sHint.textContent = data.status_token_mask || "";
   if ($("tg-status-chat"))  $("tg-status-chat").value  = String(data.status_chat_id || "");
@@ -3188,6 +3190,7 @@ async function saveTelegramConfig() {
   const token = ($("tg-token")?.value || "").trim();
   const chatId = ($("tg-chat")?.value  || "").trim();
   const proxy  = ($("tg-proxy")?.value || "").trim();
+  const orderForwardEnabled = $("tg-order-forward") ? !!$("tg-order-forward").checked : true;
   const statusPushEnabled = !!$("tg-status-push")?.checked;
   const statusChatId = ($("tg-status-chat")?.value || "").trim();
   const statusProxy = ($("tg-status-proxy")?.value || "").trim();
@@ -3200,6 +3203,7 @@ async function saveTelegramConfig() {
         bot_token: token,
         chat_id: chatId,
         proxy,
+        order_forward_enabled: orderForwardEnabled,
         status_push_enabled: statusPushEnabled,
         status_chat_id: statusChatId,
         status_proxy: statusProxy,

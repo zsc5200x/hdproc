@@ -57,11 +57,20 @@ class TestWebUiTelegramTest(unittest.TestCase):
         self.assertEqual(updated["telegram_chat_id"], "-100new")
         self.assertEqual(updated["telegram_proxy"], "")
 
+    def test_apply_telegram_config_update_persists_order_forward_enabled(self) -> None:
+        updated = server.apply_telegram_config_update(
+            {"telegram_order_forward_enabled": False},
+            {"order_forward_enabled": True},
+        )
+
+        self.assertTrue(updated["telegram_order_forward_enabled"])
+
     def test_telegram_config_page_has_clear_button_binding(self) -> None:
         html = (APP_DIR / "webui" / "index.html").read_text(encoding="utf-8")
         js = (APP_DIR / "webui" / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('id="tg-clear"', html)
+        self.assertIn('id="tg-order-forward"', html)
         self.assertIn("清除当前配置", html)
         self.assertIn("async function clearTelegramConfig", js)
         self.assertIn('"clear_config": true', js)
