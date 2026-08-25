@@ -6750,6 +6750,13 @@ class Handler(SimpleHTTPRequestHandler):
             doc["members"] = members
             try:
                 atomic_write_json(self._arsenal_path, doc)
+                # Remove the deleted member's optional target mapping from the
+                # same runtime data directory.  Orders and member browser
+                # profiles are intentionally left untouched.
+                mappings = read_json_file(self._mappings_path, {})
+                if member_id in mappings:
+                    mappings.pop(member_id, None)
+                    atomic_write_json(self._mappings_path, mappings)
             except Exception as e:
                 self._send_json(500, {"ok": False, "message": f"写入失败: {e}"})
                 return
