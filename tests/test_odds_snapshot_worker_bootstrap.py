@@ -157,6 +157,20 @@ class TestOddsSnapshotWorkerBootstrap(unittest.TestCase):
         self.assertEqual(pid, 40001)
         self.assertEqual(payload["pids"], [40001])
 
+    def test_webui_snapshot_deadline_covers_two_phase_fetch(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        app_dir = root / "app"
+        src_dir = root / "src"
+        for path in (app_dir, src_dir):
+            if str(path) not in sys.path:
+                sys.path.insert(0, str(path))
+        from hdzz.api.webui import server
+
+        # Context resolution (2s) and game_more retrieval (2.5s) are
+        # sequential; the launcher must leave scheduling margin for both.
+        deadline_s = float(server.DEFAULT_SNAPSHOT_MARKET_DEADLINE_MS) / 1000.0
+        self.assertGreaterEqual(deadline_s, 5.5)
+
     def test_stop_lifecycle_merges_follow_and_snapshot_dedicated_pids(self) -> None:
         root = Path(__file__).resolve().parents[1]
         app_dir = root / "app"

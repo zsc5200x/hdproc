@@ -501,6 +501,10 @@ def follow_engine_running_flag() -> Tuple[bool, Optional[int]]:
 
 SNAPSHOT_WATCH_PID_FILE = Path(".run/odds_snapshot_watch.pid.json")
 SNAPSHOT_WATCH_LIFECYCLE_LOCK = threading.Lock()
+# A refresh resolves the fixture context and then fetches game_more.  A two
+# second outer deadline expires before those two bounded network phases can
+# complete, even when both member requests are healthy.
+DEFAULT_SNAPSHOT_MARKET_DEADLINE_MS = "6000"
 
 
 def _snapshot_watch_process_pids() -> List[int]:
@@ -639,7 +643,10 @@ def _ensure_snapshot_watch_running() -> Tuple[bool, bool, str, Optional[int]]:
             "--active-seconds", os.environ.get("ODDS_SNAPSHOT_ACTIVE_SECONDS", "120"),
             "--max-workers", os.environ.get("ODDS_SNAPSHOT_MAX_WORKERS", "4"),
             "--target-interval-ms", os.environ.get("ODDS_SNAPSHOT_TARGET_INTERVAL_MS", "400"),
-            "--market-deadline-ms", os.environ.get("ODDS_SNAPSHOT_MARKET_DEADLINE_MS", "2000"),
+            "--market-deadline-ms", os.environ.get(
+                "ODDS_SNAPSHOT_MARKET_DEADLINE_MS",
+                DEFAULT_SNAPSHOT_MARKET_DEADLINE_MS,
+            ),
             "--public-timeout-s", os.environ.get("ODDS_SNAPSHOT_PUBLIC_TIMEOUT_S", "2"),
             "--hedge-delay-ms", os.environ.get("ODDS_SNAPSHOT_HEDGE_DELAY_MS", "350"),
             "--scheduler-tick-ms", os.environ.get("ODDS_SNAPSHOT_SCHEDULER_TICK_MS", "50"),
