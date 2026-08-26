@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import patch
 
+import requests
+
 
 class _FakeResponse:
     def __init__(self, text: str, status_code: int = 200):
@@ -88,7 +90,36 @@ class TestMemberPostSessionRetry(unittest.TestCase):
         self.assertEqual(str(out).strip(), "some plain text error")
         self.assertEqual(sess.calls, 1)
 
+    def test_ft_bet_connection_error_is_sent_once(self) -> None:
+        from hdzz.core.follower.executor import member_post_session
+
+        sess = _FakeSession([requests.exceptions.ConnectionError("connection reset")])
+        with patch("hdzz.core.follower.executor.time.sleep", return_value=None):
+            with self.assertRaises(requests.exceptions.ConnectionError):
+                member_post_session(
+                    session=sess,
+                    base_url="https://example.test",
+                    ver="v",
+                    form={"p": "FT_bet", "uid": "u", "gid": "g1"},
+                    timeout_s=3,
+                )
+        self.assertEqual(sess.calls, 1)
+
+    def test_ft_bet_non_xml_response_is_not_replayed(self) -> None:
+        from hdzz.core.follower.executor import member_post_session
+
+        sess = _FakeSession([_FakeResponse("code_type is null")])
+        with patch("hdzz.core.follower.executor.time.sleep", return_value=None):
+            out = member_post_session(
+                session=sess,
+                base_url="https://example.test",
+                ver="v",
+                form={"p": "FT_bet", "uid": "u", "gid": "g1"},
+                timeout_s=3,
+            )
+        self.assertEqual(str(out).strip(), "code_type is null")
+        self.assertEqual(sess.calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
-

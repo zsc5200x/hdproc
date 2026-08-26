@@ -146,6 +146,10 @@ def member_post_session(
     base = str(base_url or "").rstrip("/")
     url = f"{base}/transform.php?ver={ver}"
     hard_s = max(2, int(timeout_s or 0) + 2)
+    # FT_bet 是有副作用的写请求。连接中断时平台可能已经收到下注，
+    # 因此只能发送一次并交给上层 UNKNOWN_RESULT 核验；读接口才允许
+    # 使用下面的轻量传输重试。
+    is_submit = str(form.get("p") or "").strip() == "FT_bet"
     # 站点偶发 SSL EOF/连接中断：对“读接口”和预校验会造成连锁失败（拿不到盘口/水位 -> LINE_NOT_FOUND -> 队列变慢）。
     # 这里做一次轻量重试（不吞硬超时 HardTimeout），并在重试时强制 Connection: close 以避免复用坏连接。
     last_exc: Optional[Exception] = None
@@ -196,7 +200,9 @@ def member_post_session(
                 low = t.lower()
                 if ("code_type" in low and "null" in low) or ("loading" in low and "high" in low) or ("checkemnu" in low) or ("variablestandard" in low):
                     # 不直接 raise：让上层根据具体接口决定是否 warmup/menu 修复；这里仅做连接池清理 + 短退避后重试。
-                    if attempt >= 3:
+                    # FT_bet 的 200 非 XML 同样不能重发：响应可能只是网关
+                    # 丢失了业务 XML，但下注请求本身已经到达平台。
+                    if is_submit or attempt >= 3:
                         return text
                     try:
                         for ad in getattr(session, "adapters", {}).values():
@@ -216,7 +222,10 @@ def member_post_session(
             if telemetry_handle is not None:
                 telemetry_handle.finish(exception=e, response_meta=response_meta)
             last_exc = e
-            if attempt >= 3:
+            # 对 FT_bet，连接级异常的结果是不确定而不是“肯定没下注”。
+            # 立刻抛给 MemberExecutor，由 UNKNOWN_RESULT 专用核验路径处理，
+            # 禁止传输层把同一笔写请求再次发送。
+            if is_submit or attempt >= 3:
                 raise
             # 清理连接池，避免复用到坏连接（部分站点/网络环境下会触发 SSLEOFError）
             try:

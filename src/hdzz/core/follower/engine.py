@@ -4740,6 +4740,26 @@ def _network_error_class(result: Dict[str, Any]) -> str:
     return ""
 
 
+def _context_network_error_class(*, http_status: Any = None, error: Any = "") -> str:
+    """Classify a pre-submit FT_order_view transport failure."""
+    try:
+        status = int(http_status or 0)
+    except Exception:
+        status = 0
+    message = str(error or "").strip().lower()
+    if status == 502 or "bad gateway" in message:
+        return "UPSTREAM_502"
+    if status in {503, 504}:
+        return f"UPSTREAM_{status}"
+    if "readtimeout" in message or "read timed out" in message:
+        return "READ_TIMEOUT"
+    if "ssl" in message or "ssl eof" in message:
+        return "SSL_EOF"
+    if any(token in message for token in ("connectionerror", "proxyerror", "connecttimeout", "chunkedencoding", "connection aborted", "connection reset", "remote end closed")):
+        return "CONNECTION_ERROR"
+    return ""
+
+
 def _mark_member_network_cooldown(*, data_dir: Path, member_id: str, error_class: str) -> None:
     """Cool a member's route after an ambiguous transport result.
 
@@ -6449,6 +6469,19 @@ def _place_bet_snapshot_direct(
                         if context.error == CONTEXT_RETRYABLE
                         else "BET_CONTEXT_FAILED"
                     )
+                    context_network_error = _context_network_error_class(
+                        http_status=context.http_status,
+                        error=context.error,
+                    )
+                    if status == CONTEXT_RETRYABLE and context_network_error:
+                        # FT_order_view 在 FT_bet 之前失败，换会员是安全的；
+                        # 但当前路由若已收到 502/断连，先短暂冷却，避免
+                        # 下一轮马上再次命中同一条坏线路。
+                        _mark_member_network_cooldown(
+                            data_dir=Path(data_dir),
+                            member_id=str(member.get("id") or ""),
+                            error_class=context_network_error,
+                        )
                     waiting = _snapshot_waiting_result(
                         status=status,
                         message=(
@@ -6462,6 +6495,9 @@ def _place_bet_snapshot_direct(
                         intent=intent,
                     )
                     waiting.update(context_meta)
+                    if context_network_error:
+                        waiting["network_health"] = "cooldown"
+                        waiting["network_error_class"] = context_network_error
                     waiting.update(execution_session_meta)
                     close_member_session(execution_session)
                     execution_session = None
@@ -6484,6 +6520,16 @@ def _place_bet_snapshot_direct(
                         "timeout",
                     )
                 )
+                context_network_error = _context_network_error_class(
+                    http_status=context_meta.get("bet_context_http_status"),
+                    error=context_meta.get("bet_context_error"),
+                )
+                if context_retryable and context_network_error:
+                    _mark_member_network_cooldown(
+                        data_dir=Path(data_dir),
+                        member_id=str(member.get("id") or ""),
+                        error_class=context_network_error,
+                    )
                 waiting = _snapshot_waiting_result(
                     status=CONTEXT_RETRYABLE if context_retryable else "BET_CONTEXT_FAILED",
                     message=f"BetContext.prepare 失败：{context_meta['bet_context_error']}",
@@ -6493,6 +6539,9 @@ def _place_bet_snapshot_direct(
                     intent=intent,
                 )
                 waiting.update(context_meta)
+                if context_network_error:
+                    waiting["network_health"] = "cooldown"
+                    waiting["network_error_class"] = context_network_error
                 waiting.update(execution_session_meta)
                 close_member_session(execution_session)
                 execution_session = None
@@ -7547,7 +7596,10 @@ def main() -> int:
         result["runnable_queue_wait_ms"] = round(max(0.0, queue_entered_at - runnable_at) * 1000.0, 3) if runnable_at and queue_entered_at else None
         result["dispatcher_wait_ms"] = round(max(0.0, dispatcher_selected_at - queue_entered_at) * 1000.0, 3) if dispatcher_selected_at and queue_entered_at else None
         result["member_acquire_ms"] = round(max(0.0, member_acquired_at - dispatcher_selected_at) * 1000.0, 3) if member_acquired_at and dispatcher_selected_at else None
-        member_released_at = _to_float(meta.get("member_released_at"), 0.0)
+        # ``_to_float`` already supplies a zero fallback.  Keep this telemetry
+        # path tolerant of missing release timestamps without passing a
+        # second positional default to the helper.
+        member_released_at = _to_float(meta.get("member_released_at"))
         if member_released_at > 0.0:
             result["member_released_at"] = member_released_at
             if ft_finished := _to_float(result.get("ft_bet_finished_at"), 0.0):

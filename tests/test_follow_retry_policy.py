@@ -620,6 +620,26 @@ class TestFollowRetryPolicy(unittest.TestCase):
         self.assertEqual(job.line_not_found_wait_started_at, 0.0)
         self.assertEqual(job.line_not_found_wait_deadline_at, 0.0)
 
+    def test_context_retry_slow_path_exponentially_backs_off_and_caps(self) -> None:
+        from hdzz.core.follower.retry_scheduler import CONTEXT_RETRYABLE
+
+        scheduler = RetryScheduler()
+        job = _mk_job(err=CONTEXT_RETRYABLE)
+        job.context_retry_count = 3
+        delays = [
+            scheduler.schedule_context_retry(job, now=200.0)[1]
+            for _ in range(7)
+        ]
+
+        self.assertEqual(delays[:4], [1.0, 2.0, 4.0, 8.0])
+        self.assertEqual(delays[-1], 30.0)
+
+    def test_context_network_error_is_classified_for_member_cooldown(self) -> None:
+        from hdzz.core.follower.engine import _context_network_error_class
+
+        self.assertEqual(_context_network_error_class(http_status=502, error="CONTEXT_RETRYABLE"), "UPSTREAM_502")
+        self.assertEqual(_context_network_error_class(error="ReadTimeout: read timed out"), "READ_TIMEOUT")
+
     def test_snapshot_publish_event_before_waiter_is_consumed_once(self) -> None:
         from hdzz.core.follower.engine import _consume_snapshot_publish_wakeup
 

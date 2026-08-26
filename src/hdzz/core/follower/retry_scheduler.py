@@ -23,6 +23,7 @@ _WAIT_POLICY_BY_ERR: Dict[str, Dict[str, str]] = {
 CONTEXT_RETRYABLE = "CONTEXT_RETRYABLE"
 UNKNOWN_RESULT = "UNKNOWN_RESULT"
 CONTEXT_RETRY_BACKOFF_SECONDS = (0.15, 0.30, 0.50)
+CONTEXT_RETRY_MAX_DELAY_SECONDS = 30.0
 
 for _snapshot_err in ("SNAPSHOT_MISSING", "SNAPSHOT_STALE", "TARGET_LINE_MISSING", "SNAPSHOT_INVALID", "MARKET_ERROR"):
     _WAIT_POLICY_BY_ERR[_snapshot_err] = {
@@ -360,8 +361,8 @@ class RetryScheduler:
             eff_max_attempts = 0
             eff_max_seconds = 0.0
         # The first three context-only transport failures are bounded, fast
-        # retries.  They must not be prevented by the one-shot attempt limit
-        # or redirected into the Snapshot waiting window.
+        # retries. After that, preserve the caller's normal attempt/time cap;
+        # the dedicated exponential backoff below controls their request rate.
         if err == CONTEXT_RETRYABLE and int(getattr(job, "context_retry_count", 0) or 0) < len(CONTEXT_RETRY_BACKOFF_SECONDS):
             eff_max_attempts = 0
             eff_max_seconds = 0.0
@@ -467,6 +468,7 @@ class RetryScheduler:
         max_fast_retries: int = len(CONTEXT_RETRY_BACKOFF_SECONDS),
         backoffs: Tuple[float, ...] = CONTEXT_RETRY_BACKOFF_SECONDS,
         slow_delay: float = 1.0,
+        max_delay: float = CONTEXT_RETRY_MAX_DELAY_SECONDS,
     ) -> Tuple[int, float, bool]:
         """Schedule a pre-FT_bet context retry without Snapshot waiting.
 
@@ -481,6 +483,11 @@ class RetryScheduler:
             delay = max(0.0, float(backoffs[index] or 0.0))
             job.next_try_at = float(now) + delay
             return count, delay, True
-        delay = max(0.0, float(slow_delay or 0.0))
+        # Once the fast probe window is exhausted, exponentially back off the
+        # same context request. This preserves recovery for a transient 502
+        # without continuing the old one-second request loop indefinitely.
+        base_delay = max(1.0, float(slow_delay or 0.0))
+        slow_index = max(0, count - max(1, int(max_fast_retries or 0)) - 1)
+        delay = min(max(0.0, base_delay * (2 ** slow_index)), max(0.0, float(max_delay or 0.0)))
         job.next_try_at = float(now) + delay
         return count, delay, False
