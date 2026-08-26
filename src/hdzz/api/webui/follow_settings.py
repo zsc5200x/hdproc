@@ -115,7 +115,9 @@ FOLLOW_SETTINGS_DEFAULTS: Dict[str, Any] = {
     # 取得提交时平台认可的盘口结构/ioratio，再继续 FT_bet。
     "execution_mode": "snapshot_direct",
     "snapshot_direct_enabled": True,
-    "snapshot_max_age_ms": 500,
+    "snapshot_max_age_ms": 8000,
+    "snapshot_preferred_age_ms": 8000,
+    "snapshot_structure_max_age_ms": 15000,
     "bet_context_mode": "diagnostic_order_view",
     "unknown_result_reconcile_max_seconds": 120,
     "unknown_result_reconcile_max_attempts": 5,
@@ -162,9 +164,23 @@ def ensure_follow_settings_defaults(doc: Dict[str, Any]) -> Dict[str, Any]:
     # FT_order_view 上下文确认，避免再次退回 source_order_direct。
     out["bet_context_mode"] = "diagnostic_order_view"
     try:
-        out["snapshot_max_age_ms"] = max(50, min(10000, int(out.get("snapshot_max_age_ms") or 500)))
+        out["snapshot_max_age_ms"] = max(50, min(10000, int(out.get("snapshot_max_age_ms") or 8000)))
     except Exception:
-        out["snapshot_max_age_ms"] = 500
+        out["snapshot_max_age_ms"] = 8000
+    try:
+        out["snapshot_preferred_age_ms"] = max(
+            50,
+            min(10000, int(out.get("snapshot_preferred_age_ms") or out["snapshot_max_age_ms"])),
+        )
+    except Exception:
+        out["snapshot_preferred_age_ms"] = out["snapshot_max_age_ms"]
+    try:
+        out["snapshot_structure_max_age_ms"] = max(
+            out["snapshot_preferred_age_ms"],
+            min(30000, int(out.get("snapshot_structure_max_age_ms") or 15000)),
+        )
+    except Exception:
+        out["snapshot_structure_max_age_ms"] = max(out["snapshot_preferred_age_ms"], 15000)
     for retired_key in (
         "snapshot_missing_policy",
         "snapshot_only_for_market",
@@ -285,7 +301,26 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
         try:
             out["snapshot_max_age_ms"] = max(50, min(10000, int(incoming.get("snapshot_max_age_ms") or 0)))
         except Exception:
-            out["snapshot_max_age_ms"] = int(FOLLOW_SETTINGS_DEFAULTS.get("snapshot_max_age_ms") or 500)
+            out["snapshot_max_age_ms"] = int(FOLLOW_SETTINGS_DEFAULTS.get("snapshot_max_age_ms") or 8000)
+    if "snapshot_preferred_age_ms" in incoming:
+        try:
+            out["snapshot_preferred_age_ms"] = max(
+                50,
+                min(10000, int(incoming.get("snapshot_preferred_age_ms") or 0)),
+            )
+        except Exception:
+            out["snapshot_preferred_age_ms"] = out["snapshot_max_age_ms"]
+    if "snapshot_structure_max_age_ms" in incoming:
+        try:
+            out["snapshot_structure_max_age_ms"] = max(
+                out.get("snapshot_preferred_age_ms") or out["snapshot_max_age_ms"],
+                min(30000, int(incoming.get("snapshot_structure_max_age_ms") or 0)),
+            )
+        except Exception:
+            out["snapshot_structure_max_age_ms"] = max(
+                out.get("snapshot_preferred_age_ms") or out["snapshot_max_age_ms"],
+                15000,
+            )
     out["bet_context_mode"] = "diagnostic_order_view"
     if "unknown_result_reconcile_max_seconds" in incoming:
         try:

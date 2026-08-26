@@ -4001,12 +4001,12 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             # Snapshot Direct 是唯一生产执行路径。
             "execution_mode": "snapshot_direct",
             "snapshot_direct_enabled": True,
-            "snapshot_max_age_ms": 500,
-            # 500ms is the preferred fast path.  Diagnostic BetContext may
+            "snapshot_max_age_ms": 8000,
+            # 8s is the preferred freshness window.  Diagnostic BetContext may
             # use a bounded structure candidate because FT_order_view performs
             # the final submit-time structure/quote confirmation.
-            "snapshot_preferred_age_ms": 500,
-            "snapshot_structure_max_age_ms": 3000,
+            "snapshot_preferred_age_ms": 8000,
+            "snapshot_structure_max_age_ms": 15000,
             # 在同一个 fresh Session 中先执行 FT_order_view，
             # 取得提交时平台认可的盘口结构/ioratio，再继续 FT_bet。
             "bet_context_mode": "diagnostic_order_view",
@@ -5238,12 +5238,12 @@ def _snapshot_max_age_ms(settings: Dict[str, Any]) -> int:
     except Exception:
         value = 0
     if value <= 0:
-        value = 500
+        value = 8000
     return max(50, min(10000, value))
 
 
 def _snapshot_preferred_age_ms(settings: Dict[str, Any]) -> int:
-    """Preferred cache age; the configured 500ms remains the default."""
+    """Return the preferred cache freshness window."""
     raw = settings.get("snapshot_preferred_age_ms")
     try:
         value = int(raw) if raw not in (None, "") else _snapshot_max_age_ms(settings)
@@ -5255,20 +5255,19 @@ def _snapshot_preferred_age_ms(settings: Dict[str, Any]) -> int:
 def _snapshot_structure_max_age_ms(settings: Dict[str, Any], *, context_mode: str) -> int:
     """Bound the candidate row window used by diagnostic BetContext only.
 
-    The watcher measurements show a roughly 2.45s P99 refresh period.  A
-    3-second structure window gives the diagnostic context a bounded candidate
+    The wider structure window gives diagnostic context a bounded candidate
     while the subsequent FT_order_view remains the authoritative submit-time
-    structure/quote check.  Non-context paths retain the 500ms hard gate.
+    structure/quote check.  Non-context paths retain the preferred hard gate.
     """
     preferred = _snapshot_preferred_age_ms(settings)
     if str(context_mode or "").strip().lower() != "diagnostic_order_view":
         return preferred
     raw = settings.get("snapshot_structure_max_age_ms")
     try:
-        value = int(raw) if raw not in (None, "") else 3000
+        value = int(raw) if raw not in (None, "") else 15000
     except Exception:
-        value = 3000
-    return max(preferred, min(10000, value))
+        value = 15000
+    return max(preferred, min(30000, value))
 
 
 def _lookup_snapshot_candidate(
@@ -5278,7 +5277,7 @@ def _lookup_snapshot_candidate(
     settings: Dict[str, Any],
     context_mode: str,
 ) -> Tuple[Any, int]:
-    """Prefer a sub-500ms row, then bounded diagnostic structure fallback."""
+    """Prefer a fresh row, then bounded diagnostic structure fallback."""
     preferred = _snapshot_preferred_age_ms(settings)
     # A failed FT_order_view is a context transport problem, not a public
     # revision problem.  On its bounded retry we may reuse the current exact

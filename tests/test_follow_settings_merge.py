@@ -125,7 +125,9 @@ class TestFollowSettingsMerge(unittest.TestCase):
         self.assertEqual(out["market_limit_amount"], 0.0)
         self.assertEqual(out["execution_mode"], "snapshot_direct")
         self.assertTrue(out["snapshot_direct_enabled"])
-        self.assertEqual(out["snapshot_max_age_ms"], 500)
+        self.assertEqual(out["snapshot_max_age_ms"], 8000)
+        self.assertEqual(out["snapshot_preferred_age_ms"], 8000)
+        self.assertEqual(out["snapshot_structure_max_age_ms"], 15000)
         self.assertEqual(out["bet_context_mode"], "diagnostic_order_view")
         self.assertNotIn("game_more_scan_all_gids", out)
         self.assertNotIn("order_view_confirm_before_bet", out)
@@ -140,6 +142,28 @@ class TestFollowSettingsMerge(unittest.TestCase):
         self.assertIn("all", out["reverse_rules"])
         self.assertIn("total", out["reverse_rules"])
         self.assertIn("handicap", out["reverse_rules"])
+
+    def test_snapshot_windows_preserve_requested_bounds(self) -> None:
+        from hdzz.api.webui.follow_settings import merge_follow_settings
+        from hdzz.core.follower.engine import (
+            _snapshot_preferred_age_ms,
+            _snapshot_structure_max_age_ms,
+        )
+
+        out = merge_follow_settings(
+            {},
+            {
+                "snapshot_max_age_ms": 8000,
+                "snapshot_preferred_age_ms": 8000,
+                "snapshot_structure_max_age_ms": 15000,
+            },
+        )
+
+        self.assertEqual(_snapshot_preferred_age_ms(out), 8000)
+        self.assertEqual(
+            _snapshot_structure_max_age_ms(out, context_mode="diagnostic_order_view"),
+            15000,
+        )
 
     def test_legacy_client_cannot_switch_execution_path_or_restore_fallback(self) -> None:
         from hdzz.api.webui.follow_settings import merge_follow_settings
