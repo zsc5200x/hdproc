@@ -1,0 +1,75 @@
+订单,split,attempt,member,execution_member,session状态,是否进入session.post,HTTP,XML,ticket,结论,JSONL行
+23623206709,1,1,summer022,be699854d1ce41cc86c6f04db19172fd,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,2116
+23623410797,1,1,summer011,295f1ad1b1f442b5bfad70106917428f,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,2117
+23623667212,1,1,summer022,be699854d1ce41cc86c6f04db19172fd,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,2118
+23623748170,1,1,summer011,295f1ad1b1f442b5bfad70106917428f,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,2119
+23650565628,1,1,summer022,be699854d1ce41cc86c6f04db19172fd,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,2120
+23623206709,1,2,summer011,295f1ad1b1f442b5bfad70106917428f,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,2121
+23623410797,1,2,summer011,295f1ad1b1f442b5bfad70106917428f,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,2122
+23623608027,1,2,summer022,be699854d1ce41cc86c6f04db19172fd,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,2123
+25132176049,1,1,aabbcc775533,7735ccef52dd462ca43d1a80528be4af,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2728
+25132176049,2,1,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2729
+25132176049,1,2,aabbcc775533,7735ccef52dd462ca43d1a80528be4af,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2730
+25132176049,1,3,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2731
+25132176049,2,2,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2732
+25132176049,2,3,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2733
+25132176049,1,4,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2734
+25132176049,2,4,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2735
+25132176049,2,5,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2736
+25132176049,1,5,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2737
+25132176049,1,6,aabbcc775533,7735ccef52dd462ca43d1a80528be4af,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2738
+25132176049,1,7,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2739
+25132176049,2,6,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2740
+25132176049,1,8,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2741
+25132176049,2,7,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2742
+25132176049,1,9,aabbcc775533,7735ccef52dd462ca43d1a80528be4af,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2743
+25132176049,1,10,aabbcc775533,7735ccef52dd462ca43d1a80528be4af,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2744
+25132176049,2,8,aabbcc775533,7735ccef52dd462ca43d1a80528be4af,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2745
+25132176049,1,11,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2746
+25132176049,2,9,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2747
+25132176049,1,12,aabbcc775533,7735ccef52dd462ca43d1a80528be4af,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2748
+25132176049,2,10,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2749
+25132176049,2,11,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2750
+25132176049,1,13,aabbcc775533,7735ccef52dd462ca43d1a80528be4af,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2751
+25132176049,1,14,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2752
+25132176049,2,12,aabbcc775533,7735ccef52dd462ca43d1a80528be4af,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2753
+25132176049,1,15,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2754
+25132176049,2,13,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2755
+25132176049,1,16,aabbcc775533,7735ccef52dd462ca43d1a80528be4af,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2756
+25132176049,2,14,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2757
+25132176049,2,15,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2758
+25132176049,1,17,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2759
+25132176049,1,18,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2760
+25132176049,2,16,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2761
+25132176049,1,19,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是*,-,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2762
+25132176049,1,20,aabbcc775533,7735ccef52dd462ca43d1a80528be4af,证据不足,是*,502,-,-,session.post 已发出；HTTP 502 是上游/网络失败，不能用 502 证明 Session 失效。,2763
+25132176049,2,17,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是*,502,-,-,session.post 已发出；HTTP 502 是上游/网络失败，不能用 502 证明 Session 失效。,2764
+25132615240,1,14,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是,200,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2808
+25132615240,2,28,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是,200,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2827
+25132615240,1,39,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是,200,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2863
+25132804650,2,2,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是,200,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2879
+25132804650,2,4,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是,200,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2884
+25132804650,2,8,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是,200,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2888
+25132804650,2,9,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是,200,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2890
+25132804650,1,14,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是,200,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2909
+25132804650,2,21,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是,200,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2910
+25132804650,1,20,aabbcc885522,b9a4535c852643659eadf196788bf3fc,证据不足,是,200,555,-,返回 betError000，但提交前 Cookie/UID/ver 或读取链路未完整留痕，不能据此证明 Session 失效。,2921
+25132804650,1,23,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,证据不足,是,502,-,-,session.post 已发出；HTTP 502 是上游/网络失败，不能用 502 证明 Session 失效。,2926
+25137917658,1,1,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,有效迹象充分,是,-,-,-,session.post 已发出但读取超时，结果未知；不能把网络超时归因于 Session 失效。,2935
+25137921058,1,2,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,有效迹象充分,是,200,555,-,HTTP 200 + XML 555/betError000：会话表面有效但平台业务层拒单，无法证明 Session 失效。,2944
+25137917658,2,4,aabbcc885522,b9a4535c852643659eadf196788bf3fc,有效迹象充分,是,200,555,-,HTTP 200 + XML 555/betError000：会话表面有效但平台业务层拒单，无法证明 Session 失效。,2945
+25137917658,2,5,aabbcc885522,b9a4535c852643659eadf196788bf3fc,有效迹象充分,是,200,555,-,HTTP 200 + XML 555/betError000：会话表面有效但平台业务层拒单，无法证明 Session 失效。,2947
+25137921058,1,5,aabbcc885522,b9a4535c852643659eadf196788bf3fc,有效迹象充分,是,200,555,-,HTTP 200 + XML 555/betError000：会话表面有效但平台业务层拒单，无法证明 Session 失效。,2949
+25138854285,1,1,aabbcc885522,b9a4535c852643659eadf196788bf3fc,有效迹象充分,是,200,555,-,HTTP 200 + XML 555/betError000：会话表面有效但平台业务层拒单，无法证明 Session 失效。,2951
+25138854285,1,2,aabbcc885522,b9a4535c852643659eadf196788bf3fc,有效迹象充分,是,200,555,-,HTTP 200 + XML 555/betError000：会话表面有效但平台业务层拒单，无法证明 Session 失效。,2954
+25138854285,2,4,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,有效迹象充分,是,502,-,-,session.post 已发出；HTTP 502 是上游/网络失败，不能用 502 证明 Session 失效。,2955
+25144369496,2,880,aabbcc885522,6f0f7aa657474d3cbfb91656446e1dcd,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,4930
+25144369496,2,975,aabbcc885522,6f0f7aa657474d3cbfb91656446e1dcd,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,5121
+25144369496,1,962,aabbcc885522,6f0f7aa657474d3cbfb91656446e1dcd,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,5124
+25144369496,1,966,aabbcc885522,6f0f7aa657474d3cbfb91656446e1dcd,有失效迹象,否,200,error/doubleLogin,-,FT_order_view 明确返回 doubleLogin；未进入 FT_bet，属于有证据的登录态异常。,5132
+25144369496,1,3,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,有效迹象充分,是,-,-,-,session.post 已发出但读取超时，结果未知；不能把网络超时归因于 Session 失效。,5661
+25149451257,1,3,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,有效迹象充分,是,502,-,-,session.post 已发出；HTTP 502 是上游/网络失败，不能用 502 证明 Session 失效。,5670
+25153543069,1,1,aabbcc775533,821e752314964e709386df931c33b706,有效迹象充分,是,502,-,-,session.post 已发出；HTTP 502 是上游/网络失败，不能用 502 证明 Session 失效。,5684
+25153798856,1,1,aabbcc995511,7e16e153878542f9b07d6bba5a2d027d,有效迹象充分,是,502,-,-,session.post 已发出；HTTP 502 是上游/网络失败，不能用 502 证明 Session 失效。,5693
+25153799064,2,1,aabbcc774411,0cae94d3e7804a2a882dec249bfd340c,有效迹象充分,是,502,-,-,session.post 已发出；HTTP 502 是上游/网络失败，不能用 502 证明 Session 失效。,5694
+25154162083,2,5,aabbcc775533,821e752314964e709386df931c33b706,有效迹象充分,是,-,-,-,session.post 已发出但读取超时，结果未知；不能把网络超时归因于 Session 失效。,5782

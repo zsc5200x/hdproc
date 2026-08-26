@@ -10,6 +10,7 @@ import requests
 
 from hdzz.common.http import hard_timeout, requests_timeout
 from hdzz.common.parse import parse_cookie_header
+from hdzz.common.http_telemetry import telemetry_manager
 
 
 _SENSITIVE_HEADER_NAMES = {
@@ -115,6 +116,12 @@ def make_member_session(*, base_url: str, proxy: str, cookie: str) -> requests.S
             sess.cookies.set(k, v)
         except Exception:
             pass
+    # Telemetry metadata is attached to the Session only; it does not alter
+    # cookies, headers, proxies, pooling, or request behavior.
+    try:
+        telemetry_manager().record_session_created(sess, component="follower")
+    except Exception:
+        pass
     return sess
 
 
@@ -143,6 +150,7 @@ def member_post_session(
     # 这里做一次轻量重试（不吞硬超时 HardTimeout），并在重试时强制 Connection: close 以避免复用坏连接。
     last_exc: Optional[Exception] = None
     for attempt in range(1, 4):
+        telemetry_handle = None
         try:
             if response_meta is not None:
                 response_meta.clear()
@@ -151,6 +159,13 @@ def member_post_session(
                 extra_headers = {"Connection": "close"} if attempt >= 2 else None
                 if response_meta is not None and str(form.get("p") or "") == "FT_bet":
                     response_meta["request_headers"] = _prepared_request_headers(session, url, form, extra_headers)
+                telemetry_handle = telemetry_manager().record_request_start(
+                    session=session,
+                    url=url,
+                    form=form,
+                    component=str(getattr(session, "_hdzz_telemetry_component", "follower") or "follower"),
+                    meta=(getattr(session, "_hdzz_telemetry_meta", {}) if response_meta is None else response_meta),
+                )
                 r = session.post(
                     url,
                     data=form,
@@ -158,6 +173,8 @@ def member_post_session(
                     verify=False,
                     headers=extra_headers,
                 )
+            if telemetry_handle is not None:
+                telemetry_handle.finish(response=r, response_meta=response_meta)
             if response_meta is not None:
                 body = str(r.text or "")
                 headers = getattr(r, "headers", {}) or {}
@@ -196,6 +213,8 @@ def member_post_session(
                     continue
             return text
         except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+            if telemetry_handle is not None:
+                telemetry_handle.finish(exception=e, response_meta=response_meta)
             last_exc = e
             if attempt >= 3:
                 raise
@@ -214,6 +233,10 @@ def member_post_session(
             except Exception:
                 pass
             continue
+        except BaseException as e:
+            if telemetry_handle is not None:
+                telemetry_handle.finish(exception=e, response_meta=response_meta)
+            raise
     if last_exc is not None:
         raise last_exc
     return ""
@@ -238,7 +261,15 @@ def member_post_session_once(
     base = str(base_url or "").rstrip("/")
     url = f"{base}/transform.php?ver={ver}"
     hard_s = max(2, int(timeout_s or 0) + 2)
+    telemetry_handle = None
     try:
+        telemetry_handle = telemetry_manager().record_request_start(
+            session=session,
+            url=url,
+            form=form,
+            component=str(getattr(session, "_hdzz_telemetry_component", "follower") or "follower"),
+            meta=(getattr(session, "_hdzz_telemetry_meta", {}) if response_meta is None else response_meta),
+        )
         with hard_timeout(hard_s):
             response = session.post(
                 url,
@@ -246,6 +277,7 @@ def member_post_session_once(
                 timeout=requests_timeout(timeout_s),
                 verify=False,
             )
+        telemetry_handle.finish(response=response, response_meta=response_meta)
         if response_meta is not None:
             body = str(response.text or "")
             headers = getattr(response, "headers", {}) or {}
@@ -263,6 +295,10 @@ def member_post_session_once(
         response.raise_for_status()
         return str(response.text or "")
     except BaseException as exc:
+        try:
+            telemetry_handle.finish(exception=exc, response_meta=response_meta)
+        except Exception:
+            pass
         if response_meta is not None:
             response_meta.setdefault("exception_type", type(exc).__name__)
             response_meta.setdefault("exception", str(exc))

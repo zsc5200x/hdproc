@@ -45,6 +45,7 @@ WORKER_MODULES = {
     "member_arsenal_watch": "member_arsenal_watch",
     "odds_snapshot_watch": "odds_snapshot_watch",
     "settlement_importer": "settlement_importer",
+    "network_telemetry_sampler": "tools.hd_network_telemetry_sampler",
     "follow_engine": "follow_engine",
     "telegram_bot": "telegram_bot",
     "telegram_signal_watch": "telegram_signal_watch",

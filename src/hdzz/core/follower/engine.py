@@ -11,6 +11,7 @@ import re
 import signal
 import threading
 import time
+import tempfile
 import warnings
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -52,9 +53,12 @@ from .snapshot_direct import (
     SNAPSHOT_INVALID,
     SNAPSHOT_MISSING,
     SNAPSHOT_STALE,
+    SOURCE_ORDER_DIRECT,
+    SOURCE_ORDER_READY,
     TARGET_LINE_MISSING,
     SnapshotValidator,
     SNAPSHOT_VALID,
+    build_source_order_submit_template,
     build_submit_template,
     intent_market_fields,
     line_matches,
@@ -136,6 +140,7 @@ def now_cn() -> str:
 
 _TG_FAIL_LAST: Dict[str, float] = {}
 _ENGINE_LOCK_FH = None
+_ENGINE_GLOBAL_LOCK_FH = None
 _MEMBER_COOLDOWN_UNTIL: Dict[str, float] = {}
 _MARKET_RETRY_ERRORS = frozenset({
     "1X001",
@@ -605,20 +610,12 @@ def acquire_single_instance_lock(lock_path: Path) -> bool:
     防止同一个 data_dir 下同时跑多个 follow_engine：
     - 多实例会导致重复下注、重复写 follow_results、TG 多条播报。
     """
-    global _ENGINE_LOCK_FH
+    global _ENGINE_LOCK_FH, _ENGINE_GLOBAL_LOCK_FH
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fh = lock_path.open("a+", encoding="utf-8")
     except Exception:
         return False
-
-    try:
-        fh.seek(0)
-        fh.truncate(0)
-        fh.write(f"pid={os.getpid()}\nstarted_at={now_iso()}\n")
-        fh.flush()
-    except Exception:
-        pass
 
     try:
         if os.name == "nt":
@@ -646,7 +643,48 @@ def acquire_single_instance_lock(lock_path: Path) -> bool:
             pass
         return False
 
+    # A data-dir lock prevents duplicates within one runtime directory.  A
+    # second per-user lock prevents an old source-tree launcher and a Tauri
+    # runtime (which use different data directories) from both executing the
+    # same follow engine at once.
+    global_path = Path(tempfile.gettempdir()) / f"hdzz-follow-engine-{getattr(os, 'getuid', lambda: 0)()}.lock"
+    try:
+        global_fh = global_path.open("a+")
+        if os.name == "nt":
+            import msvcrt  # type: ignore
+
+            global_fh.seek(0)
+            if not global_fh.read(1):
+                global_fh.seek(0)
+                global_fh.write("0")
+                global_fh.flush()
+            global_fh.seek(0)
+            msvcrt.locking(global_fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl  # type: ignore
+
+            fcntl.flock(global_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        try:
+            global_fh.close()  # type: ignore[union-attr]
+        except Exception:
+            pass
+        try:
+            fh.close()
+        except Exception:
+            pass
+        return False
+
+    try:
+        fh.seek(0)
+        fh.truncate(0)
+        fh.write(f"pid={os.getpid()}\nstarted_at={now_iso()}\n")
+        fh.flush()
+    except Exception:
+        pass
+
     _ENGINE_LOCK_FH = fh
+    _ENGINE_GLOBAL_LOCK_FH = global_fh
     return True
 
 
@@ -3960,7 +3998,7 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             "retry_max_seconds": 0,
             # role=quote 的会员是否允许参与真实下注（默认 false：只用于查水/行情）
             "allow_quote_members": False,
-            # Snapshot Direct 是唯一真实执行路径；该字段只用于状态展示和日志自检。
+            # Snapshot Direct 是唯一生产执行路径。
             "execution_mode": "snapshot_direct",
             "snapshot_direct_enabled": True,
             "snapshot_max_age_ms": 500,
@@ -3969,9 +4007,9 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             # the final submit-time structure/quote confirmation.
             "snapshot_preferred_age_ms": 500,
             "snapshot_structure_max_age_ms": 3000,
-            # 默认关闭。诊断 A/B 时显式设为 diagnostic_order_view，
-            # 只在同一个 fresh Session 中增加一次 FT_order_view。
-            "bet_context_mode": "disabled",
+            # 在同一个 fresh Session 中先执行 FT_order_view，
+            # 取得提交时平台认可的盘口结构/ioratio，再继续 FT_bet。
+            "bet_context_mode": "diagnostic_order_view",
             # UNKNOWN_RESULT 的核验窗口。窗口结束后只允许进入
             # CONFIRMED_FAILED 或 STILL_UNKNOWN，绝不降级成普通失败换会员重下。
             "unknown_result_reconcile_max_seconds": 120,
@@ -4028,14 +4066,11 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
         doc = dict(defaults)
     # 硬隔离：quote/read 号永远不参与真实下注
     doc["allow_quote_members"] = False
-    # Snapshot Direct 是唯一生产执行模式。
+    # 当前生产执行模式：Snapshot 精确盘口 + 同会话 FT_order_view。
     doc["execution_mode"] = "snapshot_direct"
     doc["snapshot_direct_enabled"] = True
-    if str(doc.get("bet_context_mode") or "disabled").strip().lower() not in {
-        "disabled",
-        "diagnostic_order_view",
-    }:
-        doc["bet_context_mode"] = "disabled"
+    # 不允许旧配置/旧客户端把已验证的生产链路降级为直接提交源水位。
+    doc["bet_context_mode"] = "diagnostic_order_view"
     for retired_key in (
         "snapshot_missing_policy",
         "snapshot_only_for_market",
@@ -4094,6 +4129,8 @@ def extract_err_from_result(result: Dict[str, Any]) -> str:
         MEMBER_IORATIO_MISSING,
         MEMBER_IORATIO_STALE,
         MEMBER_IORATIO_INVALID,
+        BET_CONTEXT_MISMATCH,
+        MARKET_CHANGED_DURING_CONTEXT,
         MARKET_SUBMIT_REJECTED,
         CONTEXT_RETRYABLE,
         UNKNOWN_RESULT,
@@ -4365,6 +4402,8 @@ def is_retryable_follow_result(result: Dict[str, Any]) -> bool:
         MEMBER_IORATIO_MISSING,
         MEMBER_IORATIO_STALE,
         MEMBER_IORATIO_INVALID,
+        BET_CONTEXT_MISMATCH,
+        MARKET_CHANGED_DURING_CONTEXT,
         CONTEXT_RETRYABLE,
     }:
         return True
@@ -4615,6 +4654,21 @@ def load_arsenal(data_dir: Path) -> Dict[str, Any]:
             if isinstance(member, dict):
                 member["request_cooldown_enabled"] = enabled
     return doc
+
+
+def _load_current_members(data_dir: Path) -> List[Dict[str, Any]]:
+    """Load a fresh member snapshot for the final acquire/dispatch gate.
+
+    The scheduler keeps a per-tick snapshot for cheap candidate probing, but
+    cooldown/status patches may be written by another worker between probing
+    and dispatch.  This helper deliberately bypasses that stale in-memory
+    list while retaining the normal member-default normalization.
+    """
+    try:
+        doc = load_arsenal(data_dir)
+        return [ensure_member_defaults(m) for m in (doc.get("members") or []) if isinstance(m, dict)]
+    except Exception:
+        return []
 
 
 def load_mappings(data_dir: Path) -> Dict[str, str]:
@@ -5066,6 +5120,7 @@ def _reconcile_only_result(
     if deadline <= 0.0:
         started = _safe_float(order.get("_unknown_result_started_at"), now)
         deadline = started + max_seconds
+    execution_mode = str(settings.get("execution_mode") or "snapshot_direct").strip().lower()
 
     base: Dict[str, Any] = {
         "ts": int(now),
@@ -5083,8 +5138,8 @@ def _reconcile_only_result(
         "unknown_result_check_count": checks,
         "unknown_result_deadline_at": deadline,
         "execution_error_class": UNKNOWN_RESULT,
-        "execution_mode": "snapshot_direct",
-        "execution_path": "snapshot_direct",
+        "execution_mode": execution_mode,
+        "execution_path": execution_mode,
         "real_submission": "reconcile_only",
         "result_status": UNKNOWN_RESULT,
     }
@@ -5248,6 +5303,8 @@ def _snapshot_status_message(status: str, message: str = "") -> str:
         MEMBER_IORATIO_MISSING: "执行会员的最新水位尚未同步，正在等待盘口厨房更新。",
         MEMBER_IORATIO_STALE: "执行会员的水位已过期，正在等待盘口厨房更新。",
         MEMBER_IORATIO_INVALID: "执行会员水位与目标盘口行不一致，禁止提交。",
+        BET_CONTEXT_MISMATCH: "FT_order_view 确认盘口已变化，正在等待目标盘口更新。",
+        MARKET_CHANGED_DURING_CONTEXT: "FT_order_view 返回期间盘口已变化，正在等待最新盘口。",
         CONTEXT_RETRYABLE: "FT_order_view 传输失败，正在快速更换会员重试。",
     }
     base = messages.get(str(status or "").strip(), "盘口快照暂不可用，正在重试。")
@@ -5426,6 +5483,9 @@ def _snapshot_attempt_trace_fields(result: Dict[str, Any]) -> Dict[str, Any]:
     direct = result.get("snapshot_direct") if isinstance(result.get("snapshot_direct"), dict) else {}
     template = direct.get("submit_template") if isinstance(direct.get("submit_template"), dict) else {}
     return {
+        "execution_mode": str(result.get("execution_mode") or "snapshot_direct"),
+        "execution_path": str(result.get("execution_path") or result.get("execution_mode") or "snapshot_direct"),
+        "source_order_direct_submission": bool(result.get("source_order_direct_submission")),
         "member_id": str(result.get("member_id") or ""),
         "member_account": str(result.get("member_account") or result.get("member") or ""),
         "snapshot_direct_status": str(result.get("snapshot_direct_status") or direct.get("status") or ""),
@@ -5620,6 +5680,19 @@ def _probe_snapshot_market(
         intent = _snapshot_intent_for_settings(source_intent, order=order, settings=settings)
         if not intent.gid:
             raise ValueError("source order has no gid")
+        execution_mode = str(settings.get("execution_mode") or "snapshot_direct").strip().lower()
+        if execution_mode == SOURCE_ORDER_DIRECT:
+            template = build_source_order_submit_template(intent, execution_member="")
+            return {
+                "ready": True,
+                "status": SOURCE_ORDER_READY,
+                "message": "源订单 FT_bet 协议字段已通过本地校验。",
+                "intent": intent,
+                "revision": 0,
+                "fetched_at": 0.0,
+                "age_ms": 0,
+                "submit_template": template.to_dict(),
+            }
         context_mode = str(settings.get("bet_context_mode") or "disabled").strip().lower()
         service = MarketSnapshotService(Path(data_dir) / "odds_snapshot_cache.json")
         lookup, candidate_max_age_ms = _lookup_snapshot_candidate(
@@ -5680,6 +5753,331 @@ def _probe_snapshot_market(
         }
 
 
+def _source_order_waiting_result(
+    *,
+    status: str,
+    message: str,
+    member: Dict[str, Any],
+    order: Dict[str, Any],
+    stake: float,
+    intent: Optional[MarketIntent] = None,
+) -> Dict[str, Any]:
+    result = _snapshot_waiting_result(
+        status=status,
+        message=message,
+        member=member,
+        order=order,
+        stake=stake,
+        intent=intent,
+    )
+    result.update(
+        {
+            "execution_mode": SOURCE_ORDER_DIRECT,
+            "execution_path": SOURCE_ORDER_DIRECT,
+            "real_submission": "none",
+            "source_order_direct_submission": False,
+        }
+    )
+    direct = result.get("snapshot_direct")
+    if isinstance(direct, dict):
+        direct["execution_mode"] = SOURCE_ORDER_DIRECT
+    return result
+
+
+def _mark_source_order_execution(result: Dict[str, Any]) -> Dict[str, Any]:
+    result.update(
+        {
+            "execution_mode": SOURCE_ORDER_DIRECT,
+            "execution_path": SOURCE_ORDER_DIRECT,
+            "real_submission": SOURCE_ORDER_DIRECT,
+            "source_order_direct_submission": True,
+        }
+    )
+    direct = result.get("snapshot_direct")
+    if isinstance(direct, dict):
+        direct["execution_mode"] = SOURCE_ORDER_DIRECT
+    return result
+
+
+def _place_bet_source_order_direct(
+    *,
+    data_dir: Path,
+    settings: Dict[str, Any],
+    member: Dict[str, Any],
+    order: Dict[str, Any],
+    stake: float,
+    timeout_s: int,
+    debug: bool,
+    session_pool: Optional["MemberSessionPool"] = None,
+) -> Dict[str, Any]:
+    """Submit one validated source order directly without Snapshot/FT_order_view."""
+
+    del debug
+    execution_session = None
+    execution_session_meta: Dict[str, Any] = {}
+    ft_bet_started = False
+    try:
+        selected_session_generation = _safe_int(member.get("session_generation"), 0)
+        selected_session_fingerprint = member_session_fingerprint(member)
+        source_intent = MarketIntent.from_order(order, split_amount=float(stake or 0.0))
+        intent = _snapshot_intent_for_settings(source_intent, order=order, settings=settings)
+        template = build_source_order_submit_template(
+            intent,
+            execution_member=str(member.get("id") or ""),
+        )
+
+        odds_skipped, odds_message, odds_meta = evaluate_follow_odds_limit(
+            settings=settings,
+            ioratio=template.ioratio,
+        )
+        if odds_skipped:
+            result = _snapshot_direct_result(
+                result=ExecutionResult(
+                    "SKIPPED",
+                    str(member.get("id") or ""),
+                    error_code="ODDS_LIMIT",
+                    error_message=odds_message,
+                ),
+                member=member,
+                order=order,
+                stake=stake,
+                template=template,
+                intent=intent,
+                snapshot_status=SOURCE_ORDER_READY,
+            )
+            _mark_source_order_execution(result)
+            result["real_submission"] = "none"
+            result["source_order_direct_submission"] = False
+            result["skipped"] = True
+            result["skip_reason"] = "odds_limit"
+            result["odds_limit"] = odds_meta
+            result["snapshot_direct_source_intent"] = source_intent.to_dict()
+            result["ioratio_source"] = "source_order"
+            result["bet_context_mode"] = "disabled"
+            return result
+
+        session_ok, session_reason, current_member = _final_session_gate(
+            data_dir=data_dir,
+            member=member,
+            selected_generation=selected_session_generation,
+            selected_fingerprint=selected_session_fingerprint,
+        )
+        if not session_ok:
+            waiting = _source_order_waiting_result(
+                status=session_reason,
+                message=f"提交前 Session gate 拒绝源订单直投：{session_reason}",
+                member=member,
+                order=order,
+                stake=stake,
+                intent=intent,
+            )
+            waiting.update(
+                {
+                    "session_ready": False,
+                    "session_ready_reason": session_reason,
+                    "session_generation": selected_session_generation,
+                    "session_fingerprint": selected_session_fingerprint,
+                    "execution_member": str(member.get("id") or ""),
+                    "bet_context_mode": "disabled",
+                    "ioratio_source": "source_order",
+                }
+            )
+            return waiting
+
+        selected_session_generation = _safe_int(
+            current_member.get("session_generation"), selected_session_generation
+        )
+        selected_session_fingerprint = member_session_fingerprint(current_member)
+        session_created_at = float(now_ts())
+        execution_session = make_member_session(
+            base_url=str(current_member.get("base_url") or ""),
+            proxy=str(current_member.get("proxy") or ""),
+            cookie=str(current_member.get("cookie") or ""),
+        )
+        execution_session_meta = {
+            "session_mode": "fresh_per_attempt",
+            "session_created_at": session_created_at,
+            "session_object_id": str(id(execution_session)),
+            "proxy": "configured" if str(current_member.get("proxy") or "").strip() else "",
+            "proxy_enabled": bool(str(current_member.get("proxy") or "").strip()),
+            **_session_cookie_diagnostics(execution_session),
+        }
+
+        submit_started_at = float(now_ts())
+        try:
+            ft_bet_started = True
+            execution = MemberExecutor().submit(
+                current_member,
+                template,
+                float(stake or 0.0),
+                session=execution_session,
+                timeout_s=max(2, int(timeout_s or 0)),
+            )
+        except (TimeoutError, HardTimeout) as exc:
+            execution = ExecutionResult(
+                UNKNOWN_RESULT,
+                str(current_member.get("id") or ""),
+                error_code=type(exc).__name__ or "HardTimeout",
+                error_message="下注请求超时，结果待核验。",
+            )
+        finally:
+            if execution_session is not None:
+                close_member_session(execution_session)
+                execution_session = None
+        submit_finished_at = float(now_ts())
+
+        result = _snapshot_direct_result(
+            result=execution,
+            member=current_member,
+            order=order,
+            stake=stake,
+            template=template,
+            intent=intent,
+            snapshot_status=SOURCE_ORDER_READY,
+        )
+        _mark_source_order_execution(result)
+        result.update(
+            {
+                "snapshot_direct_source_intent": source_intent.to_dict(),
+                "source_order_direct_intent": intent.to_dict(),
+                "submit_started_at": submit_started_at,
+                "submit_finished_at": submit_finished_at,
+                "submit_elapsed_ms": int(max(0.0, submit_finished_at - submit_started_at) * 1000.0),
+                "ft_bet_started_at": submit_started_at,
+                "ft_bet_elapsed_ms": int(max(0.0, submit_finished_at - submit_started_at) * 1000.0),
+                "bet_submitted_at": submit_started_at,
+                "session_generation": selected_session_generation,
+                "session_fingerprint": selected_session_fingerprint,
+                "session_ready": True,
+                "session_ready_reason": "SESSION_READY",
+                "bet_context_mode": "disabled",
+                "bet_context_request": {},
+                "bet_context_http_status": None,
+                "bet_context_response": {},
+                "bet_context_code": "",
+                "bet_context_error": "",
+                "context_started_at": 0.0,
+                "context_finished_at": 0.0,
+                "context_ioratio": "",
+                "context_ratio": "",
+                "final_submit_ioratio": template.ioratio,
+                "final_submit_ratio": template.ratio,
+                "ioratio_source": "source_order",
+                "params": template.to_dict(),
+                "snapshot_direct_actual_line": template.line,
+                "snapshot_direct_line_change_allowed": False,
+                "snapshot_direct_line_changed": False,
+            }
+        )
+        if isinstance(execution.session_meta, dict):
+            result.update(execution.session_meta)
+        result.update(execution_session_meta)
+        if execution.ft_bet_started_at:
+            result["ft_bet_started_at"] = execution.ft_bet_started_at
+            result["bet_submitted_at"] = execution.ft_bet_started_at
+        if execution.ft_bet_finished_at:
+            result["ft_bet_finished_at"] = execution.ft_bet_finished_at
+        if execution.ft_bet_elapsed_ms:
+            result["ft_bet_elapsed_ms"] = execution.ft_bet_elapsed_ms
+            result["submit_elapsed_ms"] = execution.ft_bet_elapsed_ms
+        result["timings"] = {
+            "ft_bet_s": round(float(result.get("ft_bet_elapsed_ms") or 0) / 1000.0, 3),
+            "attempt_wall_s": round(float(result.get("ft_bet_elapsed_ms") or 0) / 1000.0, 3),
+        }
+
+        network_error_class = _network_error_class(result)
+        result["network_health"] = "cooldown" if network_error_class else "healthy"
+        result["network_error_class"] = network_error_class
+        if execution.status == UNKNOWN_RESULT and network_error_class:
+            _mark_member_network_cooldown(
+                data_dir=data_dir,
+                member_id=str(current_member.get("id") or ""),
+                error_class=network_error_class,
+            )
+        if execution.status == UNKNOWN_RESULT:
+            try:
+                reconcile_session = _get_member_session(
+                    member=current_member,
+                    session_pool=session_pool,
+                )
+                reconciliation = _query_member_recent_wager(
+                    session=reconcile_session,
+                    base_url=str(current_member.get("base_url") or ""),
+                    ver=str(current_member.get("ver") or ""),
+                    uid=str(current_member.get("uid") or ""),
+                    member_id=str(current_member.get("id") or ""),
+                    gid=str(template.gid or ""),
+                    stake=float(stake or 0.0),
+                    submitted_at=float(result.get("bet_submitted_at") or submit_started_at),
+                    timeout_s=min(max(2, int(timeout_s or 0)), 8),
+                )
+                result["reconcile_status"] = str(reconciliation.get("status") or "")
+                if reconciliation.get("status") == "matched":
+                    result["ok"] = True
+                    result["ticket_id"] = str(reconciliation.get("ticket_id") or "")
+                    result["reconciled"] = True
+                    result["reconcile_pending"] = False
+                    result["message"] = "下注请求结果不确定，已通过注单核验确认成交。"
+                elif reconciliation.get("status") == "unavailable":
+                    result["reconcile_error"] = str(reconciliation.get("error") or "")
+            except (TimeoutError, HardTimeout) as exc:
+                result["reconcile_error"] = f"{type(exc).__name__}: {exc}"
+                result["reconcile_pending"] = True
+            except Exception as exc:
+                result["reconcile_error"] = f"{type(exc).__name__}: {exc}"
+        elif execution.status == MEMBER_ERROR:
+            _invalidate_member_session(
+                session_pool=session_pool,
+                member_id=str(current_member.get("id") or ""),
+                reason=str(execution.error_code or "MEMBER_ERROR"),
+            )
+        return result
+    except (TimeoutError, HardTimeout) as exc:
+        if execution_session is not None:
+            close_member_session(execution_session)
+        if not ft_bet_started:
+            return _source_order_waiting_result(
+                status=SNAPSHOT_INVALID,
+                message=f"源订单直投准备超时：{type(exc).__name__}: {exc}",
+                member=member,
+                order=order,
+                stake=stake,
+            )
+        return {
+            "ts": int(now_ts()),
+            "ts_ms": int(now_ts_ms()),
+            "live": bool(is_live_backend_order(order)),
+            "member_id": str(member.get("id") or ""),
+            "member": str(member.get("label") or member.get("username") or member.get("id") or ""),
+            "target": str(order.get("target") or ""),
+            "orderId": str(order.get("orderId") or ""),
+            "stake": float(stake or 0.0),
+            "ok": False,
+            "execution_mode": SOURCE_ORDER_DIRECT,
+            "execution_path": SOURCE_ORDER_DIRECT,
+            "real_submission": SOURCE_ORDER_DIRECT,
+            "source_order_direct_submission": True,
+            "result_status": UNKNOWN_RESULT,
+            "snapshot_direct_result_status": UNKNOWN_RESULT,
+            "error_code": type(exc).__name__ or "HardTimeout",
+            "message": "下注请求超时，结果待核验，暂不更换会员。",
+            "reconcile_pending": True,
+            "unknown_result": True,
+            "bet_context_mode": "disabled",
+            "ioratio_source": "source_order",
+        }
+    except Exception as exc:
+        if execution_session is not None:
+            close_member_session(execution_session)
+        return _source_order_waiting_result(
+            status=SNAPSHOT_INVALID,
+            message=f"源订单 FT_bet 参数构造失败：{type(exc).__name__}: {exc}",
+            member=member,
+            order=order,
+            stake=stake,
+        )
+
+
 def _place_bet_snapshot_direct(
     *,
     data_dir: Path,
@@ -5692,6 +6090,22 @@ def _place_bet_snapshot_direct(
     session_pool: Optional["MemberSessionPool"] = None,
 ) -> Dict[str, Any]:
     """Execute one Snapshot Direct attempt without querying member-side markets."""
+    def _attach_http_telemetry_meta(session: Any) -> None:
+        try:
+            current = getattr(session, "_hdzz_telemetry_meta", {})
+            merged = dict(current) if isinstance(current, dict) else {}
+            member_id = str(member.get("id") or "")
+            merged.update(
+                {
+                    "order_id": str(order.get("orderId") or order.get("order_id") or order.get("id") or "") or None,
+                    "split_id": str(order.get("split_id") or order.get("splitId") or "") or None,
+                    "attempt": settings.get("_attempt_no") or settings.get("attempt") or None,
+                    "member_hash": hashlib.sha256(member_id.encode("utf-8")).hexdigest() if member_id else None,
+                }
+            )
+            setattr(session, "_hdzz_telemetry_meta", merged)
+        except Exception:
+            pass
     try:
         selected_session_generation = _safe_int(member.get("session_generation"), 0)
         selected_session_fingerprint = member_session_fingerprint(member)
@@ -5986,6 +6400,7 @@ def _place_bet_snapshot_direct(
                     proxy=str(member.get("proxy") or ""),
                     cookie=str(member.get("cookie") or ""),
                 )
+                _attach_http_telemetry_meta(execution_session)
                 execution_session_meta = {
                     "session_mode": "fresh_per_attempt",
                     "session_created_at": session_created_at,
@@ -5994,6 +6409,9 @@ def _place_bet_snapshot_direct(
                     "proxy_enabled": bool(str(member.get("proxy") or "").strip()),
                     **_session_cookie_diagnostics(execution_session),
                 }
+                # Keep the submit sequence identical to the proven path:
+                # FT_order_view -> FT_bet on one fresh Session. Extra menu
+                # requests can trigger the platform edge's 502 Blocked page.
                 context_meta["context_started_at"] = float(now_ts())
                 context = BetContext.prepare(
                     session=execution_session,
@@ -6177,6 +6595,25 @@ def _place_bet_snapshot_direct(
                 close_member_session(execution_session)
                 execution_session = None
                 return result
+        # The normal direct path also uses a fresh Session, without adding
+        # menu requests immediately before FT_bet.
+        if execution_session is None:
+            session_created_at = float(now_ts())
+            execution_session = make_member_session(
+                base_url=str(member.get("base_url") or ""),
+                proxy=str(member.get("proxy") or ""),
+                cookie=str(member.get("cookie") or ""),
+            )
+            _attach_http_telemetry_meta(execution_session)
+            execution_session_meta = {
+                "session_mode": "fresh_per_attempt",
+                "session_created_at": session_created_at,
+                "session_object_id": str(id(execution_session)),
+                "proxy": "configured" if str(member.get("proxy") or "").strip() else "",
+                "proxy_enabled": bool(str(member.get("proxy") or "").strip()),
+                **_session_cookie_diagnostics(execution_session),
+            }
+
         # Final freshness gate: queueing/member acquisition/context work must
         # never turn an old MarketRow into a new FT_bet submission.
         final_freshness_lookup = service.lookup(
@@ -6267,11 +6704,9 @@ def _place_bet_snapshot_direct(
             submit_kwargs = {
                 "timeout_s": max(2, int(timeout_s or 0)),
             }
-            # Keep the default Direct path's existing call shape.  A Session
-            # is passed only for the diagnostic context A/B path, where it
-            # must be shared by FT_order_view and FT_bet.
-            if execution_session is not None:
-                submit_kwargs["session"] = execution_session
+            # Both diagnostic and normal direct paths submit through the same
+            # fresh session that passed the final identity gate.
+            submit_kwargs["session"] = execution_session
             execution = MemberExecutor().submit(
                 member,
                 template,
@@ -6320,6 +6755,8 @@ def _place_bet_snapshot_direct(
         network_error_class = _network_error_class(result)
         result["network_health"] = "cooldown" if network_error_class else "healthy"
         result["network_error_class"] = network_error_class
+        if execution_session_meta:
+            result.update(execution_session_meta)
         if execution.status == UNKNOWN_RESULT and network_error_class:
             _mark_member_network_cooldown(
                 data_dir=data_dir,
@@ -6436,7 +6873,7 @@ def place_bet(
     debug: bool,
     session_pool: Optional["MemberSessionPool"] = None,
 ) -> Dict[str, Any]:
-    """执行唯一生产链：Snapshot Direct；UNKNOWN 后只允许核验。"""
+    """执行配置的生产链；UNKNOWN 后只允许核验。"""
     # UNKNOWN_RESULT 的后续尝试只能 reconcile，不能再次触发 FT_bet。
     if bool(settings.get("_reconcile_only")):
         return _reconcile_only_result(
@@ -6446,6 +6883,18 @@ def place_bet(
             order=order,
             stake=stake,
             timeout_s=timeout_s,
+            session_pool=session_pool,
+        )
+    execution_mode = str(settings.get("execution_mode") or "snapshot_direct").strip().lower()
+    if execution_mode == SOURCE_ORDER_DIRECT:
+        return _place_bet_source_order_direct(
+            data_dir=data_dir,
+            settings=settings,
+            member=member,
+            order=order,
+            stake=stake,
+            timeout_s=timeout_s,
+            debug=debug,
             session_pool=session_pool,
         )
     return _place_bet_snapshot_direct(
@@ -6853,6 +7302,7 @@ def _run_parallel_place_bet(
 ) -> Dict[str, Any]:
     """Worker-side one-shot attempt. Shared state is finalized by the main thread."""
     member_id = str(member.get("id") or "")
+    execution_mode = str(settings.get("execution_mode") or "snapshot_direct").strip().lower()
     fallback = {
         "ts": int(now_ts()),
         "ts_ms": int(now_ts_ms()),
@@ -6866,9 +7316,9 @@ def _run_parallel_place_bet(
         "source_stake": _safe_float(order.get("stake"), 0.0),
         "ok": False,
         "message": "FT_bet 结果不确定，正在核验，禁止重复提交。",
-        "execution_mode": "snapshot_direct",
-        "execution_path": "snapshot_direct",
-        "real_submission": "snapshot_direct",
+        "execution_mode": execution_mode,
+        "execution_path": execution_mode,
+        "real_submission": execution_mode,
         # 硬超时无法判断请求是否已经到达 FT_bet；必须先核验，不能把
         # 它当成普通会员失败立即切换会员重下。
         "snapshot_direct_result_status": UNKNOWN_RESULT,
@@ -7150,8 +7600,17 @@ def main() -> int:
             MEMBER_IORATIO_MISSING,
             MEMBER_IORATIO_STALE,
             MEMBER_IORATIO_INVALID,
+            BET_CONTEXT_MISMATCH,
+            MARKET_CHANGED_DURING_CONTEXT,
         } and str(result.get("real_submission") or "").lower() == "none":
-            if waiting_status in {SNAPSHOT_MISSING, SNAPSHOT_STALE, TARGET_LINE_MISSING, SNAPSHOT_INVALID}:
+            if waiting_status in {
+                SNAPSHOT_MISSING,
+                SNAPSHOT_STALE,
+                TARGET_LINE_MISSING,
+                SNAPSHOT_INVALID,
+                BET_CONTEXT_MISMATCH,
+                MARKET_CHANGED_DURING_CONTEXT,
+            }:
                 job.market_wait_count = int(job.market_wait_count or 0) + 1
             else:
                 job.member_wait_count = int(job.member_wait_count or 0) + 1
@@ -8079,6 +8538,11 @@ def main() -> int:
             if not str(job.trigger_reason or "").strip():
                 job.trigger_reason = "INITIAL_READY" if not str(job.last_err or "").strip() else "FALLBACK_PROBE"
 
+            # UNKNOWN_RESULT 已进入专用 reconciliation 状态后，普通提交
+            # attempt/time cap 不得越权终止。专用核验窗口（次数/时间）
+            # 由 _reconcile_only_result 单独决定最终状态。
+            in_unknown_result_wait = str(job.last_err or "").strip().upper() == UNKNOWN_RESULT
+
             # 截止：超过限制则终止该单重试（1X001 使用“封盘等待策略”，走自己的超时控制）
             eff_max_attempts, eff_max_seconds = retry_scheduler.get_effective_limits(
                 job,
@@ -8098,10 +8562,10 @@ def main() -> int:
                     print(f"[{now_iso()}] 跟单失败(目标盘口线等待超时) member={job.member_id or '-'} order={job.order_id}", flush=True)
                 continue
 
-            if eff_max_attempts and job.attempts >= eff_max_attempts:
+            if (not in_unknown_result_wait) and eff_max_attempts and job.attempts >= eff_max_attempts:
                 _finish_terminal_job(job, {"status": "failed", "reason": "重试次数已达上限", "ts": int(now_ts()), "split_index": int(job.split_index or 0)})
                 continue
-            if eff_max_seconds and (now - float(job.created_at or now)) >= eff_max_seconds:
+            if (not in_unknown_result_wait) and eff_max_seconds and (now - float(job.created_at or now)) >= eff_max_seconds:
                 _finish_terminal_job(job, {"status": "failed", "reason": "重试已超时", "ts": int(now_ts()), "split_index": int(job.split_index or 0)})
                 continue
 
@@ -8180,7 +8644,7 @@ def main() -> int:
                         trace_path,
                         {
                             "event": "waiting_market",
-                            "execution_path": "snapshot_direct",
+                            "execution_path": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
                             "real_submission": "none",
                             "key": job.key,
                             "target": job.target,
@@ -8321,12 +8785,121 @@ def main() -> int:
                     )
                 except Exception:
                     m = None
+
+            # 最终 dispatch gate：候选池是在本轮开始时读取的，而 member
+            # watcher/上一笔 FT_bet 可能刚刚把会员写入 cooldown、离线或
+            # busy。此处必须重新读取持久化快照，禁止沿用旧 member dict。
+            # UNKNOWN_RESULT 是固定原会员核验，允许使用原会员的最新会话
+            # 信息，但绝不会因为 cooldown 而重新 FT_bet。
+            latest_members = _load_current_members(data_dir)
+            members = latest_members
+            selected_id = str((m or {}).get("id") or "").strip()
+            latest_by_id = {
+                str(mm.get("id") or "").strip(): mm
+                for mm in latest_members
+                if str(mm.get("id") or "").strip()
+            }
+            if in_pinned_wait:
+                # 固定原会员做 reconciliation；状态/余额变化不应
+                # 把一次已发出的 UNKNOWN_RESULT 变成换号下注。
+                m = latest_by_id.get(str(job.member_id or "").strip())
+            else:
+                fresh_selected = latest_by_id.get(selected_id) if selected_id else None
+                fresh_selected_ok = bool(
+                    fresh_selected
+                    and _member_eligible_for_stake(
+                        fresh_selected,
+                        stake=float(cur_stake),
+                        avoid_ids=set(),
+                        target=job.target,
+                        mappings=mappings,
+                    )
+                    and selected_id not in busy_member_ids
+                )
+                if fresh_selected_ok:
+                    m = fresh_selected
+                else:
+                    # 候选在 acquire 与 dispatch 之间进入 cooldown 或
+                    # 变为不可用时，从同一份最新快照重选。不能放宽
+                    # cooldown 过滤，也不能退回旧 members 列表。
+                    fresh_avoid = set(avoid) | set(busy_member_ids)
+                    if selected_id:
+                        fresh_avoid.add(selected_id)
+                    m = pick_random_member_for_stake(
+                        latest_members,
+                        float(cur_stake),
+                        avoid_ids=fresh_avoid,
+                        target=job.target,
+                        mappings=mappings,
+                        allow_quote_members=bool(allow_quote_members),
+                    )
+                    if not m and job.member_id:
+                        # 只有当原会员在最新快照中仍健康时才允许
+                        # 重试复用；cooldown 会员绝不能走 fallback。
+                        fresh_previous = latest_by_id.get(str(job.member_id or "").strip())
+                        if fresh_previous and _member_eligible_for_stake(
+                            fresh_previous,
+                            stake=float(cur_stake),
+                            avoid_ids=set(busy_member_ids),
+                            target=job.target,
+                            mappings=mappings,
+                        ):
+                            m = fresh_previous
+
+            # 再做一次极窄的持久化状态检查，覆盖 member watcher 恰好在
+            # 上一份快照之后写入 cooldown 的竞态。若无健康替代会员，
+            # 明确进入 MEMBER_WAIT，绝不把旧候选送入 Context。
+            if m and not in_pinned_wait:
+                dispatch_members = _load_current_members(data_dir)
+                dispatch_by_id = {
+                    str(mm.get("id") or "").strip(): mm
+                    for mm in dispatch_members
+                    if str(mm.get("id") or "").strip()
+                }
+                dispatch_member = dispatch_by_id.get(str(m.get("id") or "").strip())
+                if dispatch_member and _member_eligible_for_stake(
+                    dispatch_member,
+                    stake=float(cur_stake),
+                    avoid_ids=set(busy_member_ids),
+                    target=job.target,
+                    mappings=mappings,
+                ):
+                    m = dispatch_member
+                    members = dispatch_members or members
+                else:
+                    rejected_id = str((m or {}).get("id") or "").strip()
+                    replacement = pick_random_member_for_stake(
+                        dispatch_members,
+                        float(cur_stake),
+                        avoid_ids=set(avoid) | set(busy_member_ids) | ({rejected_id} if rejected_id else set()),
+                        target=job.target,
+                        mappings=mappings,
+                        allow_quote_members=bool(allow_quote_members),
+                    )
+                    m = replacement
+                    members = dispatch_members or members
+                    if m:
+                        _append_trace_jsonl(
+                            trace_path,
+                            {
+                                "event": "member_dispatch_rejected_stale_state",
+                                "key": job.key,
+                                "orderId": job.order_id,
+                                "rejected_member": rejected_id,
+                                "replacement_member": str(m.get("id") or ""),
+                                "reason": "cooldown_or_unavailable_before_dispatch",
+                            },
+                        )
             if not m:
                 try:
                     job.last_attempted_at = float(now_ts())
                 except Exception:
                     job.last_attempted_at = float(now_ts())
-                job.member_id = ""
+                # UNKNOWN_RESULT reconciliation 必须固定原会员；即使
+                # 该会员暂时不可读/不可用，也不能清空 pinned member_id，
+                # 否则下一轮无法继续在原会员上核验。
+                if not in_pinned_wait:
+                    job.member_id = ""
                 if busy_member_ids:
                     job.last_message = f"执行会员暂时忙碌，已排队等待（当前 {len(busy_member_ids)} 个执行中）"
                 else:
@@ -8427,8 +9000,8 @@ def main() -> int:
                         trace_path,
                         {
                             "event": "attempt_start",
-                            "execution_path": "snapshot_direct",
-                            "real_submission": "reconcile_only" if in_unknown_result_wait else "snapshot_direct",
+                            "execution_path": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
+                            "real_submission": "reconcile_only" if in_unknown_result_wait else str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
                             "key": job.key,
                             "target": job.target,
                             "orderId": job.order_id,
@@ -8513,8 +9086,8 @@ def main() -> int:
                 trace_path,
                 {
                     "event": "reconcile_start" if in_unknown_result_wait else "attempt_start",
-                    "execution_path": "snapshot_direct",
-                    "real_submission": "reconcile_only" if in_unknown_result_wait else "snapshot_direct",
+                    "execution_path": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
+                    "real_submission": "reconcile_only" if in_unknown_result_wait else str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
                     "key": job.key,
                     "target": job.target,
                     "orderId": job.order_id,
@@ -8582,9 +9155,9 @@ def main() -> int:
                     "settings_max_amount": _safe_float(one_shot_settings.get("max_amount"), 0.0),
                     "ok": False,
                     "message": "FT_bet 结果不确定，正在核验，禁止重复提交。",
-                    "execution_mode": "snapshot_direct",
-                    "execution_path": "snapshot_direct",
-                    "real_submission": "snapshot_direct",
+                    "execution_mode": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
+                    "execution_path": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
+                    "real_submission": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
                     # 外层硬超时无法判断 FT_bet 是否已发出，先进入核验等待，
                     # 防止下一轮立即更换会员重复下注。
                     "snapshot_direct_result_status": UNKNOWN_RESULT,
@@ -8704,8 +9277,17 @@ def main() -> int:
                 MEMBER_IORATIO_MISSING,
                 MEMBER_IORATIO_STALE,
                 MEMBER_IORATIO_INVALID,
+                BET_CONTEXT_MISMATCH,
+                MARKET_CHANGED_DURING_CONTEXT,
             } and str(result.get("real_submission") or "").lower() == "none":
-                if waiting_status in {SNAPSHOT_MISSING, SNAPSHOT_STALE, TARGET_LINE_MISSING, SNAPSHOT_INVALID}:
+                if waiting_status in {
+                    SNAPSHOT_MISSING,
+                    SNAPSHOT_STALE,
+                    TARGET_LINE_MISSING,
+                    SNAPSHOT_INVALID,
+                    BET_CONTEXT_MISMATCH,
+                    MARKET_CHANGED_DURING_CONTEXT,
+                }:
                     job.market_wait_count = int(job.market_wait_count or 0) + 1
                 else:
                     job.member_wait_count = int(job.member_wait_count or 0) + 1

@@ -24,7 +24,13 @@ from .executor import (
 from .market_rows import MarketRow, market_row_fingerprint
 from .member_ioratio import MemberIoratio
 from .odds_snapshot import load_snapshot
-from .strategy import format_handicap_line_value
+from .strategy import (
+    decode_handicap_line,
+    decode_total_line,
+    encode_handicap_line,
+    encode_total_line,
+    format_handicap_line_value,
+)
 
 
 SNAPSHOT_MISSING = "SNAPSHOT_MISSING"
@@ -41,6 +47,8 @@ MARKET_SUBMIT_REJECTED = "MARKET_SUBMIT_REJECTED"
 BET_CONTEXT_MISMATCH = "BET_CONTEXT_MISMATCH"
 MARKET_CHANGED_DURING_CONTEXT = "MARKET_CHANGED_DURING_CONTEXT"
 CONTEXT_RETRYABLE = "CONTEXT_RETRYABLE"
+SOURCE_ORDER_DIRECT = "source_order_direct"
+SOURCE_ORDER_READY = "SOURCE_ORDER_READY"
 
 
 def _text(value: Any) -> str:
@@ -412,6 +420,122 @@ class SubmitTemplate:
             "market_row_revision": self.snapshot_revision,
             "market_row_fingerprint": self.snapshot_fingerprint,
         }
+
+
+def build_source_order_submit_template(
+    intent: MarketIntent,
+    *,
+    execution_member: str,
+) -> SubmitTemplate:
+    """Build FT_bet protocol fields from the immutable source order only.
+
+    This path deliberately does not consult Snapshot, member quote caches, or
+    FT_order_view.  It therefore accepts only protocol mappings that can be
+    reconstructed and round-trip validated from the source order itself.
+    """
+
+    gid = _text(intent.gid)
+    gtype = _text(intent.gtype).upper()
+    market_type = _text(intent.market_type).upper()
+    period = _text(intent.period).upper()
+    side = _text(intent.side).upper()
+    source_odds = _text(intent.source_odds)
+
+    if not gid:
+        raise ValueError("source order has no gid")
+    if gtype != "FT":
+        raise ValueError(f"source-order direct supports FT only: gtype={gtype or 'missing'}")
+    if not _valid_positive_ioratio(source_odds):
+        raise ValueError("source order ioratio is missing or invalid")
+    if intent.is_corner:
+        raise ValueError("corner source line requires platform-specific normalization")
+    if period not in {"FULL_TIME", "HALF_TIME"}:
+        raise ValueError(f"unsupported source order period: {period or 'missing'}")
+
+    is_half = period == "HALF_TIME"
+    if market_type == "HANDICAP":
+        if side not in {"HOME", "AWAY"}:
+            raise ValueError(f"unsupported handicap side: {side or 'missing'}")
+        if intent.target_line is None:
+            raise ValueError("source handicap line is missing")
+        line = float(intent.target_line)
+        if not math.isfinite(line) or not math.isclose(line * 4.0, round(line * 4.0), abs_tol=1e-7):
+            raise ValueError(f"source handicap line is not a quarter line: {line}")
+        wtype = "HRE" if is_half else "RE" if intent.is_live else "R"
+        chose_team = "H" if side == "HOME" else "C"
+        con, ratio = encode_handicap_line(line)
+        decoded = decode_handicap_line(con, ratio)
+        if decoded is None or not math.isclose(float(decoded), line, abs_tol=1e-7):
+            raise ValueError(
+                f"source handicap protocol round-trip mismatch: line={line} con={con} ratio={ratio}"
+            )
+    elif market_type == "TOTAL":
+        if side not in {"OVER", "UNDER"}:
+            raise ValueError(f"unsupported total side: {side or 'missing'}")
+        if intent.target_line is None:
+            raise ValueError("source total line is missing")
+        line = abs(float(intent.target_line))
+        if (
+            not math.isfinite(line)
+            or line <= 0.0
+            or not math.isclose(line * 4.0, round(line * 4.0), abs_tol=1e-7)
+        ):
+            raise ValueError(f"source total line is invalid: {line}")
+        wtype = "HROU" if is_half and intent.is_live else "HOU" if is_half else "ROU" if intent.is_live else "OU"
+        chose_team = "C" if side == "OVER" else "H"
+        con, ratio = encode_total_line(line, is_over=side == "OVER")
+        decoded = decode_total_line(con, ratio)
+        expected_decoded = line if side == "OVER" else -line
+        if decoded is None or not math.isclose(float(decoded), expected_decoded, abs_tol=1e-7):
+            raise ValueError(
+                f"source total protocol round-trip mismatch: line={line} con={con} ratio={ratio}"
+            )
+    elif market_type == "MONEYLINE":
+        raise ValueError("moneyline requires the platform's dynamic submit ratio")
+    else:
+        raise ValueError(f"unsupported source order market: {market_type or 'missing'}")
+
+    rtype = f"{wtype}{chose_team}"
+    source_fingerprint = _sha256_text(
+        json.dumps(
+            {
+                "order_id": intent.order_id,
+                "gid": gid,
+                "gtype": gtype,
+                "wtype": wtype,
+                "rtype": rtype,
+                "chose_team": chose_team,
+                "line": line,
+                "con": con,
+                "ratio": ratio,
+                "ioratio": source_odds,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return SubmitTemplate(
+        gid=gid,
+        gtype=gtype,
+        wtype=wtype,
+        rtype=rtype,
+        chose_team=chose_team,
+        con=con,
+        ratio=ratio,
+        ioratio=source_odds,
+        is_rb="Y" if intent.is_live else "N",
+        f="1R" if intent.is_live else "1M",
+        snapshot_revision=0,
+        snapshot_fetched_at=0.0,
+        snapshot_age_ms=0,
+        line=line,
+        snapshot_fingerprint=source_fingerprint,
+        market_row_ratio=ratio,
+        quote_source_member="source_order",
+        execution_member=_text(execution_member),
+        member_ioratio_source_member="source_order",
+    )
 
 
 @dataclass(frozen=True)
@@ -1089,6 +1213,13 @@ class MemberExecutor:
         own_session = session is None
         session_created_at = float(time.time()) if own_session else 0.0
         sess = session or self._session_factory(base_url=base_url, proxy=_text(member.get("proxy")), cookie=cookie)
+        try:
+            _telemetry_meta = getattr(sess, "_hdzz_telemetry_meta", {})
+            _telemetry_meta = dict(_telemetry_meta) if isinstance(_telemetry_meta, dict) else {}
+            _telemetry_meta.update({"member_hash": _sha256_text(member_id), "member_id_hash": _sha256_text(member_id)})
+            setattr(sess, "_hdzz_telemetry_meta", _telemetry_meta)
+        except Exception:
+            pass
         build_info = current_build_info()
         session_meta: Dict[str, Any] = {
             "session_mode": "fresh_per_attempt" if own_session else "provided",
@@ -1260,6 +1391,8 @@ __all__ = [
     "SNAPSHOT_MISSING",
     "SNAPSHOT_STALE",
     "SNAPSHOT_VALID",
+    "SOURCE_ORDER_DIRECT",
+    "SOURCE_ORDER_READY",
     "SnapshotLookup",
     "SnapshotUnavailable",
     "SnapshotValidator",
@@ -1267,6 +1400,7 @@ __all__ = [
     "TARGET_LINE_MISSING",
     "UNKNOWN_RESULT",
     "SUCCESS",
+    "build_source_order_submit_template",
     "build_submit_template",
     "intent_market_fields",
     "line_matches",

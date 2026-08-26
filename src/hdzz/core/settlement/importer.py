@@ -10,6 +10,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
+from hdzz.common.http_telemetry import telemetry_manager
+
 
 def now_ts() -> int:
     return int(time.time())
@@ -26,6 +28,11 @@ def today_ymd() -> str:
 def digits_only(v: Any) -> str:
     s = str(v or "")
     return "".join(ch for ch in s if ch.isdigit())
+
+
+def _sha256_text(v: Any) -> str:
+    import hashlib
+    return hashlib.sha256(str(v or "").encode("utf-8", "ignore")).hexdigest()
 
 
 def read_json_file(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
@@ -363,7 +370,23 @@ def member_get_today_wagers(
     sess = requests.Session()
     sess.trust_env = False
     proxies = {"http": proxy, "https": proxy} if proxy else None
-    r = sess.post(url, data=form, headers=headers, timeout=timeout_s, proxies=proxies, verify=False)
+    try:
+        telemetry_manager().record_session_created(sess, component="settlement")
+    except Exception:
+        pass
+    telemetry_handle = telemetry_manager().record_request_start(
+        session=sess,
+        url=url,
+        form=form,
+        component="settlement",
+        meta={"member_hash": _sha256_text(uid)},
+    )
+    try:
+        r = sess.post(url, data=form, headers=headers, timeout=timeout_s, proxies=proxies, verify=False)
+        telemetry_handle.finish(response=r)
+    except BaseException as exc:
+        telemetry_handle.finish(exception=exc)
+        raise
     r.raise_for_status()
     text = r.text or ""
     s = text.strip()
@@ -403,7 +426,23 @@ def member_post_xml_api(
     sess = requests.Session()
     sess.trust_env = False
     proxies = {"http": proxy, "https": proxy} if proxy else None
-    r = sess.post(url, data=form, headers=headers, timeout=timeout_s, proxies=proxies, verify=False)
+    try:
+        telemetry_manager().record_session_created(sess, component="settlement")
+    except Exception:
+        pass
+    telemetry_handle = telemetry_manager().record_request_start(
+        session=sess,
+        url=url,
+        form=form,
+        component="settlement",
+        meta={"member_hash": _sha256_text(cookie)},
+    )
+    try:
+        r = sess.post(url, data=form, headers=headers, timeout=timeout_s, proxies=proxies, verify=False)
+        telemetry_handle.finish(response=r)
+    except BaseException as exc:
+        telemetry_handle.finish(exception=exc)
+        raise
     r.raise_for_status()
     text = (r.text or "").strip()
     if not text:

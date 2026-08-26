@@ -55,6 +55,7 @@ hiddenimports = [
     "member_arsenal_watch",
     "odds_snapshot_watch",
     "settlement_importer",
+    "tools.hd_network_telemetry_sampler",
     "follow_engine",
     "telegram_bot",
     "telegram_signal_watch",

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import threading
+import tempfile
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -93,6 +94,12 @@ class SingleInstanceFileLock:
         except (OSError, IOError):
             pass
         handle.close()
+
+
+def _global_snapshot_lock_path() -> Path:
+    """Return the per-user lock shared by source and Tauri runtimes."""
+    uid = getattr(os, "getuid", lambda: 0)()
+    return Path(tempfile.gettempdir()) / f"hdzz-odds-snapshot-watch-{uid}.lock"
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -1641,6 +1648,11 @@ def main() -> int:
     if not instance_lock.acquire():
         print("odds_snapshot_watch already running for this data directory", flush=True)
         return 2
+    global_lock = SingleInstanceFileLock(_global_snapshot_lock_path())
+    if not global_lock.acquire():
+        instance_lock.release()
+        print("odds_snapshot_watch already running for this user", flush=True)
+        return 2
     state_path = data_dir / "follow_state.json"
     print(
         f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] odds_snapshot_watch started "
@@ -1684,6 +1696,7 @@ def main() -> int:
     finally:
         _MEMBER_QUOTE_SCHEDULER.close()
         scheduler.close()
+        global_lock.release()
         instance_lock.release()
 
 

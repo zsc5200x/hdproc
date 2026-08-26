@@ -434,6 +434,50 @@ def _read_follow_engine_pid_info() -> Optional[Dict[str, Any]]:
         return None
 
 
+def _follow_engine_process_pids() -> List[int]:
+    """Find a live follow engine when its dedicated PID file is stale."""
+    current_dir = Path.cwd().resolve()
+    found: List[int] = []
+    try:
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid=,command="],
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).decode("utf-8", "ignore")
+    except Exception:
+        return found
+    for line in output.splitlines():
+        text = line.strip()
+        if not text or "follow_engine.py" not in text:
+            continue
+        match = re.match(r"^(\d+)\s+", text)
+        if not match:
+            continue
+        try:
+            pid = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if not is_pid_running(pid):
+            continue
+        try:
+            cwd_output = subprocess.check_output(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", "ignore")
+            process_cwd = next(
+                (item[1:].strip() for item in cwd_output.splitlines() if item.startswith("n")),
+                "",
+            )
+            if process_cwd and Path(process_cwd).resolve() != current_dir:
+                continue
+        except Exception:
+            pass
+        if pid not in found:
+            found.append(pid)
+    return found
+
+
 def follow_engine_running_flag() -> Tuple[bool, Optional[int]]:
     try:
         obj = _read_follow_engine_pid_info()
@@ -443,6 +487,13 @@ def follow_engine_running_flag() -> Tuple[bool, Optional[int]]:
         alive = [pid for pid in pids if is_pid_running(pid)]
         if alive:
             return True, int(alive[0])
+        discovered = _follow_engine_process_pids()
+        if discovered:
+            atomic_write_json(
+                Path(".run/follow_engine.pid.json"),
+                {"recovered_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "live": True, "pids": [discovered[0]]},
+            )
+            return True, int(discovered[0])
         return False, None
     except Exception:
         return False, None
@@ -450,6 +501,50 @@ def follow_engine_running_flag() -> Tuple[bool, Optional[int]]:
 
 SNAPSHOT_WATCH_PID_FILE = Path(".run/odds_snapshot_watch.pid.json")
 SNAPSHOT_WATCH_LIFECYCLE_LOCK = threading.Lock()
+
+
+def _snapshot_watch_process_pids() -> List[int]:
+    """Find an already-running watcher when lifecycle PID files are stale."""
+    current_dir = Path.cwd().resolve()
+    found: List[int] = []
+    try:
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid=,command="],
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).decode("utf-8", "ignore")
+    except Exception:
+        return found
+    for line in output.splitlines():
+        text = line.strip()
+        if not text or "odds_snapshot_watch.py" not in text:
+            continue
+        match = re.match(r"^(\d+)\s+(.*)$", text)
+        if not match:
+            continue
+        try:
+            pid = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if not is_pid_running(pid) or not _is_snapshot_watch_pid(pid):
+            continue
+        try:
+            cwd_output = subprocess.check_output(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", "ignore")
+            process_cwd = next(
+                (item[1:].strip() for item in cwd_output.splitlines() if item.startswith("n")),
+                "",
+            )
+            if process_cwd and Path(process_cwd).resolve() != current_dir:
+                continue
+        except Exception:
+            pass
+        if pid not in found:
+            found.append(pid)
+    return found
 
 
 def _snapshot_watch_candidate_pids() -> List[int]:
@@ -470,6 +565,10 @@ def _snapshot_watch_candidate_pids() -> List[int]:
             if pid not in seen:
                 seen.add(pid)
                 candidates.append(pid)
+    for pid in _snapshot_watch_process_pids():
+        if pid not in seen:
+            seen.add(pid)
+            candidates.append(pid)
     return candidates
 
 
@@ -565,6 +664,14 @@ def _ensure_snapshot_watch_running() -> Tuple[bool, bool, str, Optional[int]]:
                 break
             time.sleep(0.1)
         if not is_pid_running(int(proc.pid)):
+            existing_running, existing_pid = snapshot_watch_running_flag()
+            if existing_running:
+                try:
+                    out_f.close()
+                    err_f.close()
+                except Exception:
+                    pass
+                return True, False, "", existing_pid
             atomic_write_json(
                 SNAPSHOT_WATCH_PID_FILE,
                 {

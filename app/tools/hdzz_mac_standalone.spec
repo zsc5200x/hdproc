@@ -52,6 +52,7 @@ hiddenimports = [
     "telegram_bot",
     "telegram_signal_watch",
     "settlement_importer",
+    "tools.hd_network_telemetry_sampler",
     "signal_forwarder",
     "signal_puller",
     "PySide6.QtCore",

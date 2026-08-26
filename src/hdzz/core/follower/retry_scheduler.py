@@ -21,6 +21,7 @@ _WAIT_POLICY_BY_ERR: Dict[str, Dict[str, str]] = {
 }
 
 CONTEXT_RETRYABLE = "CONTEXT_RETRYABLE"
+UNKNOWN_RESULT = "UNKNOWN_RESULT"
 CONTEXT_RETRY_BACKOFF_SECONDS = (0.15, 0.30, 0.50)
 
 for _snapshot_err in ("SNAPSHOT_MISSING", "SNAPSHOT_STALE", "TARGET_LINE_MISSING", "SNAPSHOT_INVALID", "MARKET_ERROR"):
@@ -340,6 +341,12 @@ class RetryScheduler:
         eff_max_attempts = int(retry_max_attempts or 0)
         eff_max_seconds = float(retry_max_seconds or 0.0)
         err = str(job.last_err or "").strip().upper()
+        # Once FT_bet has been sent and the outcome is ambiguous, only the
+        # dedicated reconciliation window may terminate the job.  Generic
+        # submit-attempt/time limits must never turn two not-found checks into
+        # a premature ordinary failure.
+        if err == UNKNOWN_RESULT:
+            return 0, 0.0
         if err == "1X001":
             if float(wait_1x001_max or 0.0) > 0.0:
                 eff_max_attempts = 0

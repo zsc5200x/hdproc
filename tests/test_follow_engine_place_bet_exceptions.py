@@ -85,7 +85,9 @@ class TestSnapshotRevisionRetry(unittest.TestCase):
             )
             with patch.object(engine, "MemberExecutor", return_value=FakeExecutor()), patch.object(
                 engine, "_get_member_session", return_value=object()
-            ), patch.object(engine, "_invalidate_member_session"):
+            ), patch.object(engine, "_invalidate_member_session"), patch.object(
+                engine, "member_warmup_menu"
+            ):
                 result_a = engine.place_bet(
                     data_dir=data_dir, settings={"snapshot_max_age_ms": 5000},
                     member=self._member("member-a"), order=self._order(), stake=100,

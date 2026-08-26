@@ -58,7 +58,7 @@ class TestSnapshotDirectSessionLifecycle(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_direct_attempt_does_not_use_session_pool_session(self):
+    def test_direct_attempt_reuses_fresh_session_without_menu_warmup(self):
         from hdzz.core.follower import engine
         from hdzz.core.follower.snapshot_direct import ExecutionResult, SUCCESS
 
@@ -72,7 +72,8 @@ class TestSnapshotDirectSessionLifecycle(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             self._store(data_dir / "odds_snapshot_cache.json")
-            with patch.object(engine, "MemberExecutor", return_value=FakeExecutor()):
+            with patch.object(engine, "MemberExecutor", return_value=FakeExecutor()), \
+                patch.object(engine, "member_warmup_menu") as warmup:
                 result = engine.place_bet(
                     data_dir=data_dir, settings={"snapshot_max_age_ms": 5000},
                     member=self._member(), order=self._order(), stake=50,
@@ -80,7 +81,9 @@ class TestSnapshotDirectSessionLifecycle(unittest.TestCase):
                 )
         self.assertTrue(result["ok"])
         self.assertEqual(len(seen_kwargs), 1)
-        self.assertNotIn("session", seen_kwargs[0])
+        self.assertIn("session", seen_kwargs[0])
+        warmup.assert_not_called()
+        self.assertNotIn("session_warmup", result)
 
     def test_member_error_does_not_invalidate_pool_for_direct(self):
         from hdzz.core.follower import engine
@@ -100,7 +103,9 @@ class TestSnapshotDirectSessionLifecycle(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             self._store(data_dir / "odds_snapshot_cache.json")
-            with patch.object(engine, "MemberExecutor", return_value=FakeExecutor()):
+            with patch.object(engine, "MemberExecutor", return_value=FakeExecutor()), patch.object(
+                engine, "member_warmup_menu"
+            ):
                 result = engine.place_bet(
                     data_dir=data_dir, settings={"snapshot_max_age_ms": 5000},
                     member=self._member(), order=self._order(), stake=50,

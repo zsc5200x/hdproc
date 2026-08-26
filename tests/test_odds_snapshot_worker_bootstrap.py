@@ -68,6 +68,10 @@ class TestOddsSnapshotWorkerBootstrap(unittest.TestCase):
             ), patch.object(
                 module, "_alive_snapshot_watch_pids", return_value=[]
             ), patch.object(
+                module, "_alive_global_worker_pids", return_value=[]
+            ), patch.object(
+                module, "_alive_follow_engine_pids", return_value=[]
+            ), patch.object(
                 module.subprocess, "Popen", side_effect=fake_popen
             ), patch.object(module, "write_pid_info"), patch.object(
                 module, "write_snapshot_watch_pid_info", side_effect=snapshot_pid_writes.append
@@ -110,6 +114,10 @@ class TestOddsSnapshotWorkerBootstrap(unittest.TestCase):
                 module, "build_worker_process_command", return_value=["python3", "worker.py"]
             ), patch.object(
                 module, "_alive_snapshot_watch_pids", return_value=[40001]
+            ), patch.object(
+                module, "_alive_global_worker_pids", return_value=[]
+            ), patch.object(
+                module, "_alive_follow_engine_pids", return_value=[]
             ), patch.object(
                 module.subprocess, "Popen", return_value=_FakeProc(41002)
             ) as popen, patch.object(

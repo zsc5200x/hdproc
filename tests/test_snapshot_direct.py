@@ -741,6 +741,7 @@ class SnapshotDirectTest(unittest.TestCase):
             with patch.object(engine, "make_member_session", return_value=session) as make_session, \
                 patch.object(engine, "MemberIoratioService") as quote_service_cls, \
                 patch.object(engine, "BetContext") as context_cls, \
+                patch.object(engine, "member_warmup_menu") as warmup, \
                 patch.object(engine, "MemberExecutor", return_value=FakeExecutor()):
                 quote_service_cls.return_value.lookup.return_value = MemberIoratioLookup(
                     status=MEMBER_IORATIO_VALID,
@@ -758,6 +759,7 @@ class SnapshotDirectTest(unittest.TestCase):
         self.assertEqual(result["ticket_id"], "CTX-1")
         self.assertEqual(make_session.call_count, 1)
         self.assertEqual(context_cls.prepare.call_count, 1)
+        warmup.assert_not_called()
         self.assertEqual(context_sessions, [session])
         self.assertEqual(submitted, [session])
         self.assertTrue(session.closed)
@@ -765,6 +767,7 @@ class SnapshotDirectTest(unittest.TestCase):
         self.assertEqual(result["bet_context_mode"], "diagnostic_order_view")
         self.assertEqual(result["bet_context_http_status"], 200)
         self.assertEqual(result["bet_context_elapsed_ms"], 4)
+        self.assertNotIn("session_warmup", result)
         self.assertEqual(result["submit_params"]["ioratio"], "0.77")
         self.assertEqual(result["final_submit_ioratio"], "0.77")
         self.assertEqual(result["ioratio_source"], "ft_order_view")
@@ -1009,7 +1012,7 @@ class SnapshotDirectTest(unittest.TestCase):
             self._store_handicap(data_dir / "odds_snapshot_cache.json")
             with patch.object(engine, "MemberExecutor", return_value=FakeExecutor()), patch.object(
                 engine, "_get_member_session", return_value=object()
-            ):
+            ), patch.object(engine, "member_warmup_menu"):
                 result = engine.place_bet(
                     data_dir=data_dir,
                     settings={"snapshot_max_age_ms": 5000},
@@ -1063,7 +1066,7 @@ class SnapshotDirectTest(unittest.TestCase):
             self.assertNotIn('"ioratio"', public_text)
             with patch.object(engine, "MemberExecutor", return_value=FakeExecutor()), patch.object(
                 engine, "_get_member_session", return_value=object()
-            ):
+            ), patch.object(engine, "member_warmup_menu"):
                 result_a = engine.place_bet(
                     data_dir=data_dir,
                     settings={"snapshot_max_age_ms": 5000},
@@ -1140,7 +1143,7 @@ class SnapshotDirectTest(unittest.TestCase):
         self.assertEqual(result["snapshot_direct_status"], MEMBER_IORATIO_MISSING)
         self.assertEqual(result["market_row_gid"], "8993475")
 
-    def test_direct_path_does_not_acquire_session_before_ft_bet(self):
+    def test_direct_path_uses_fresh_session_before_ft_bet(self):
         from hdzz.core.follower import engine
         from hdzz.core.follower.member_ioratio import store_member_snapshot_ioratios
         from hdzz.core.follower.odds_snapshot import store_snapshot
@@ -1167,7 +1170,7 @@ class SnapshotDirectTest(unittest.TestCase):
 
             with patch.object(engine, "MemberExecutor", return_value=FakeExecutor()), patch.object(
                 engine, "_get_member_session", side_effect=AssertionError("Direct must not acquire pooled Session")
-            ):
+            ), patch.object(engine, "member_warmup_menu") as warmup:
                 result = engine.place_bet(
                     data_dir=data_dir,
                     settings={"snapshot_max_age_ms": 5000},
@@ -1180,6 +1183,9 @@ class SnapshotDirectTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["ticket_id"], "DIRECT-1")
+        warmup.assert_not_called()
+        self.assertNotIn("session_warmup", result)
+        self.assertEqual(result["session_mode"], "fresh_per_attempt")
 
     def test_unknown_result_reconciles_and_never_submits_twice(self):
         from hdzz.core.follower import engine
@@ -1197,7 +1203,7 @@ class SnapshotDirectTest(unittest.TestCase):
                 engine, "_get_member_session", return_value=object()
             ), patch.object(
                 engine, "_query_member_recent_wager", return_value={"status": "unavailable", "error": "slow"}
-            ) as reconcile:
+            ) as reconcile, patch.object(engine, "member_warmup_menu"):
                 result = engine.place_bet(
                     data_dir=data_dir,
                     settings={"snapshot_max_age_ms": 5000},
