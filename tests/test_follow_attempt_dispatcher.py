@@ -65,6 +65,41 @@ class TestAttemptDispatcher(unittest.TestCase):
             release.set()
             dispatcher.shutdown()
 
+    def test_same_member_can_run_up_to_configured_parallel_limit(self) -> None:
+        from hdzz.core.follower.attempt_dispatcher import AttemptDispatcher
+
+        dispatcher = AttemptDispatcher(max_workers=3)
+        release = threading.Event()
+
+        def attempt(label: str) -> str:
+            release.wait(timeout=2)
+            return label
+
+        try:
+            first = dispatcher.submit(
+                "order-1", "member-a", attempt, "a1", member_parallel_limit=2
+            )
+            second = dispatcher.submit(
+                "order-2", "member-a", attempt, "a2", member_parallel_limit=2
+            )
+            third = dispatcher.submit(
+                "order-3", "member-a", attempt, "a3", member_parallel_limit=2
+            )
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertIsNone(third)
+            self.assertEqual(dispatcher.busy_member_ids(2), {"member-a"})
+            self.assertEqual(dispatcher.busy_member_ids(3), set())
+
+            release.set()
+            self.assertEqual(dispatcher.wait(first), "a1")
+            self.assertEqual(dispatcher.wait(second), "a2")
+            self.assertEqual(dispatcher.busy_member_ids(2), set())
+        finally:
+            release.set()
+            dispatcher.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()

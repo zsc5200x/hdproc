@@ -866,7 +866,7 @@ class SnapshotDirectTest(unittest.TestCase):
         self.assertTrue(session.closed)
         self.assertEqual(result["bet_context_raw_response"], "<serverresponse><code>501</code><gid>wrong-gid</gid></serverresponse>")
 
-    def test_diagnostic_context_502_cools_member_without_ft_bet(self):
+    def test_diagnostic_context_502_records_issue_without_ft_bet(self):
         from hdzz.core.follower import engine
         from hdzz.core.follower.snapshot_direct import CONTEXT_RETRYABLE, BetContextResult
 
@@ -884,7 +884,7 @@ class SnapshotDirectTest(unittest.TestCase):
             self._store_handicap(data_dir / "odds_snapshot_cache.json")
             with patch.object(engine, "make_member_session", return_value=session), \
                 patch.object(engine, "BetContext") as context_cls, \
-                patch.object(engine, "_mark_member_network_cooldown") as cooldown, \
+                patch.object(engine, "_record_member_network_issue") as record_issue, \
                 patch.object(engine, "MemberExecutor") as executor:
                 context_cls.prepare.return_value = BetContextResult(
                     request={"p": "FT_order_view"},
@@ -903,7 +903,7 @@ class SnapshotDirectTest(unittest.TestCase):
                 )
 
         executor.assert_not_called()
-        cooldown.assert_called_once_with(
+        record_issue.assert_called_once_with(
             data_dir=data_dir,
             member_id="member-1",
             error_class="UPSTREAM_502",
@@ -1262,7 +1262,7 @@ class SnapshotDirectTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["result_status"], UNKNOWN_RESULT)
         self.assertTrue(result["reconcile_pending"])
-        self.assertEqual(result["network_health"], "cooldown")
+        self.assertEqual(result["network_health"], "degraded")
         self.assertEqual(result["network_error_class"], "READ_TIMEOUT")
 
     def test_reconcile_only_path_does_not_construct_member_executor(self):

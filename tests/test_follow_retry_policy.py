@@ -84,7 +84,7 @@ class TestFollowRetryPolicy(unittest.TestCase):
 
         self.assertEqual((attempts, seconds), (0, 0.0))
 
-    def test_dispatch_snapshot_refresh_rejects_member_that_enters_cooldown(self) -> None:
+    def test_dispatch_snapshot_refresh_does_not_reject_network_cooldown_marker(self) -> None:
         import json
         import tempfile
         from pathlib import Path
@@ -137,19 +137,18 @@ class TestFollowRetryPolicy(unittest.TestCase):
                 {"network_health": "cooldown", "network_cooldown_until": engine.now_ts() + 30},
             )
             latest_snapshot = engine._load_current_members(data_dir)
-            selected = engine.pick_random_member_for_stake(
-                latest_snapshot,
-                50.0,
-                avoid_ids={"member-a"},
-                target="",
-                mappings={},
+            self.assertFalse(engine._member_has_transient_network_issue(latest_snapshot[0]))
+            self.assertTrue(
+                engine._member_eligible_for_stake(
+                    latest_snapshot[0],
+                    stake=50.0,
+                    avoid_ids=set(),
+                    target="",
+                    mappings={},
+                )
             )
 
-            self.assertIsNotNone(selected)
-            self.assertEqual(selected["id"], "member-b")
-            self.assertTrue(engine._member_has_transient_network_issue(latest_snapshot[0]))
-
-    def test_all_cooldown_members_enter_wait_pool(self) -> None:
+    def test_legacy_cooldown_fields_do_not_empty_member_pool(self) -> None:
         from hdzz.core.follower import engine
 
         now = engine.now_ts()
@@ -172,7 +171,7 @@ class TestFollowRetryPolicy(unittest.TestCase):
             },
         ]
 
-        self.assertIsNone(
+        self.assertIsNotNone(
             engine.pick_random_member_for_stake(
                 members,
                 50.0,

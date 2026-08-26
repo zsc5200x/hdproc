@@ -9,14 +9,14 @@ CompletedAttempt = Tuple[str, str, Future]
 
 
 class AttemptDispatcher:
-    """Bounded executor that never runs two attempts for the same member."""
+    """Bounded executor with independent global and per-member limits."""
 
     def __init__(self, max_workers: int = 3) -> None:
         workers = max(1, int(max_workers or 1))
         self.max_workers = workers
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="follow-attempt")
         self._lock = threading.RLock()
-        self._busy_members: set = set()
+        self._member_active_counts: Dict[str, int] = {}
         self._active: Dict[Future, Tuple[str, str]] = {}
         self._keys: set = set()
 
@@ -26,6 +26,7 @@ class AttemptDispatcher:
         member_id: str,
         fn: Callable[..., Any],
         *args: Any,
+        member_parallel_limit: int = 1,
         **kwargs: Any,
     ) -> Optional[Future]:
         job_key = str(key or "").strip()
@@ -33,13 +34,16 @@ class AttemptDispatcher:
         if not (job_key and mid):
             return None
 
+        per_member_limit = max(1, int(member_parallel_limit or 1))
         with self._lock:
-            if job_key in self._keys or mid in self._busy_members:
+            if job_key in self._keys:
                 return None
             if len(self._active) >= self.max_workers:
                 return None
+            if int(self._member_active_counts.get(mid, 0)) >= per_member_limit:
+                return None
             self._keys.add(job_key)
-            self._busy_members.add(mid)
+            self._member_active_counts[mid] = int(self._member_active_counts.get(mid, 0)) + 1
 
             def run() -> Any:
                 return fn(*args, **kwargs)
@@ -56,7 +60,7 @@ class AttemptDispatcher:
                     continue
                 self._active.pop(future, None)
                 self._keys.discard(job_key)
-                self._busy_members.discard(mid)
+                self._release_member(mid)
                 completed.append((job_key, mid, future))
         return completed
 
@@ -69,22 +73,32 @@ class AttemptDispatcher:
                 if rec:
                     job_key, mid = rec
                     self._keys.discard(job_key)
-                    self._busy_members.discard(mid)
+                    self._release_member(mid)
+
+    def _release_member(self, member_id: str) -> None:
+        count = int(self._member_active_counts.get(member_id, 0)) - 1
+        if count > 0:
+            self._member_active_counts[member_id] = count
+        else:
+            self._member_active_counts.pop(member_id, None)
 
     def is_member_busy(self, member_id: str) -> bool:
         with self._lock:
-            return str(member_id or "").strip() in self._busy_members
+            return int(self._member_active_counts.get(str(member_id or "").strip(), 0)) > 0
 
-    def busy_member_ids(self) -> set:
-        """Return a snapshot of members currently running a network attempt.
+    def busy_member_ids(self, member_parallel_limit: int = 1) -> set:
+        """Return members that have reached their configured parallel limit.
 
-        The scheduler uses this snapshot before picking a member.  Previously it
-        picked a busy member first and only discovered the conflict in
-        ``submit()``, which made the caller fall through to the synchronous
-        execution path and block the whole queue.
+        Members below the limit remain eligible, which lets separate fresh HTTP
+        sessions use the same logged-in account concurrently.
         """
+        limit = max(1, int(member_parallel_limit or 1))
         with self._lock:
-            return set(self._busy_members)
+            return {
+                member_id
+                for member_id, count in self._member_active_counts.items()
+                if int(count) >= limit
+            }
 
     def is_key_active(self, key: str) -> bool:
         with self._lock:

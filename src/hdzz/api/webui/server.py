@@ -5953,7 +5953,7 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/arsenal":
             doc = read_json_file(self._arsenal_path, {"members": []})
             members = doc.get("members") or []
-            request_cooldown_enabled = _as_bool(doc.get("request_cooldown_enabled"), True)
+            request_cooldown_enabled = False
             out: List[Dict[str, Any]] = []
             for m in members:
                 if not isinstance(m, dict):
