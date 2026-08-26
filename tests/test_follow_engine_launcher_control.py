@@ -38,6 +38,7 @@ class TestFollowEngineLauncherControl(unittest.TestCase):
                 patch.object(launcher, "ensure_dirs", return_value=None), \
                 patch.object(launcher, "_follow_engine_worker_spec", return_value=spec), \
                 patch.object(launcher, "read_follow_engine_pid_info", return_value=None), \
+                patch.object(launcher, "start_snapshot_watch", return_value=2) as start_snapshot, \
                 patch.object(launcher, "build_worker_process_command", return_value=["python3", "follow_engine.py"]), \
                 patch.object(launcher, "is_pid_running", return_value=True), \
                 patch("app.subprocess.Popen", return_value=_FakeProc(43210)):
@@ -47,6 +48,32 @@ class TestFollowEngineLauncherControl(unittest.TestCase):
             self.assertTrue(pid_file.exists())
             payload = pid_file.read_text(encoding="utf-8")
             self.assertIn("43210", payload)
+            start_snapshot.assert_called_once_with()
+
+    def test_start_follow_engine_stops_when_snapshot_worker_cannot_start(self) -> None:
+        with patch.object(launcher, "ensure_dirs", return_value=None), \
+            patch.object(launcher, "apply_playwright_browsers_path"), \
+            patch.object(launcher, "read_follow_engine_pid_info", return_value=None), \
+            patch.object(launcher, "_alive_worker_pids", return_value=[]), \
+            patch.object(launcher, "_alive_follow_engine_pids", return_value=[]), \
+            patch.object(launcher, "_alive_global_worker_pids", return_value=[]), \
+            patch.object(launcher, "start_snapshot_watch", return_value=1), \
+            patch("app.subprocess.Popen") as popen:
+            rc = launcher.start_follow_engine()
+
+        self.assertEqual(rc, 1)
+        popen.assert_not_called()
+
+    def test_snapshot_launcher_rejects_other_runtime(self) -> None:
+        with patch.object(launcher, "ensure_dirs", return_value=None), \
+            patch.object(launcher, "apply_playwright_browsers_path"), \
+            patch.object(launcher, "_alive_snapshot_watch_pids", return_value=[]), \
+            patch.object(launcher, "_alive_global_worker_pids", return_value=[42002]), \
+            patch("app.subprocess.Popen") as popen:
+            rc = launcher.start_snapshot_watch()
+
+        self.assertEqual(rc, 1)
+        popen.assert_not_called()
 
     def test_stop_all_also_stops_follow_engine_pid_from_dedicated_file(self) -> None:
         stopped = []

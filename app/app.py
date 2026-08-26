@@ -36,6 +36,7 @@ CORE_PID_FILE = RUN_DIR / "pids_core.json"
 FOLLOW_ENGINE_PID_FILE = RUN_DIR / "follow_engine.pid.json"
 SNAPSHOT_WATCH_PID_FILE = RUN_DIR / "odds_snapshot_watch.pid.json"
 TELEGRAM_SIGNAL_PID_FILE = RUN_DIR / "telegram_signal.pid.json"
+DEFAULT_SNAPSHOT_MARKET_DEADLINE_MS = "6000"
 
 
 @dataclass
@@ -422,23 +423,7 @@ def workers(host: str, port: int, backend_interval: int, member_interval: int) -
             ],
         )
     )
-    out.append(
-        WorkerSpec(
-            name="odds_snapshot_watch",
-            args=[
-                "-u",
-                "odds_snapshot_watch.py",
-                "--data-dir",
-                "data",
-                "--orders-dir",
-                "orders",
-                "--interval",
-                os.environ.get("ODDS_SNAPSHOT_INTERVAL", "1.0").strip() or "1.0",
-                "--active-seconds",
-                os.environ.get("ODDS_SNAPSHOT_ACTIVE_SECONDS", "120").strip() or "120",
-            ],
-        )
-    )
+    out.append(_snapshot_watch_worker_spec())
     out.append(
         WorkerSpec(
             name="settlement_importer",
@@ -517,6 +502,38 @@ def _follow_engine_worker_spec() -> WorkerSpec:
             str(int(float(follow_timeout))),
             "--interval",
             str(float(follow_interval)),
+        ],
+    )
+
+
+def _snapshot_watch_worker_spec() -> WorkerSpec:
+    """Build the one public-market worker required by the follow engine."""
+    return WorkerSpec(
+        name="odds_snapshot_watch",
+        args=[
+            "-u",
+            "odds_snapshot_watch.py",
+            "--data-dir",
+            "data",
+            "--orders-dir",
+            "orders",
+            "--interval",
+            os.environ.get("ODDS_SNAPSHOT_INTERVAL", "1.0").strip() or "1.0",
+            "--active-seconds",
+            os.environ.get("ODDS_SNAPSHOT_ACTIVE_SECONDS", "120").strip() or "120",
+            "--max-workers",
+            os.environ.get("ODDS_SNAPSHOT_MAX_WORKERS", "4").strip() or "4",
+            "--target-interval-ms",
+            os.environ.get("ODDS_SNAPSHOT_TARGET_INTERVAL_MS", "400").strip() or "400",
+            "--market-deadline-ms",
+            os.environ.get("ODDS_SNAPSHOT_MARKET_DEADLINE_MS", DEFAULT_SNAPSHOT_MARKET_DEADLINE_MS).strip()
+            or DEFAULT_SNAPSHOT_MARKET_DEADLINE_MS,
+            "--public-timeout-s",
+            os.environ.get("ODDS_SNAPSHOT_PUBLIC_TIMEOUT_S", "2").strip() or "2",
+            "--hedge-delay-ms",
+            os.environ.get("ODDS_SNAPSHOT_HEDGE_DELAY_MS", "350").strip() or "350",
+            "--scheduler-tick-ms",
+            os.environ.get("ODDS_SNAPSHOT_SCHEDULER_TICK_MS", "50").strip() or "50",
         ],
     )
 
@@ -602,23 +619,7 @@ def core_workers(backend_interval: int, member_interval: int) -> List[WorkerSpec
             ],
         )
     )
-    out.append(
-        WorkerSpec(
-            name="odds_snapshot_watch",
-            args=[
-                "-u",
-                "odds_snapshot_watch.py",
-                "--data-dir",
-                "data",
-                "--orders-dir",
-                "orders",
-                "--interval",
-                os.environ.get("ODDS_SNAPSHOT_INTERVAL", "1.0").strip() or "1.0",
-                "--active-seconds",
-                os.environ.get("ODDS_SNAPSHOT_ACTIVE_SECONDS", "120").strip() or "120",
-            ],
-        )
-    )
+    out.append(_snapshot_watch_worker_spec())
     out.append(
         WorkerSpec(
             name="settlement_importer",
@@ -1066,6 +1067,89 @@ def _merge_dedicated_worker_pids(pids: List[int]) -> List[int]:
     return merged
 
 
+def start_snapshot_watch() -> int:
+    """Ensure the public盘口 worker exists before the follow engine starts."""
+    ensure_dirs()
+    env = dict(os.environ)
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    apply_playwright_browsers_path(env, ROOT)
+
+    alive = _alive_snapshot_watch_pids()
+    global_alive = [pid for pid in _alive_global_worker_pids("odds_snapshot_watch.py") if pid not in alive]
+    if global_alive:
+        print(
+            f"[{now_iso()}] 检测到其它运行目录已有盘口快照进程（PID={global_alive[0]}），拒绝启动混合运行时",
+            file=sys.stderr,
+        )
+        # Do not let the follow engine attach to another installation's
+        # snapshot stream.  ``2`` is reserved for reusing this runtime's
+        # already-running worker.
+        return 1
+    if alive:
+        write_snapshot_watch_pid_info(
+            {"recovered_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "live": True, "pids": alive[:1]}
+        )
+        return 2
+
+    worker = _snapshot_watch_worker_spec()
+    cmd = build_worker_process_command(worker)
+    out_path = LOG_DIR / f"{worker.name}.out.log"
+    err_path = LOG_DIR / f"{worker.name}.err.log"
+    print(f"[{now_iso()}] Start(snapshot): {worker.name} {' '.join(cmd)}")
+    print(f"  logs: {out_path} | {err_path}")
+    out_f = open(out_path, "ab")
+    err_f = open(err_path, "ab")
+    kwargs: Dict[str, Any] = {
+        "cwd": str(ROOT),
+        "stdout": out_f,
+        "stderr": err_f,
+        "env": env,
+        "creationflags": 0,
+    }
+    if os.name == "nt":
+        try:
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    else:
+        kwargs["start_new_session"] = True
+    process = subprocess.Popen(cmd, **kwargs)
+    write_snapshot_watch_pid_info(
+        {"started_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "live": True, "pids": [process.pid]}
+    )
+
+    deadline = time.time() + 1.0
+    while time.time() < deadline:
+        if not is_pid_running(int(process.pid)):
+            break
+        time.sleep(0.1)
+    if is_pid_running(int(process.pid)):
+        return 0
+
+    # A concurrent launcher may have won the single-instance lock. Reuse it
+    # instead of reporting a false failure.
+    recovered = _alive_snapshot_watch_pids()
+    if recovered:
+        write_snapshot_watch_pid_info(
+            {"recovered_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "live": True, "pids": recovered[:1]}
+        )
+        return 2
+    write_snapshot_watch_pid_info(
+        {
+            "failed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "live": True,
+            "pids": [],
+            "last_exit_code": process.poll(),
+        }
+    )
+    print(
+        f"odds_snapshot_watch exited during startup (pid={process.pid}, code={process.poll()})",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def start_follow_engine() -> int:
     ensure_dirs()
     env = dict(os.environ)
@@ -1084,6 +1168,14 @@ def start_follow_engine() -> int:
     if alive:
         print(f"[{now_iso()}] 检测到跟单引擎已在运行（{len(alive)}个），请先执行：python app.py stop-follow-engine 或 python app.py restart-follow-engine")
         return 2
+
+    # Snapshot Direct cannot progress without the public盘口 worker. Starting
+    # only follow_engine used to leave every order waiting on SNAPSHOT_MISSING
+    # until its 160-second market window expired.
+    snapshot_rc = start_snapshot_watch()
+    if snapshot_rc not in (0, 2):
+        print(f"[{now_iso()}] 盘口快照进程启动失败，拒绝启动跟单引擎", file=sys.stderr)
+        return 1
     if existing:
         try:
             write_follow_engine_pid_info({"stale_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "live": True, "pids": []})
