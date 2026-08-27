@@ -35,6 +35,7 @@ from member_arsenal_watch import (
 from hdzz.common.http import HardTimeout, hard_timeout as _hard_timeout
 from hdzz.common.http import requests_timeout as _requests_timeout
 from hdzz.common.parse import parse_cookie_header, parse_xml_flat, parse_xml_kv
+from hdzz.common.route_traffic_gate import configure_route_traffic_gate
 from hdzz.core.order_display import parse_bet_display
 from .models import BetParams, RetryJob
 from .snapshot_direct import (
@@ -7353,6 +7354,7 @@ def main() -> int:
     orders_dir = Path(args.orders_dir)
     data_dir = Path(args.data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
+    configure_route_traffic_gate(data_dir)
 
     state_path = data_dir / "follow_state.json"
     results_path = data_dir / "follow_results.jsonl"
@@ -7378,6 +7380,10 @@ def main() -> int:
                 jobs.pop(key, None)
 
     print(f"[{now_iso()}] follow_engine 启动 orders_dir={orders_dir} data_dir={data_dir}", flush=True)
+    print(
+        f"[{now_iso()}] 线路闸门已启用 read并发=2 context并发=2 FT_bet最小间隔=500ms 502退避=1000ms",
+        flush=True,
+    )
     print(
         f"[{now_iso()}] follow_state 加载完成 offsets={len(offsets)} done={len(done)} pending={len(pending_orders)} jobs={len(jobs)}",
         flush=True,

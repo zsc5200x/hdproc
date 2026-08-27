@@ -1678,31 +1678,25 @@ def member_ping_system_time(
     成功：返回 XML <systemtime>...
     """
     base_url = str(base_url or "").rstrip("/")
-    url = f"{base_url}/transform.php?ver={ver}"
     form = {"ver": ver, "p": "get_systemTime", "uid": uid, "langx": "zh-cn"}
-    body = urlencode(form).encode("utf-8")
-    headers = {
-        "accept": "*/*",
-        "accept-language": "zh-CN,zh;q=0.9",
-        "cache-control": "no-cache",
-        "pragma": "no-cache",
-        "origin": base_url,
-        "referer": base_url + "/",
-        "content-type": "application/x-www-form-urlencoded",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-    }
-    if cookie:
-        headers["cookie"] = cookie
-
+    sess = None
     try:
-        sess = requests.Session()
-        sess.trust_env = False
-        proxies = {"http": proxy, "https": proxy} if proxy else {}
-        r = sess.post(url, data=form, headers=headers, timeout=timeout_s, proxies=proxies, verify=False)
-        r.raise_for_status()
-        text = r.text or ""
+        sess = _make_member_session(base_url=base_url, proxy=proxy, cookie=cookie)
+        text = _member_post_session(
+            session=sess,
+            base_url=base_url,
+            ver=ver,
+            form=form,
+            timeout_s=timeout_s,
+        )
     except Exception as e:
         return {"ok": False, "error": f"request_failed: {e}"}
+    finally:
+        if sess is not None:
+            try:
+                sess.close()
+            except Exception:
+                pass
 
     text_strip = (text or "").strip()
     if not text_strip:
@@ -7690,6 +7684,9 @@ def main() -> int:
         raise SystemExit(f"WebUI 目录不存在: {webui_dir}")
 
     data_dir.mkdir(parents=True, exist_ok=True)
+    from hdzz.common.route_traffic_gate import configure_route_traffic_gate
+
+    configure_route_traffic_gate(data_dir)
     ensure_json_file(data_dir / "arsenal.json", {"members": []})
     ensure_json_file(data_dir / "mappings.json", {})
     ensure_json_file(

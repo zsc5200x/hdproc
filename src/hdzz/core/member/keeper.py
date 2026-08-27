@@ -44,6 +44,7 @@ from hdzz.core.member.session_state import (
     cookie_names as session_cookie_names,
     session_fingerprint as member_session_fingerprint,
 )
+from hdzz.common.route_traffic_gate import configure_route_traffic_gate, route_traffic_gate
 
 try:
     import urllib3  # type: ignore
@@ -898,10 +899,29 @@ def member_ping_system_time(
         # 禁用系统/环境代理，避免误走 127.0.0.1
         sess.trust_env = False
         proxies = {"http": proxy, "https": proxy} if proxy else {}
+        traffic_permit = route_traffic_gate().acquire(
+            base_url=base_url,
+            request_type=form.get("p"),
+            proxy=proxy,
+            timeout_s=timeout_s,
+        )
+        gate_finished = False
         r = sess.post(url, data=form, headers=headers, timeout=timeout_s, proxies=proxies, verify=False)
+        body_text = str(r.text or "")
+        traffic_permit.finish(
+            http_status=getattr(r, "status_code", None),
+            response_body_length=len(body_text.encode("utf-8")),
+            response_body_sha256=hashlib.sha256(body_text.encode("utf-8", "ignore")).hexdigest(),
+        )
+        gate_finished = True
         r.raise_for_status()
-        text = r.text or ""
+        text = body_text
     except Exception as e:
+        try:
+            if not gate_finished:
+                traffic_permit.finish()
+        except Exception:
+            pass
         return {"ok": False, "error": f"request_failed: {e}"}
 
     text_strip = (text or "").strip()
@@ -959,12 +979,31 @@ def member_ping_member_data(
         try:
             sess = requests.Session()
             sess.trust_env = False
+            traffic_permit = route_traffic_gate().acquire(
+                base_url=base_url,
+                request_type=form.get("p"),
+                proxy=proxy,
+                timeout_s=timeout_s,
+            )
+            gate_finished = False
             r = sess.post(url, data=form, headers=headers, timeout=timeout_s, proxies=proxies, verify=False)
+            body_text = str(r.text or "")
+            traffic_permit.finish(
+                http_status=getattr(r, "status_code", None),
+                response_body_length=len(body_text.encode("utf-8")),
+                response_body_sha256=hashlib.sha256(body_text.encode("utf-8", "ignore")).hexdigest(),
+            )
+            gate_finished = True
             r.raise_for_status()
-            text = r.text or ""
+            text = body_text
             last_exc = None
             break
         except Exception as e:
+            try:
+                if not gate_finished:
+                    traffic_permit.finish()
+            except Exception:
+                pass
             last_exc = e
             if i == 0 and _is_transient_request_failure(str(e)):
                 try:
@@ -3053,6 +3092,7 @@ def main() -> int:
 
     data_dir = Path(args.data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
+    configure_route_traffic_gate(data_dir)
     lock_path = data_dir / "member_arsenal_watch.lock"
     if not acquire_single_instance_lock(lock_path):
         print(f"[{now_iso()}] member_arsenal_watch 已在运行，退出 lock={lock_path}", flush=True)

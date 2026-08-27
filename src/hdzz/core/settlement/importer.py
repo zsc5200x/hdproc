@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import requests
 
 from hdzz.common.http_telemetry import telemetry_manager
+from hdzz.common.route_traffic_gate import configure_route_traffic_gate, route_traffic_gate
 
 
 def now_ts() -> int:
@@ -374,17 +375,37 @@ def member_get_today_wagers(
         telemetry_manager().record_session_created(sess, component="settlement")
     except Exception:
         pass
+    traffic_permit = route_traffic_gate().acquire(
+        base_url=base,
+        request_type=form.get("p"),
+        proxy=proxy,
+        timeout_s=timeout_s,
+    )
     telemetry_handle = telemetry_manager().record_request_start(
         session=sess,
         url=url,
         form=form,
         component="settlement",
-        meta={"member_hash": _sha256_text(uid)},
+        meta={
+            "member_hash": _sha256_text(uid),
+            "route_gate_kind": traffic_permit.kind,
+            "route_gate_wait_ms": round(traffic_permit.waited_ms, 3),
+        },
     )
+    gate_finished = False
     try:
         r = sess.post(url, data=form, headers=headers, timeout=timeout_s, proxies=proxies, verify=False)
+        body = str(r.text or "")
+        traffic_permit.finish(
+            http_status=getattr(r, "status_code", None),
+            response_body_length=len(body.encode("utf-8")),
+            response_body_sha256=_sha256_text(body),
+        )
+        gate_finished = True
         telemetry_handle.finish(response=r)
     except BaseException as exc:
+        if not gate_finished:
+            traffic_permit.finish()
         telemetry_handle.finish(exception=exc)
         raise
     r.raise_for_status()
@@ -430,17 +451,37 @@ def member_post_xml_api(
         telemetry_manager().record_session_created(sess, component="settlement")
     except Exception:
         pass
+    traffic_permit = route_traffic_gate().acquire(
+        base_url=base,
+        request_type=form.get("p"),
+        proxy=proxy,
+        timeout_s=timeout_s,
+    )
     telemetry_handle = telemetry_manager().record_request_start(
         session=sess,
         url=url,
         form=form,
         component="settlement",
-        meta={"member_hash": _sha256_text(cookie)},
+        meta={
+            "member_hash": _sha256_text(cookie),
+            "route_gate_kind": traffic_permit.kind,
+            "route_gate_wait_ms": round(traffic_permit.waited_ms, 3),
+        },
     )
+    gate_finished = False
     try:
         r = sess.post(url, data=form, headers=headers, timeout=timeout_s, proxies=proxies, verify=False)
+        body = str(r.text or "")
+        traffic_permit.finish(
+            http_status=getattr(r, "status_code", None),
+            response_body_length=len(body.encode("utf-8")),
+            response_body_sha256=_sha256_text(body),
+        )
+        gate_finished = True
         telemetry_handle.finish(response=r)
     except BaseException as exc:
+        if not gate_finished:
+            traffic_permit.finish()
         telemetry_handle.finish(exception=exc)
         raise
     r.raise_for_status()
@@ -781,6 +822,7 @@ def main() -> int:
     args = ap.parse_args()
 
     data_dir = Path(str(args.data_dir or "data")).resolve()
+    configure_route_traffic_gate(data_dir)
     if str(args.from_xml or "").strip():
         out = import_from_xml_file(xml_path=Path(str(args.from_xml)).resolve(), data_dir=data_dir)
         print(f"[settlement] wrote fixture: {out.as_posix()}", flush=True)

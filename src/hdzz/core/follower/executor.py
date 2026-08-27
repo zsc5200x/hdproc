@@ -11,6 +11,7 @@ import requests
 from hdzz.common.http import hard_timeout, requests_timeout
 from hdzz.common.parse import parse_cookie_header
 from hdzz.common.http_telemetry import telemetry_manager
+from hdzz.common.route_traffic_gate import route_traffic_gate
 
 
 _SENSITIVE_HEADER_NAMES = {
@@ -155,10 +156,28 @@ def member_post_session(
     last_exc: Optional[Exception] = None
     for attempt in range(1, 4):
         telemetry_handle = None
+        traffic_permit = route_traffic_gate().acquire(
+            base_url=base,
+            request_type=form.get("p"),
+            session=session,
+            timeout_s=timeout_s,
+        )
+        gate_finished = False
         try:
             if response_meta is not None:
                 response_meta.clear()
                 response_meta["attempt"] = attempt
+                response_meta["route_gate_kind"] = traffic_permit.kind
+                response_meta["route_gate_wait_ms"] = round(traffic_permit.waited_ms, 3)
+            telemetry_meta = dict(getattr(session, "_hdzz_telemetry_meta", {}) or {})
+            telemetry_meta.update(
+                {
+                    "route_gate_kind": traffic_permit.kind,
+                    "route_gate_wait_ms": round(traffic_permit.waited_ms, 3),
+                }
+            )
+            if response_meta is not None:
+                telemetry_meta.update(response_meta)
             with hard_timeout(hard_s):
                 extra_headers = {"Connection": "close"} if attempt >= 2 else None
                 if response_meta is not None and str(form.get("p") or "") == "FT_bet":
@@ -168,7 +187,7 @@ def member_post_session(
                     url=url,
                     form=form,
                     component=str(getattr(session, "_hdzz_telemetry_component", "follower") or "follower"),
-                    meta=(getattr(session, "_hdzz_telemetry_meta", {}) if response_meta is None else response_meta),
+                    meta=telemetry_meta,
                 )
                 r = session.post(
                     url,
@@ -177,11 +196,17 @@ def member_post_session(
                     verify=False,
                     headers=extra_headers,
                 )
+            body = str(r.text or "")
+            headers = getattr(r, "headers", {}) or {}
+            traffic_permit.finish(
+                http_status=getattr(r, "status_code", None),
+                response_body_length=len(body.encode("utf-8")),
+                response_body_sha256=_sha256_text(body),
+            )
+            gate_finished = True
             if telemetry_handle is not None:
                 telemetry_handle.finish(response=r, response_meta=response_meta)
             if response_meta is not None:
-                body = str(r.text or "")
-                headers = getattr(r, "headers", {}) or {}
                 response_meta["http_status"] = int(r.status_code)
                 response_meta["response_content_type"] = str(headers.get("Content-Type") or "")
                 response_meta["response_server"] = str(headers.get("Server") or "")
@@ -219,6 +244,8 @@ def member_post_session(
                     continue
             return text
         except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+            if not gate_finished:
+                traffic_permit.finish()
             if telemetry_handle is not None:
                 telemetry_handle.finish(exception=e, response_meta=response_meta)
             last_exc = e
@@ -243,6 +270,8 @@ def member_post_session(
                 pass
             continue
         except BaseException as e:
+            if not gate_finished:
+                traffic_permit.finish()
             if telemetry_handle is not None:
                 telemetry_handle.finish(exception=e, response_meta=response_meta)
             raise
@@ -271,13 +300,33 @@ def member_post_session_once(
     url = f"{base}/transform.php?ver={ver}"
     hard_s = max(2, int(timeout_s or 0) + 2)
     telemetry_handle = None
+    traffic_permit = route_traffic_gate().acquire(
+        base_url=base,
+        request_type=form.get("p"),
+        session=session,
+        timeout_s=timeout_s,
+    )
+    gate_finished = False
+    if response_meta is not None:
+        response_meta.clear()
+        response_meta["route_gate_kind"] = traffic_permit.kind
+        response_meta["route_gate_wait_ms"] = round(traffic_permit.waited_ms, 3)
     try:
+        telemetry_meta = dict(getattr(session, "_hdzz_telemetry_meta", {}) or {})
+        telemetry_meta.update(
+            {
+                "route_gate_kind": traffic_permit.kind,
+                "route_gate_wait_ms": round(traffic_permit.waited_ms, 3),
+            }
+        )
+        if response_meta is not None:
+            telemetry_meta.update(response_meta)
         telemetry_handle = telemetry_manager().record_request_start(
             session=session,
             url=url,
             form=form,
             component=str(getattr(session, "_hdzz_telemetry_component", "follower") or "follower"),
-            meta=(getattr(session, "_hdzz_telemetry_meta", {}) if response_meta is None else response_meta),
+            meta=telemetry_meta,
         )
         with hard_timeout(hard_s):
             response = session.post(
@@ -286,11 +335,19 @@ def member_post_session_once(
                 timeout=requests_timeout(timeout_s),
                 verify=False,
             )
+        body = str(response.text or "")
+        headers = getattr(response, "headers", {}) or {}
+        traffic_permit.finish(
+            http_status=getattr(response, "status_code", None),
+            response_body_length=len(body.encode("utf-8")),
+            response_body_sha256=_sha256_text(body),
+        )
+        gate_finished = True
         telemetry_handle.finish(response=response, response_meta=response_meta)
         if response_meta is not None:
-            body = str(response.text or "")
-            headers = getattr(response, "headers", {}) or {}
             response_meta.clear()
+            response_meta["route_gate_kind"] = traffic_permit.kind
+            response_meta["route_gate_wait_ms"] = round(traffic_permit.waited_ms, 3)
             response_meta["http_status"] = int(response.status_code)
             response_meta["response_content_type"] = str(headers.get("Content-Type") or "")
             response_meta["response_server"] = str(headers.get("Server") or "")
@@ -304,6 +361,8 @@ def member_post_session_once(
         response.raise_for_status()
         return str(response.text or "")
     except BaseException as exc:
+        if not gate_finished:
+            traffic_permit.finish()
         try:
             telemetry_handle.finish(exception=exc, response_meta=response_meta)
         except Exception:
