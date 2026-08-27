@@ -40,13 +40,30 @@ ORDER_CARD_SIGNAL = """🤣新注单提醒 🤣
 
 💰 原注金额：20000
 💲 跟单金额：5601
-🐦‍⬛跟单成功：处理中
+🐦‍⬛跟单成功：5601 🤣
 
 来源后台：uq20mvvl4t
 🧠单号：25172905787
 🗓时间：08-26-2026 21:51:11"""
 
-COMPLETED_ORDER_CARD_SIGNAL = ORDER_CARD_SIGNAL.replace("跟单成功：处理中", "跟单成功：5601")
+
+EARLY_ORDER_CARD_SIGNAL = """🤣新注单提醒 🤣
+🇪🇸🇪🇸🇪🇸🏴󠁧󠁢󠁥󠁮󠁧󠁿🏴󠁧󠁢󠁥󠁮󠁧󠁿🏴󠁧󠁢󠁥󠁮󠁧󠁿🏴󠁧󠁢󠁥󠁮󠁧󠁿🇩🇪🇫🇷🇩🇪
+🤣西班牙甲组联赛
+🤣巴塞罗那 v 毕尔巴鄂竞技
+
+📍 状态：早盘
+玩法：让球
+时段：全场
+选择：毕尔巴鄂竞技 +1.5 / 2 @-0.91
+
+💰 原注金额：100
+💲 跟单金额：100
+🐦‍⬛跟单成功：100 🤣
+
+来源后台：claude66
+🧠单号：25173544649
+🗓时间：08-27-2026 01:22:18"""
 
 
 class TelegramSignalParserTest(unittest.TestCase):
@@ -113,17 +130,40 @@ class TelegramSignalParserTest(unittest.TestCase):
         self.assertEqual(signal["score_home"], 1)
         self.assertEqual(signal["score_away"], 0)
         self.assertEqual(signal["mode"], "live")
+        self.assertEqual(signal["bet_type"], "(滚球) 大 / 小")
         self.assertEqual(signal["market"], "total_under")
         self.assertEqual(signal["selection"], "小")
         self.assertEqual(signal["line_text"], "2")
         self.assertEqual(signal["odds"], "0.98")
         self.assertEqual(signal["amount"], 20000.0)
 
-    def test_rejects_completed_result_card_to_prevent_self_loop(self) -> None:
-        from hdzz.core.telegram_signal.parser import SignalParseError, parse_telegram_bet_signal
+    def test_native_order_card_keeps_separate_half_time_period(self) -> None:
+        from hdzz.core.telegram_signal.parser import parse_telegram_bet_signal
 
-        with self.assertRaisesRegex(SignalParseError, "completed_result"):
-            parse_telegram_bet_signal(COMPLETED_ORDER_CARD_SIGNAL)
+        text = ORDER_CARD_SIGNAL.replace("时段：全场", "时段：上半场")
+        signal = parse_telegram_bet_signal(text)
+
+        self.assertEqual(signal["period"], "上半场")
+        self.assertEqual(signal["bet_type"], "(滚球) 大 / 小 - 上半场")
+
+    def test_parses_early_order_card_without_score_and_with_negative_odds(self) -> None:
+        from hdzz.core.telegram_signal.parser import parse_telegram_bet_signal
+
+        signal = parse_telegram_bet_signal(EARLY_ORDER_CARD_SIGNAL)
+
+        self.assertEqual(signal["order_id"], "25173544649")
+        self.assertEqual(signal["league"], "西班牙甲组联赛")
+        self.assertEqual(signal["home"], "巴塞罗那")
+        self.assertEqual(signal["away"], "毕尔巴鄂竞技")
+        self.assertEqual(signal["score_home"], 0)
+        self.assertEqual(signal["score_away"], 0)
+        self.assertEqual(signal["mode"], "early")
+        self.assertEqual(signal["market"], "handicap")
+        self.assertEqual(signal["selection"], "毕尔巴鄂竞技")
+        self.assertEqual(signal["line_text"], "+1.5 / 2")
+        self.assertAlmostEqual(signal["line_value"], 1.75)
+        self.assertEqual(signal["odds"], "-0.91")
+        self.assertEqual(signal["amount"], 100.0)
 
     def test_rejects_unrelated_group_message(self) -> None:
         from hdzz.core.telegram_signal.parser import SignalParseError, parse_telegram_bet_signal

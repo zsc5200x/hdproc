@@ -1,7 +1,7 @@
 /* ─────────────────────────────────────────────────────────────────────────
    策略队列 · 现代化视觉层 (2026-08)
-   纯表现层覆盖：仅调整配色、质感、字级与圆角，不改变任何布局结构、
-   DOM、数据渲染与交互逻辑。加载顺序最后，优先级高于 redesign-queue.css。
+   集中承载最终的配色、排版与响应式覆盖，不改变数据渲染与交互逻辑。
+   加载顺序最后，优先级高于 redesign-queue.css。
    ───────────────────────────────────────────────────────────────────────── */
 
 :root {
@@ -81,46 +81,250 @@ body.queuePage {
 .panelHeading > span { color: var(--ec-faint); font-size: 10px; }
 
 /* ── 左栏 · 实时性能看板 ──────────────────────────────────────────────── */
-.memberKpiGrid > div,
-.taskKpiGrid > div,
-.performanceMetrics > div,
-.statsOverview > div {
+.performanceColumn {
+  grid-template-rows: minmax(0, 1.55fr) minmax(0, 1fr);
+}
+.performancePanel {
+  padding: 13px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.performanceHeading {
+  min-height: 34px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--ec-border-soft);
+}
+.performanceHeading h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  letter-spacing: 0;
+}
+.performanceHeading h2 > i {
+  color: var(--ec-cyan);
+  font-size: 13px;
+}
+.performanceClock {
+  min-height: 24px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   border: 1px solid var(--ec-border-soft);
-  border-radius: var(--mq-radius-sm);
-  background: var(--mq-tile);
-  transition: border-color .18s ease, background-color .18s ease;
+  border-radius: 6px;
+  color: var(--ec-muted);
+  background: rgba(148, 163, 184, .04);
 }
-.memberKpiGrid > div:hover,
-.taskKpiGrid > div:hover { border-color: rgba(56, 189, 248, .28); }
+.performanceClock i { color: var(--ec-blue); font-size: 9px; }
+.performanceClock b { color: var(--ec-muted); font: 500 10px var(--ec-mono); }
 
-.memberKpiGrid span, .taskKpiGrid span { color: var(--ec-muted); font-size: 9.5px; }
-.memberKpiGrid strong {
-  font: 600 19px/1.1 var(--ec-mono);
-  letter-spacing: -.01em;
+.performancePanel .memberKpiGrid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--ec-border-soft);
+  border-radius: 7px;
+  background: rgba(148, 163, 184, .035);
 }
-.taskKpiGrid strong { font: 600 14px/1.15 var(--ec-mono); }
-.memberKpiGrid > div:first-child strong { color: var(--ec-cyan); }
-.memberKpiGrid > div:nth-child(2) strong { color: var(--ec-green); }
-.memberKpiGrid > div:nth-child(3) strong { color: var(--ec-blue); }
-.memberKpiGrid > div:nth-child(4) strong { color: var(--ec-red); }
-.taskKpiGrid > div:last-child strong { color: var(--ec-green); }
-
-.metricSectionTitle { color: var(--ec-faint); font-size: 10px; letter-spacing: .04em; }
-.metricSectionTitle i { background: var(--ec-border-soft); }
-.performanceMetrics span { color: var(--ec-muted); font-size: 9.5px; }
-.performanceMetrics strong { font: 600 11px var(--ec-mono); color: var(--ec-text); }
-
-.healthStrip {
-  margin-top: 9px;
-  padding: 7px 10px;
-  border: 1px solid rgba(52, 211, 153, .18);
-  border-radius: 999px;
-  background: rgba(52, 211, 153, .06);
+.performancePanel .memberKpiGrid > div {
+  min-width: 0;
+  min-height: 53px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
-.healthStrip strong { color: var(--ec-green); font: 600 10px var(--ec-mono); }
-.healthStrip small { color: var(--ec-muted); font-size: 9px; }
-.healthDot { box-shadow: 0 0 10px rgba(52, 211, 153, .7); }
-.healthStrip > .mono { color: var(--ec-faint); font-size: 9px; }
+.performancePanel .memberKpiGrid > div:nth-child(odd) { border-right: 1px solid var(--ec-border-soft); }
+.performancePanel .memberKpiGrid > div:nth-child(-n + 2) { border-bottom: 1px solid var(--ec-border-soft); }
+.performancePanel .memberKpiGrid span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ec-muted);
+  font-size: 10.5px;
+  line-height: 1.25;
+}
+.performancePanel .memberKpiGrid span i { width: 12px; text-align: center; font-size: 9px; }
+.performancePanel .memberKpiGrid strong {
+  display: block;
+  margin-top: 5px;
+  font: 650 21px/1 var(--ec-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.memberKpi.online span i, .memberKpi.online strong { color: var(--ec-cyan); }
+.memberKpi.idle span i, .memberKpi.idle strong { color: var(--ec-green); }
+.memberKpi.running span i, .memberKpi.running strong { color: var(--ec-blue); }
+.memberKpi.offline span i, .memberKpi.offline strong { color: var(--ec-red); }
+
+.performancePanel .taskKpiGrid {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--ec-border-soft);
+  border-radius: 7px;
+  background: rgba(148, 163, 184, .035);
+}
+.performancePanel .taskKpiGrid > div {
+  min-width: 0;
+  min-height: 50px;
+  padding: 8px 9px;
+  border: 0;
+  border-right: 1px solid var(--ec-border-soft);
+  border-radius: 0;
+  background: transparent;
+}
+.performancePanel .taskKpiGrid > div:last-child { border-right: 0; }
+.performancePanel .taskKpiGrid span {
+  color: var(--ec-muted);
+  font-size: 10px;
+  line-height: 1.25;
+}
+.performancePanel .taskKpiGrid strong {
+  display: block;
+  margin-top: 5px;
+  font: 650 16px/1 var(--ec-mono);
+  font-variant-numeric: tabular-nums;
+}
+.taskKpi.waiting strong { color: var(--ec-orange); }
+.taskKpi.running strong { color: var(--ec-cyan); }
+.taskKpi.success strong { color: var(--ec-green); }
+
+.performanceBlock { margin-top: 12px; }
+.metricSectionTitle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.metricSectionTitle h3 {
+  margin: 0;
+  color: var(--ec-text);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+.metricSectionTitle i { height: 1px; flex: 1 1 auto; background: var(--ec-border-soft); }
+.performancePanel .performanceMetrics {
+  margin-top: 7px;
+  padding: 8px 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  border-block: 1px solid var(--ec-border-soft);
+  background: rgba(3, 7, 18, .2);
+}
+.performancePanel .performanceMetrics > div {
+  min-width: 0;
+  min-height: 43px;
+  padding: 2px 9px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  border: 0;
+  border-right: 1px solid var(--ec-border-soft);
+  border-radius: 0;
+  background: transparent;
+}
+.performancePanel .performanceMetrics > div:last-child { border-right: 0; }
+.performancePanel .performanceMetrics span {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--ec-muted);
+  font-size: 10px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.performancePanel .performanceMetrics strong {
+  margin-top: 6px;
+  color: var(--ec-text);
+  font: 650 14px/1 var(--ec-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.performancePanel .performanceMetrics > div:first-child strong { color: #7dd3fc; }
+.performancePanel .performanceMetrics > div:nth-child(2) strong { color: #a5b4fc; }
+.performancePanel .performanceMetrics > div:last-child strong { color: #d8b4fe; }
+
+.currentParamsBlock {
+  margin-top: 12px;
+  padding-top: 0;
+  border-top: 0;
+}
+.currentParamsHeading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.currentParamsHeading h3 {
+  margin: 0;
+  color: var(--ec-text);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+.currentParamsHeading i {
+  height: 1px;
+  flex: 1 1 auto;
+  background: var(--ec-border-soft);
+}
+.currentParamsHeading small {
+  color: var(--ec-faint);
+  font: 500 9px var(--ec-mono);
+}
+.currentParamsGrid {
+  margin: 7px 0 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 12px;
+}
+.currentParamsGrid > div {
+  min-width: 0;
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  border-bottom: 1px solid rgba(148, 163, 184, .08);
+}
+.currentParamsGrid > .currentParamsWide {
+  grid-column: 1 / -1;
+}
+.currentParamsGrid dt,
+.currentParamsGrid dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.currentParamsGrid dt {
+  color: var(--ec-muted);
+  font-size: 10px;
+}
+.currentParamsGrid dd {
+  color: var(--ec-text);
+  font: 650 10.5px var(--ec-mono);
+  text-align: right;
+}
+.currentParamsGrid dd[data-tone="active"] { color: var(--ec-green); }
+.currentParamsGrid dd[data-tone="unlimited"] { color: var(--ec-blue); }
+.currentParamsGrid dd[data-tone="mode"] { color: #c4b5fd; }
+.currentParamsGrid dd[data-tone="off"] { color: var(--ec-muted); }
+
+@media (max-width: 1180px) {
+  .performancePanel { padding: 11px; }
+  .performancePanel .memberKpiGrid > div { min-height: 50px; padding-inline: 8px; }
+  .performancePanel .memberKpiGrid span { font-size: 10px; }
+  .performancePanel .performanceMetrics > div { padding-inline: 7px; }
+  .currentParamsGrid { column-gap: 9px; }
+}
 
 /* ── 左栏 · 会员执行池 ────────────────────────────────────────────────── */
 .memberExecutionPanel .memberPoolLegend { border-bottom-color: var(--ec-border-soft); font-size: 9.5px; color: var(--ec-muted); }
@@ -166,6 +370,73 @@ body.queuePage {
 }
 .memberStats span { color: var(--ec-faint); font-size: 8px; }
 .memberStats strong { color: var(--ec-text); font: 600 9.5px var(--ec-mono); }
+
+/* 会员执行池位于窄侧栏中，卡片必须由内容撑开，避免指标行溢出到下一张卡片。 */
+.memberExecutionPanel .memberPool {
+  grid-auto-rows: max-content;
+  padding-bottom: 8px;
+  scroll-padding-block: 6px;
+}
+.memberExecutionPanel .memberCard {
+  align-self: start;
+  width: 100%;
+  min-height: 136px;
+  height: max-content;
+  padding: 10px;
+}
+.memberExecutionPanel .memberHead {
+  min-height: 30px;
+  gap: 8px;
+}
+.memberExecutionPanel .memberIdentity {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.memberExecutionPanel .memberIdentity > div {
+  min-width: 0;
+}
+.memberExecutionPanel .memberIdentity strong {
+  max-width: none;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.memberExecutionPanel .memberIdentity small {
+  margin-top: 2px;
+  font-size: 9px;
+  line-height: 1.35;
+}
+.memberExecutionPanel .memberState {
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 3px 7px;
+  font-size: 9px;
+  line-height: 1;
+}
+.memberExecutionPanel .memberStats {
+  margin-top: 8px;
+  gap: 6px;
+}
+.memberExecutionPanel .memberStats div,
+.memberExecutionPanel .memberStats div:first-child {
+  min-height: 39px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.memberExecutionPanel .memberStats span {
+  color: var(--ec-muted);
+  font-size: 9px;
+  line-height: 1.3;
+}
+.memberExecutionPanel .memberStats strong {
+  margin-top: 2px;
+  overflow: visible;
+  color: var(--ec-text);
+  font: 600 11px/1.3 var(--ec-mono);
+  font-variant-numeric: tabular-nums;
+  text-overflow: clip;
+}
 
 /* ── 任务筛选页签 · 现代分段控件 ──────────────────────────────────────── */
 .taskTabs {
@@ -231,9 +502,24 @@ body.queuePage {
 .orderCardTop { border-bottom-color: var(--ec-border-soft); padding-block: 7px; }
 .orderCardTitle span { color: var(--ec-muted); font-size: 10px; }
 .orderCardTitle strong { color: #7dd3fc; font: 700 13px var(--ec-mono); letter-spacing: .01em; }
-.orderCardTitle i { background: var(--ec-border); }
+.orderCardTitle > .orderTitleDivider { background: var(--ec-border); }
 .orderCardTime { color: var(--ec-faint); font: 500 9px var(--ec-mono); }
-.orderCardTime i { color: var(--ec-blue); }
+.orderLeague {
+  color: var(--ec-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.orderCardTime i {
+  width: 1em;
+  height: 1em;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 1em;
+  color: var(--ec-blue);
+  line-height: 1;
+  background: transparent;
+}
 
 /* 状态徽标：柔和底色的胶囊 */
 .orderSummaryCard .orderStatusBadge {

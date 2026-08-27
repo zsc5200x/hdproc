@@ -1,5 +1,6 @@
-const state = { status: null, chats: [], events: [], dryRun: true };
+const state = { status: null, chats: [], chatsLoaded: false, events: [], dryRun: true, modeDirty: false };
 const $ = (id) => document.getElementById(id);
+const LOG_REFRESH_INTERVAL_MS = 1000;
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
@@ -15,6 +16,43 @@ const messages = {
   telegram_session_expired: "Telegram 登录已过期，请重新验证",
   invalid_phone: "手机号格式不正确，请包含国家区号",
   invalid_login_code: "验证码格式不正确",
+};
+const eventStatusLabels = {
+  injected: "已进入跟单",
+  dry_run: "干跑匹配成功",
+  duplicate_order: "重复订单",
+  duplicate_message: "重复消息",
+  rejected_parse: "无法解析",
+  rejected_match: "比赛未匹配",
+  worker_error: "监听异常",
+  ignored_disabled: "监听已关闭",
+  ignored_source: "非监听来源",
+  matched: "匹配成功",
+  accepted: "已接收",
+  rejected: "已拒绝",
+  error: "处理异常",
+};
+const eventReasonLabels = {
+  unsupported_signal: "非注单消息或格式不支持",
+  invalid_line: "盘口格式不正确",
+  missing_match: "缺少比赛信息",
+  missing_bet_line: "缺少盘口信息",
+  unsupported_market: "暂不支持该玩法",
+  missing_order_id: "缺少有效订单号",
+  missing_time: "缺少有效订单时间",
+  missing_league: "缺少联赛信息",
+  missing_bet_type: "缺少玩法信息",
+  missing_content: "缺少注单内容",
+  missing_amount: "缺少有效金额",
+  ambiguous_number_match: "比赛编号匹配到多场",
+  number_pair_not_found: "未找到对应比赛编号",
+  ambiguous_name_match: "球队名称匹配到多场",
+  name_match_not_found: "未找到对应比赛",
+  missing_gid: "比赛缺少 GID",
+  telegram_protocol_sync_error: "Telegram 同步异常，监听器已自动重连",
+  telegram_login_required: "Telegram 尚未登录",
+  telegram_session_expired: "Telegram 登录已过期",
+  source_chats_missing: "尚未选择监听来源",
 };
 const explain = (error) => messages[String(error?.message || error)] || String(error?.message || error || "操作失败");
 
@@ -39,8 +77,9 @@ function setHint(id, text, tone = "") {
   node.className = `hint ${tone}`.trim();
 }
 
-function updateMode(dryRun) {
+function updateMode(dryRun, { markDirty = false } = {}) {
   state.dryRun = !!dryRun;
+  if (markDirty) state.modeDirty = true;
   $("dryRunMode").setAttribute("aria-pressed", String(state.dryRun));
   $("automaticMode").setAttribute("aria-pressed", String(!state.dryRun));
   setHint("actionHint", state.dryRun ? "当前为干跑检查，不会产生订单。" : "自动跟单已选择，启动后匹配成功会写入订单。", state.dryRun ? "" : "error");
@@ -51,7 +90,10 @@ function renderStatus() {
   const settings = data.settings || {};
   const connected = !!data.session_configured;
   const selected = settings.source_chat_ids || [];
-  state.dryRun = settings.dry_run !== false;
+  const alive = data.worker_alive == null ? !!data.worker_running : !!data.worker_alive;
+  const running = !!data.worker_running;
+  const unhealthy = alive && !running;
+  if (!state.modeDirty) state.dryRun = settings.dry_run !== false;
   updateMode(state.dryRun);
 
   $("credentialBadge").textContent = data.credentials_configured ? "API 凭据已预置" : "预置凭据缺失";
@@ -59,16 +101,19 @@ function renderStatus() {
   $("loginForm").hidden = connected;
   $("connectedAccount").hidden = !connected;
   $("phoneMasked").textContent = data.phone_masked || "Telegram 已连接";
-  $("workerDot").classList.toggle("running", !!data.worker_running);
-  $("workerText").textContent = data.worker_running ? `监听运行中 · PID ${data.worker_pid || "-"}` : "监听未启动";
+  $("workerDot").classList.toggle("running", running);
+  $("workerText").textContent = running ? `监听运行中 · PID ${data.worker_pid || "-"}` : unhealthy ? `监听连接异常 · PID ${data.worker_pid || "-"}` : "监听未启动";
   $("accountStage").className = `stage ${connected ? "done" : "active"}`;
   $("accountStageText").textContent = connected ? (data.phone_masked || "已连接") : "等待登录";
   $("sourceStage").className = `stage ${selected.length ? "done" : connected ? "active" : ""}`;
   $("sourceStageText").textContent = selected.length ? `${selected.length} 个来源` : "未选择";
-  $("ingestStage").className = `stage ${data.worker_running ? "active" : ""}`;
-  $("ingestStageText").textContent = data.worker_running ? (state.dryRun ? "干跑监听中" : "自动跟单中") : "已停止";
-  $("startBtn").disabled = !!data.worker_running;
-  $("stopBtn").disabled = !data.worker_running;
+  $("ingestStage").className = `stage ${running ? "active" : ""}`;
+  $("ingestStageText").textContent = running ? (state.dryRun ? "干跑监听中" : "自动跟单中") : unhealthy ? "连接异常" : "已停止";
+  $("startBtn").disabled = alive;
+  $("stopBtn").disabled = !alive;
+  $("dryRunMode").disabled = alive;
+  $("automaticMode").disabled = alive;
+  if (unhealthy) setHint("actionHint", `监听进程仍在，但 Telegram 连接不健康：${data.worker_error || "等待自动恢复"}`, "error");
 }
 
 function selectedChatIds() {
@@ -119,6 +164,41 @@ function formatTime(ts) {
   return new Date(Number(ts) * 1000).toLocaleString("zh-CN", { hour12: false });
 }
 
+function formatDuration(value) {
+  const milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "";
+  return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(2)}s` : `${milliseconds.toFixed(milliseconds < 10 ? 1 : 0)}ms`;
+}
+
+function eventStatusLabel(status) {
+  const key = String(status || "").trim().toLowerCase();
+  return eventStatusLabels[key] || (key ? "其他状态" : "-");
+}
+
+function eventReasonLabel(reason) {
+  const key = String(reason || "").trim();
+  return eventReasonLabels[key] || key;
+}
+
+function eventDescription(item) {
+  const parts = [eventReasonLabel(item.reason) || item.order_id || "-"];
+  const processing = formatDuration(item.processing_ms);
+  const parse = formatDuration(item.parse_ms);
+  const games = formatDuration(item.games_load_ms);
+  const refresh = formatDuration(item.games_refresh_ms);
+  if (processing) parts.push(`总耗时 ${processing}`);
+  if (parse) parts.push(`解析 ${parse}`);
+  if (games) parts.push(`比赛 ${games}`);
+  if (refresh) parts.push(`强刷 ${refresh}`);
+  const sources = {
+    snapshot_cache: "本地盘口缓存",
+    recent_order: "最近订单",
+    webui_member_cache: "会员比赛缓存",
+  };
+  if (sources[item.match_source]) parts.push(sources[item.match_source]);
+  return parts.join(" · ");
+}
+
 function renderEvents() {
   const body = $("eventRows");
   body.replaceChildren();
@@ -136,8 +216,8 @@ function renderEvents() {
   for (const item of state.events) {
     const row = document.createElement("tr");
     const values = [
-      formatTime(item.ts), item.chat_title || item.chat_id || "-", item.status || "-",
-      [item.league, item.match].filter(Boolean).join(" · ") || "-", item.line || "-", item.amount || "-", item.reason || item.order_id || "-",
+      formatTime(item.ts), item.chat_title || item.chat_id || "-", eventStatusLabel(item.status),
+      [item.league, item.match].filter(Boolean).join(" · ") || "-", item.line || "-", item.amount || "-", eventDescription(item),
     ];
     values.forEach((value, index) => {
       const cell = document.createElement("td");
@@ -146,6 +226,7 @@ function renderEvents() {
         const badge = document.createElement("span");
         badge.className = `status-pill ${String(item.status || "").replace(/[^a-z_]/g, "")}`;
         badge.textContent = value;
+        if (item.status) badge.title = `内部状态：${item.status}`;
         cell.append(badge);
       } else cell.textContent = value;
       row.append(cell);
@@ -159,9 +240,18 @@ async function loadStatus() {
   renderStatus();
 }
 async function loadChats() {
-  const result = await api("/api/telegram-signal/chats");
-  state.chats = result.chats || [];
-  renderChats();
+  try {
+    const result = await api("/api/telegram-signal/chats");
+    state.chats = result.chats || [];
+    state.chatsLoaded = true;
+    renderChats();
+    return result;
+  } catch (error) {
+    state.chats = [];
+    state.chatsLoaded = false;
+    renderChats();
+    throw error;
+  }
 }
 async function loadLogs() {
   const result = await api("/api/telegram-signal/logs?limit=150");
@@ -170,13 +260,19 @@ async function loadLogs() {
 }
 
 async function saveSettings() {
-  const ids = selectedChatIds();
-  const sourceChats = state.chats.filter((chat) => ids.includes(String(chat.id)));
+  const savedSettings = state.status?.settings || {};
+  const ids = state.chatsLoaded
+    ? selectedChatIds()
+    : (savedSettings.source_chat_ids || []).map(String);
+  const sourceChats = state.chatsLoaded
+    ? state.chats.filter((chat) => ids.includes(String(chat.id)))
+    : (savedSettings.source_chats || []);
   const result = await api("/api/telegram-signal/settings", {
     method: "POST",
     body: JSON.stringify({ dry_run: state.dryRun, source_chat_ids: ids, source_chats: sourceChats }),
   });
   state.status.settings = result.settings;
+  state.modeDirty = false;
   renderStatus();
   renderChats();
   return result;
@@ -184,8 +280,8 @@ async function saveSettings() {
 
 $("refreshBtn").addEventListener("click", () => Promise.all([loadStatus(), loadLogs()]).catch((error) => toast(explain(error))));
 $("groupSearch").addEventListener("input", renderChats);
-$("dryRunMode").addEventListener("click", () => updateMode(true));
-$("automaticMode").addEventListener("click", () => updateMode(false));
+$("dryRunMode").addEventListener("click", () => updateMode(true, { markDirty: true }));
+$("automaticMode").addEventListener("click", () => updateMode(false, { markDirty: true }));
 $("reloadChatsBtn").addEventListener("click", () => loadChats().catch((error) => toast(explain(error))));
 $("saveGroupsBtn").addEventListener("click", () => saveSettings().then(() => toast("来源群已保存")).catch((error) => toast(explain(error))));
 
@@ -217,6 +313,7 @@ $("verifyCodeBtn").addEventListener("click", async () => {
 $("logoutBtn").addEventListener("click", async () => {
   await api("/api/telegram-signal/logout", { method: "POST", body: "{}" });
   state.chats = [];
+  state.chatsLoaded = false;
   await loadStatus();
   renderChats();
   toast("Telegram 账号已退出");
@@ -253,4 +350,6 @@ async function initialize() {
 }
 
 initialize();
-setInterval(() => Promise.all([loadStatus(), loadLogs()]).catch(() => {}), 5000);
+setInterval(() => {
+  if (document.visibilityState !== "hidden") Promise.all([loadStatus(), loadLogs()]).catch(() => {});
+}, LOG_REFRESH_INTERVAL_MS);

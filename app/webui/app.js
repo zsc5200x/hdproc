@@ -9,6 +9,7 @@ const state = {
   availableTargets: [],
   accounts: [],
   statuses: {},
+  platform: {},
   members: [],
   followSettings: null,
   signalPullConfig: {},
@@ -3056,6 +3057,7 @@ async function loadStatuses() {
     const data = await fetchJson("/api/status");
     updateFollowEngineState(data);
     state.statuses = data.statuses || {};
+    state.platform = data.platform || state.platform || {};
     state.systemStatus = {
       serverTime: String(data.server_time || ""),
       uptime: Number(data.uptime || 0),
@@ -3063,6 +3065,7 @@ async function loadStatuses() {
       running: !!data.running,
       snapshotWatchRunning: !!data.snapshot_watch_running,
       coreRunning: !!data.core_running,
+      platform: data.platform || {},
       updatedAt: Date.now(),
     };
     if ($("server-time")) $("server-time").textContent = new Date().toLocaleTimeString();
@@ -3321,6 +3324,7 @@ function computeArsenalStats(members) {
   return {
     total: list.length,
     online,
+    maintenance: list.filter((m) => String(m.status || "").trim().toLowerCase() === "maintenance").length,
     ready: 0,
     recovering: 0,
     manual: 0,
@@ -3345,12 +3349,16 @@ function renderArsenalStats() {
   if (totalBalance) totalBalance.textContent = String(stats.totalBalance || 0);
   if ($("member-summary-online")) $("member-summary-online").textContent = String(stats.online || 0);
   if ($("pool-member-online-meta")) $("pool-member-online-meta").textContent = `${stats.online || 0} / ${stats.total || 0} 个会员`;
+  if ($("pool-member-online-meta") && stats.maintenance) {
+    $("pool-member-online-meta").textContent = `${stats.online || 0} 在线 / ${stats.maintenance} 维护中`;
+  }
   if (badge) badge.textContent = String(stats.total);
 }
 
 async function loadArsenal() {
   const data = await fetchJson("/api/arsenal");
   state.members = (data.members || []).filter((m) => m && m.id);
+  state.platform = data.platform || state.platform || {};
   renderArsenalStats();
   await loadMappings();
 }
@@ -3484,7 +3492,7 @@ function renderLegacyArsenalCards() {
       </div>
 
       <div class="arsenal-card-actions">
-        <button class="btn btn-primary btn-sm" data-action="login">
+        <button class="btn btn-primary btn-sm" data-action="login" ${card.statusTone === "maintenance" ? "disabled title=\"平台维护期间暂停重登\"" : ""}>
           <i class="fa-solid fa-right-to-bracket"></i> 重登
         </button>
         <button class="btn btn-ghost btn-sm" data-action="check">
@@ -3512,6 +3520,7 @@ function renderLegacyArsenalCards() {
 
 function memberHealthScore(member, card) {
   const status = String(member && member.status || "").trim().toLowerCase();
+  if (status === "maintenance") return null;
   const failures = Number(card && card.requestFailCount || 0) + Number(card && card.reloginFailCount || 0);
   if (status === "online") return Math.max(40, 100 - Math.min(45, failures * 12) - (card && card.lastError ? 20 : 0));
   if (status === "relogin") return Math.max(25, 58 - Math.min(25, failures * 8));
@@ -3570,6 +3579,7 @@ function renderArsenalTable() {
 
   for (const row of rows) {
     const { member, card, health } = row;
+    const maintenance = String(member.status || "").trim().toLowerCase() === "maintenance";
     const statusTone = String(card.statusTone || "muted").replace(/[^a-z0-9_-]/gi, "");
     const tr = document.createElement("tr");
     tr.className = `member-pool-row status-${statusTone || "muted"}`;
@@ -3590,8 +3600,8 @@ function renderArsenalTable() {
       </td>
       <td><span class="member-balance">¥ ${escapeHtml(card.balanceText || "0")}</span></td>
       <td>
-        <div class="member-health" title="由在线状态、失败计数和最近错误实时派生">
-          <span><i style="width:${health}%"></i></span><b>${health}%</b>
+        <div class="member-health${maintenance ? " is-paused" : ""}" title="${maintenance ? "平台维护期间暂停健康度计算" : "由在线状态、失败计数和最近错误实时派生"}">
+          <span><i style="width:${maintenance ? 0 : health}%"></i></span><b>${maintenance ? "暂停" : `${health}%`}</b>
         </div>
       </td>
       <td>
@@ -3603,7 +3613,7 @@ function renderArsenalTable() {
       <td><time class="member-last-active" datetime="${row.lastActive ? new Date(row.lastActive * 1000).toISOString() : ""}">${escapeHtml(row.lastActive ? fmtTime(row.lastActive) : "暂无记录")}</time></td>
       <td>
         <div class="member-row-actions">
-          <button type="button" data-action="login" title="重登 ${escapeHtml(card.label)}" aria-label="重登 ${escapeHtml(card.label)}"><i class="fa-solid fa-right-to-bracket" aria-hidden="true"></i></button>
+          <button type="button" data-action="login" title="${maintenance ? "平台维护期间暂停重登" : `重登 ${escapeHtml(card.label)}`}" aria-label="重登 ${escapeHtml(card.label)}" ${maintenance ? "disabled" : ""}><i class="fa-solid fa-right-to-bracket" aria-hidden="true"></i></button>
           <button type="button" data-action="check" title="检测 ${escapeHtml(card.label)}" aria-label="检测 ${escapeHtml(card.label)}"><i class="fa-solid fa-plug" aria-hidden="true"></i></button>
           <button class="danger" type="button" data-action="delete" title="删除 ${escapeHtml(card.label)}" aria-label="删除 ${escapeHtml(card.label)}"><i class="fa-solid fa-trash" aria-hidden="true"></i></button>
         </div>
@@ -3711,6 +3721,32 @@ function formatMonitorTimestamp(value, emptyText = "还没扫到") {
   return Number.isFinite(ts) && ts > 0 ? fmtTime(ts) : emptyText;
 }
 
+function platformMaintenanceModel() {
+  const platform = state.platform && typeof state.platform === "object" ? state.platform : {};
+  const status = String(platform.status || "").trim().toLowerCase();
+  const active = status === "maintenance";
+  const recovering = status === "recovering";
+  const startAt = Number(platform.maintenance_start_at || 0);
+  const until = Number(platform.maintenance_until || 0);
+  const formatFull = (ts) => ts > 0
+    ? new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : "未提供";
+  const windowText = startAt || until ? `${formatFull(startAt)} ～ ${formatFull(until)}` : "平台未提供维护时间";
+  const nextProbeAt = Number(platform.next_probe_at || 0);
+  const nextProbeText = nextProbeAt > 0 ? formatFull(nextProbeAt) : "自动持续检测";
+  return {
+    ...platform,
+    active,
+    recovering,
+    startAt,
+    until,
+    windowText,
+    nextProbeAt,
+    nextProbeText,
+    message: String(platform.maintenance_message || (active ? "平台系统维护" : recovering ? "正在验证原有会话" : "")),
+  };
+}
+
 function monitorAccountLoginTab(account) {
   const tab = Number(account && (account.relogin_login_tab || account.login_tab || 3));
   return tab === 2 ? 2 : 3;
@@ -3740,6 +3776,9 @@ function classifyMonitorIssue(status, enabled = true) {
   const raw = [code, message].filter(Boolean).join(": ");
   if (!raw) return "";
   const lower = raw.toLowerCase();
+  if (String(st.status || "").toLowerCase() === "maintenance" || code === "PLATFORM_MAINTENANCE") {
+    return message || "平台系统维护";
+  }
   if (!code && ["在线", "正常", "运行中", "扫描中", "online", "ok", "running", "healthy"].includes(lower)) return "";
   if (code === "0X001" || raw.includes("流量较高") || raw.includes("系统繁忙") || lower.includes("busy")) {
     return `系统繁忙：${message || code}`;
@@ -3758,12 +3797,18 @@ function buildBackendMonitorSource(account) {
   const status = state.statuses[id] || {};
   const enabled = account.enabled !== false;
   const rawStatus = String(status.status || "").trim().toLowerCase();
+  const platformStatus = String(status.platform_status || "").trim().toLowerCase();
+  const recovering = rawStatus === "recovering" || platformStatus === "recovering";
+  const maintenance = rawStatus === "maintenance" || platformStatus === "maintenance";
   const reloginBusy = !!status.relogin_in_progress || rawStatus === "relogin";
   const needsManual = !!status.needs_manual_login;
   let statusText = "离线";
   let statusTone = "offline";
   if (!enabled) {
     statusText = "已暂停";
+  } else if (maintenance || recovering) {
+    statusText = recovering ? "恢复验证中" : "平台维护";
+    statusTone = recovering ? "warning" : "maintenance";
   } else if (needsManual) {
     statusText = "需人工登录";
   } else if (reloginBusy) {
@@ -3795,9 +3840,10 @@ function buildBackendMonitorSource(account) {
     statusTone,
     enabled,
     normal: enabled && statusTone === "online",
-    primaryLabel: "最后扫单时间",
-    primaryValue: formatMonitorTimestamp(lastPollAt),
-    primaryMeta: lastOkAt ? `最后成功：${formatMonitorTimestamp(lastOkAt)}` : "还没有成功扫到订单接口",
+    maintenance: maintenance || recovering,
+    primaryLabel: maintenance || recovering ? (recovering ? "恢复状态" : "维护状态") : "最后扫单时间",
+    primaryValue: maintenance || recovering ? (recovering ? "正在验证原会话" : "已暂停扫单") : formatMonitorTimestamp(lastPollAt),
+    primaryMeta: maintenance || recovering ? platformMaintenanceModel().windowText : (lastOkAt ? `最后成功：${formatMonitorTimestamp(lastOkAt)}` : "还没有成功扫到订单接口"),
     rows: [
       { icon: "fa-right-to-bracket", label: "登录通道", value: `登入${tab}` },
       { icon: "fa-list-check", label: "监控范围", value: scanScope },
@@ -3875,11 +3921,12 @@ function renderLegacyMonitorPoolStats(sources) {
   const backendCount = list.filter((s) => s.kind === "backend").length;
   const signalCount = list.filter((s) => s.kind === "signal").length;
   const normalCount = list.filter((s) => s.normal).length;
+  const maintenanceCount = list.filter((s) => s.maintenance).length;
   const enabledBackendCount = list.filter((s) => s.kind === "backend" && s.enabled).length;
   const values = {
     "monitor-pool-count": list.length,
     "monitor-pool-normal-count": normalCount,
-    "monitor-pool-error-count": Math.max(0, list.length - normalCount),
+    "monitor-pool-error-count": Math.max(0, list.length - normalCount - maintenanceCount),
     "monitor-pool-backend-count": backendCount,
     "monitor-pool-signal-count": signalCount,
     "monitor-pool-concurrency": `${enabledBackendCount} / ${backendCount}`,
@@ -3940,7 +3987,7 @@ function renderLegacyMonitorSourceCard(source) {
         <i class="fa-solid ${source.enabled ? "fa-pause" : "fa-play"}"></i> ${source.enabled ? "暂停" : "启用"}
       </button>
       ${source.kind === "backend" ? `
-      <button class="btn btn-primary btn-sm" data-action="login">
+      <button class="btn btn-primary btn-sm" data-action="login" ${source.maintenance ? "disabled title=\"平台维护期间暂停重登\"" : ""}>
         <i class="fa-solid fa-right-to-bracket"></i> 重登
       </button>` : ""}
       <button class="btn btn-danger btn-sm icon-only" data-action="delete" title="删除监控来源">
@@ -4119,7 +4166,8 @@ function renderMonitorPoolStats(sources) {
   const backendCount = list.filter((source) => source.kind === "backend").length;
   const signalCount = list.filter((source) => source.kind === "signal").length;
   const normalCount = list.filter((source) => source.normal).length;
-  const errorCount = Math.max(0, list.length - normalCount);
+  const maintenanceCount = list.filter((source) => source.maintenance).length;
+  const errorCount = Math.max(0, list.length - normalCount - maintenanceCount);
   const enabledBackendCount = list.filter((source) => source.kind === "backend" && source.enabled).length;
   const values = {
     "monitor-pool-count": list.length,
@@ -4149,7 +4197,7 @@ function filterMonitorPoolSources(sources) {
   return (Array.isArray(sources) ? sources : []).filter((source) => {
     if (dashboard.source && dashboard.source !== "all" && source.kind !== dashboard.source) return false;
     if (dashboard.status === "online" && !source.normal) return false;
-    if (dashboard.status === "error" && (source.normal || !source.enabled)) return false;
+    if (dashboard.status === "error" && (source.normal || source.maintenance || !source.enabled)) return false;
     if (dashboard.status === "paused" && source.enabled) return false;
     if (dashboard.channel && dashboard.channel !== "all") {
       const channel = source.kind === "signal" ? "signal" : String(monitorAccountLoginTab(source.rawAccount));
@@ -4201,7 +4249,7 @@ function renderMonitorSourceCard(source) {
     <footer class="pool-monitor-actions">
       <button type="button" data-action="refresh" title="刷新状态" aria-label="刷新 ${escapeHtml(source.label)} 状态"><i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i></button>
       <button type="button" data-action="toggle" title="${source.enabled ? "暂停" : "启用"}" aria-label="${source.enabled ? "暂停" : "启用"} ${escapeHtml(source.label)}"><i class="fa-solid ${source.enabled ? "fa-pause" : "fa-play"}" aria-hidden="true"></i></button>
-      ${source.kind === "backend" ? `<button class="primary" type="button" data-action="login" title="重新登录" aria-label="重新登录 ${escapeHtml(source.label)}"><i class="fa-solid fa-rotate" aria-hidden="true"></i><span>重登</span></button>` : ""}
+      ${source.kind === "backend" ? `<button class="primary" type="button" data-action="login" title="${source.maintenance ? "平台维护期间暂停重登" : "重新登录"}" aria-label="重新登录 ${escapeHtml(source.label)}" ${source.maintenance ? "disabled" : ""}><i class="fa-solid fa-rotate" aria-hidden="true"></i><span>重登</span></button>` : ""}
       <button class="danger" type="button" data-action="delete" title="删除监控来源" aria-label="删除 ${escapeHtml(source.label)}"><i class="fa-solid fa-trash" aria-hidden="true"></i></button>
     </footer>`;
 
@@ -4328,12 +4376,14 @@ function renderPoolOverview(monitorSources = null) {
   const sources = Array.isArray(monitorSources) ? monitorSources : buildMonitorPoolSources();
   const members = Array.isArray(state.members) ? state.members.filter(Boolean) : [];
   const memberStats = computeArsenalStats(members);
-  const total = sources.length;
-  const normal = sources.filter((source) => source.normal).length;
+  const platform = platformMaintenanceModel();
+  const healthSources = sources.filter((source) => !source.maintenance);
+  const total = healthSources.length;
+  const normal = healthSources.filter((source) => source.normal).length;
   const health = total > 0 ? poolPercent(normal, total) : 0;
   const status = $("pool-overview-status");
-  const tone = !total ? "muted" : health >= 80 ? "success" : health >= 50 ? "warning" : "danger";
-  const statusText = !total ? "暂无来源" : health === 100 ? "扫描正常" : health >= 50 ? "部分异常" : "扫描异常";
+  const tone = platform.active || platform.recovering ? "warning" : !total ? "muted" : health >= 80 ? "success" : health >= 50 ? "warning" : "danger";
+  const statusText = platform.active ? "平台维护中" : platform.recovering ? "恢复验证中" : !total ? "暂无来源" : health === 100 ? "扫描正常" : health >= 50 ? "部分异常" : "扫描异常";
   if (status) {
     status.dataset.tone = tone;
     const label = status.querySelector("b");
@@ -4343,12 +4393,16 @@ function renderPoolOverview(monitorSources = null) {
   const ring = $("pool-health-ring");
   const miniRing = $("pool-mini-health");
   [ring, miniRing].filter(Boolean).forEach((element) => element.style.setProperty("--health", String(health)));
-  if ($("pool-health-value")) $("pool-health-value").textContent = total ? `${health}%` : "--";
-  if ($("pool-mini-health-value")) $("pool-mini-health-value").textContent = total ? `${health}%` : "--";
-  const healthLabel = !total ? "暂无数据" : health >= 80 ? "运行健康" : health >= 50 ? "需要关注" : "存在异常";
+  if ($("pool-health-value")) $("pool-health-value").textContent = platform.active || platform.recovering ? "--" : total ? `${health}%` : "--";
+  if ($("pool-mini-health-value")) $("pool-mini-health-value").textContent = platform.active || platform.recovering ? "--" : total ? `${health}%` : "--";
+  const healthLabel = platform.active ? "维护暂停" : platform.recovering ? "正在恢复" : !total ? "暂无数据" : health >= 80 ? "运行健康" : health >= 50 ? "需要关注" : "存在异常";
   if ($("pool-health-label")) $("pool-health-label").textContent = healthLabel;
   if ($("pool-mini-health-label")) $("pool-mini-health-label").textContent = healthLabel;
-  if ($("pool-health-meta")) $("pool-health-meta").textContent = total ? `${normal} 个正常 / ${total} 个总计` : "等待真实监控来源接入";
+  if ($("pool-health-meta")) $("pool-health-meta").textContent = platform.active
+    ? `后台监控与会员号池已暂停 · 预计恢复 ${platform.until ? formatMonitorTimestamp(platform.until) : "待平台通知"}`
+    : platform.recovering
+      ? "维护已结束，正在验证后台和会员原会话"
+      : total ? `${normal} 个正常 / ${total} 个总计` : "等待真实监控来源接入";
   if ($("pool-scan-time")) {
     const timeText = state.systemStatus && state.systemStatus.serverTime ? state.systemStatus.serverTime.split(" ").pop() : "等待同步";
     $("pool-scan-time").textContent = timeText;
@@ -4367,8 +4421,8 @@ function renderPoolOverview(monitorSources = null) {
     ["当前聚焦", focusLabel],
     ["最后扫描时间", latestPoll ? fmtTime(latestPoll) : "暂无记录"],
     ["最后成功时间", latestOk ? fmtTime(latestOk) : "暂无记录"],
-    ["监控 / 在线", `${total} / ${normal}`],
-    ["会员 / 在线", `${memberStats.total || 0} / ${memberStats.online || 0}`],
+    [platform.active || platform.recovering ? "维护时间" : "监控 / 在线", platform.active || platform.recovering ? platform.windowText : `${total} / ${normal}`],
+    ["会员 / 在线", platform.active || platform.recovering ? `${memberStats.maintenance || 0} 维护中 / ${memberStats.total || 0} 总计` : `${memberStats.total || 0} / ${memberStats.online || 0}`],
     ["运行时长", poolUptimeText(state.systemStatus && state.systemStatus.uptime)],
   ];
   const detailsHost = $("pool-overview-details");
@@ -4378,7 +4432,7 @@ function renderPoolOverview(monitorSources = null) {
   sources.forEach((source) => {
     const sourceStatus = state.statuses[source.id] || {};
     const ts = Number(sourceStatus.last_poll_at || sourceStatus.last_ok_at || 0);
-    if (ts) events.push({ ts, label: source.normal ? `${source.label} 扫描成功` : `${source.label} 状态异常`, tone: source.normal ? "success" : "danger" });
+    if (ts) events.push({ ts, label: source.maintenance ? `${source.label} 平台维护暂停` : source.normal ? `${source.label} 扫描成功` : `${source.label} 状态异常`, tone: source.maintenance ? "warning" : source.normal ? "success" : "danger" });
   });
   members.forEach((member) => {
     const ts = Number(member.last_check_at || member.last_ok_at || 0);
@@ -4393,13 +4447,25 @@ function renderPoolOverview(monitorSources = null) {
   }
 
   const alerts = [];
+  if (platform.active || platform.recovering) {
+    const backendCount = sources.filter((source) => source.kind === "backend").length;
+    const memberCount = members.length;
+    alerts.push({
+      kind: "platform",
+      id: "platform-maintenance",
+      label: platform.active ? "平台系统维护" : "平台恢复验证中",
+      message: `影响：后台监控 ${backendCount} 个、会员账号 ${memberCount} 个；维护时间：${platform.windowText}；恢复后自动验证原会话`,
+      tone: "warning",
+    });
+  }
   sources.forEach((source) => {
-    if (source.normal) return;
+    if (source.normal || source.maintenance) return;
     const issue = monitorRowValue(source, ["失败原因", "运行状态"], source.statusText || "监控异常");
     alerts.push({ kind: "monitor", id: source.id, label: source.label, message: issue, tone: source.enabled ? "danger" : "warning" });
   });
   members.forEach((member) => {
     const statusValue = String(member.status || "").toLowerCase();
+    if (statusValue === "maintenance") return;
     if (statusValue === "online" && !String(member.last_error || "").trim()) return;
     alerts.push({ kind: "member", id: member.id, label: memberLabel(member), message: String(member.last_error || (statusValue === "relogin" ? "会员正在自动恢复" : "会员当前离线")), tone: statusValue === "relogin" ? "warning" : "danger" });
   });
@@ -4411,6 +4477,7 @@ function renderPoolOverview(monitorSources = null) {
       : '<div class="pool-alert-empty"><i class="fa-solid fa-circle-check" aria-hidden="true"></i>当前没有异常告警</div>';
     alertHost.querySelectorAll("button[data-kind][data-id]").forEach((button) => {
       button.addEventListener("click", () => {
+        if (button.dataset.kind === "platform") return;
         state.poolSelection = { kind: button.dataset.kind, id: button.dataset.id };
         renderPoolOverview(sources);
         setPoolView(button.dataset.kind === "member" ? "members" : "monitors");

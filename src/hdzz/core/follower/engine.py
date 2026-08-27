@@ -25,6 +25,11 @@ warnings.filterwarnings("ignore", message=r"urllib3 v2 only supports OpenSSL.*")
 import requests
 
 from hdzz.common.config import JsonFileCache
+from hdzz.common.platform_maintenance import (
+    PLATFORM_MAINTENANCE_CODE,
+    maintenance_status_message,
+    read_platform_state,
+)
 from member_arsenal_watch import (
     atomic_write_json,
     ensure_member_defaults,
@@ -8962,6 +8967,66 @@ def main() -> int:
         one_shot_settings["retry_max_attempts"] = 1
         one_shot_settings["retry_delay_seconds"] = 0
         one_shot_settings["retry_max_seconds"] = 1
+
+        # 平台维护/恢复验证期间，订单继续保留在队列，但禁止任何新的
+        # Snapshot、FT_order_view 或 FT_bet 请求。维护状态由后台 watcher
+        # 通过 data/platform_maintenance.json 共享；恢复为 online 后自动放行。
+        platform_state = read_platform_state(data_dir)
+        platform_status = str(platform_state.get("status") or "").strip().lower()
+        platform_paused = platform_status in {"maintenance", "recovering"}
+        if platform_paused:
+            pause_message = maintenance_status_message(platform_state)
+            for paused_job in list(retry_scheduler.retry_jobs.values()):
+                if not isinstance(paused_job, RetryJob):
+                    continue
+                # UNKNOWN_RESULT 代表下注请求可能已经到达平台，必须保留原会员
+                # 和核验状态；维护期间只延后核验，绝不能把它改成普通重试。
+                if str(paused_job.last_err or "").strip().upper() == UNKNOWN_RESULT:
+                    paused_job.next_try_at = float(now_ts()) + 5.0
+                    paused_job.order["_platform_maintenance_paused"] = True
+                    continue
+                already_paused = str(paused_job.last_err or "").strip().upper() == PLATFORM_MAINTENANCE_CODE
+                paused_job.last_err = PLATFORM_MAINTENANCE_CODE
+                paused_job.last_message = pause_message
+                paused_job.member_id = ""
+                paused_job.next_try_at = float(now_ts()) + 5.0
+                paused_job.order["_platform_maintenance_paused"] = True
+                if not already_paused:
+                    _enqueue_follow_notification(
+                        paused_job,
+                        {
+                            "ts": int(now_ts()),
+                            "ts_ms": int(now_ts_ms()),
+                            "target": paused_job.target,
+                            "orderId": paused_job.order_id,
+                            "stake": float(paused_job.stake or 0.0),
+                            "member": "-",
+                            "member_id": "",
+                            "ok": False,
+                            "status": "maintenance",
+                            "error_code": PLATFORM_MAINTENANCE_CODE,
+                            "message": pause_message,
+                            "split_index": int(paused_job.split_index or 0) + 1,
+                            "split_count": int(paused_job.split_count or 1),
+                        },
+                    )
+            _persist_follow_state()
+            time.sleep(max(0.5, min(5.0, float(args.interval))))
+            continue
+
+        # 维护结束并确认平台在线后，清除暂停标记，让原订单从当前盘口重新
+        # 准备；不增加 attempts，也不把维护等待算作失败。
+        if platform_status == "online":
+            for resumed_job in list(retry_scheduler.retry_jobs.values()):
+                if not isinstance(resumed_job, RetryJob):
+                    continue
+                if str(resumed_job.last_err or "").strip().upper() != PLATFORM_MAINTENANCE_CODE:
+                    continue
+                resumed_job.last_err = ""
+                resumed_job.last_message = ""
+                resumed_job.member_id = ""
+                resumed_job.order.pop("_platform_maintenance_paused", None)
+                resumed_job.next_try_at = float(now_ts())
 
         processed = 0
         used_member_ids: set = set()

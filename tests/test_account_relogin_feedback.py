@@ -62,6 +62,29 @@ class TestAccountReloginFeedback(unittest.TestCase):
         self.assertIn("手动验证码", entry["last_relogin_error_msg"])
         self.assertIn("点击重登", entry["status_message"])
 
+    def test_account_status_entry_exposes_platform_maintenance_without_manual_login(self) -> None:
+        from hdzz.api.webui.server import build_account_status_entry
+
+        entry = build_account_status_entry(
+            {"name": "summer001", "uid": "u", "cookie": "c"},
+            {
+                "last_status": "offline",
+                "last_ok_at": 80.0,
+                "last_poll_at": 100.0,
+                "platform_status": "maintenance",
+                "platform_maintenance_start_at": 90.0,
+                "platform_maintenance_until": 200.0,
+                "last_error_msg": "平台系统维护，预计 16:30 恢复",
+            },
+            now=130.0,
+        )
+
+        self.assertEqual(entry["status"], "maintenance")
+        self.assertFalse(entry["needs_manual_login"])
+        self.assertFalse(entry["relogin_in_progress"])
+        self.assertEqual(entry["maintenance_until"], 200.0)
+        self.assertIn("平台系统维护", entry["status_message"])
+
 
 if __name__ == "__main__":
     unittest.main()

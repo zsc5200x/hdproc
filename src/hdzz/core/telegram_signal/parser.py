@@ -69,21 +69,25 @@ def _content_lines(lines: List[str]) -> List[str]:
 
 def _parse_match_line(line: str) -> Tuple[str, str, int, int]:
     line = _decorated_line(line)
-    match = re.match(r"^(.+?)\s+v(?:s)?\s+(.+?)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*$", line, re.IGNORECASE)
+    match = re.match(
+        r"^(.+?)\s+v(?:s)?\s+(.+?)(?:\s*\(\s*(\d+)\s*[-:]\s*(\d+)\s*\))?\s*$",
+        line,
+        re.IGNORECASE,
+    )
     if not match:
         raise SignalParseError("missing_match")
     return (
         str(match.group(1) or "").strip(),
         str(match.group(2) or "").strip(),
-        int(match.group(3)),
-        int(match.group(4)),
+        int(match.group(3) or 0),
+        int(match.group(4) or 0),
     )
 
 
 def _parse_bet_line(line: str) -> Tuple[str, str, str]:
     line = _decorated_line(line)
     match = re.match(
-        r"^(.+?)\s+([+-]?\d+(?:\.\d+)?(?:\s*/\s*[+-]?\d+(?:\.\d+)?)?)\s*@\s*(\d+(?:\.\d+)?)\s*$",
+        r"^(.+?)\s+([+-]?\d+(?:\.\d+)?(?:\s*/\s*[+-]?\d+(?:\.\d+)?)?)\s*@\s*([+-]?\d+(?:\.\d+)?)\s*$",
         line,
     )
     if not match:
@@ -105,6 +109,24 @@ def _market_from(bet_type: str, selection: str) -> str:
     raise SignalParseError("unsupported_market")
 
 
+def _card_bet_type(play: str, *, status: str, period: str) -> str:
+    text = str(play or "").strip()
+    if "角球" in text and "大小" in text:
+        market = "角球数 - 大 / 小"
+    elif any(token in text for token in ("进球大小", "大 / 小", "大小", "大球", "小球")):
+        market = "大 / 小"
+    elif "让球" in text:
+        market = "让球"
+    elif "独赢" in text or "獨贏" in text:
+        market = "独赢"
+    else:
+        market = text
+    prefix = "(滚球) " if "滚球" in str(status or "") else ""
+    period_text = str(period or "").strip()
+    suffix = f" - {period_text}" if period_text and period_text != "全场" else ""
+    return f"{prefix}{market}{suffix}".strip()
+
+
 def parse_telegram_bet_signal(text: Any) -> Dict[str, Any]:
     lines = _nonempty_lines(text)
     if not lines:
@@ -122,12 +144,6 @@ def parse_telegram_bet_signal(text: Any) -> Dict[str, Any]:
         and _decorated_label_value(lines, "原注金额")
     )
     if is_order_card:
-        success_text = _decorated_label_value(lines, "跟单成功")
-        if success_text and not re.search(r"处理中|等待|pending", success_text, re.IGNORECASE):
-            # A card edited with a numeric success amount is the result of a
-            # prior follow operation, not a new source order.  Reject it at
-            # parsing time so the listener cannot feed its own output back.
-            raise SignalParseError("completed_result")
         order_id = _decorated_label_value(lines, "单号")
         if not re.fullmatch(r"\d{6,}", order_id):
             raise SignalParseError("missing_order_id")
@@ -139,7 +155,11 @@ def parse_telegram_bet_signal(text: Any) -> Dict[str, Any]:
         league = ""
         match_index = -1
         for index, line in enumerate(decorated):
-            if re.search(r"\bv(?:s)?\b\s*.+\(\s*\d+\s*[-:]\s*\d+\s*\)", line, re.IGNORECASE):
+            if re.fullmatch(
+                r".+?\s+v(?:s)?\s+.+?(?:\s*\(\s*\d+\s*[-:]\s*\d+\s*\))?\s*",
+                line,
+                re.IGNORECASE,
+            ):
                 match_index = index
                 break
         if match_index < 1:
@@ -156,8 +176,8 @@ def parse_telegram_bet_signal(text: Any) -> Dict[str, Any]:
 
         selection_text = _decorated_label_value(lines, "选择")
         selection, line_text, odds = _parse_bet_line(selection_text)
-        bet_type = _decorated_label_value(lines, "玩法")
-        if not bet_type:
+        play = _decorated_label_value(lines, "玩法")
+        if not play:
             raise SignalParseError("missing_bet_type")
         status = _decorated_label_value(lines, "状态")
         period = _decorated_label_value(lines, "时段") or "全场"
@@ -169,7 +189,8 @@ def parse_telegram_bet_signal(text: Any) -> Dict[str, Any]:
         amount = float(amount_match.group(0).replace(",", ""))
         if amount <= 0:
             raise SignalParseError("missing_amount")
-        market = _market_from(bet_type, selection)
+        market = _market_from(play, selection)
+        bet_type = _card_bet_type(play, status=status, period=period)
         line_value = _parse_split_line(line_text)
         return {
             "monitor": "",

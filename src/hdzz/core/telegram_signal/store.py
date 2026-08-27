@@ -154,10 +154,28 @@ def remember_order_id(path: Path, order_id: str, *, max_seen: int = 10000) -> bo
     return _remember_value(Path(path), "seen_order_ids", order_id, max_seen=max_seen)
 
 
+def sanitize_event_reason(status: Any, reason: Any) -> str:
+    text = re.sub(r"\s+", " ", str(reason or "")).strip()
+    if str(status or "").strip() == "worker_error" and (
+        "matching Constructor ID" in text or "Remaining bytes:" in text
+    ):
+        return "telegram_protocol_sync_error"
+    if len(text) > 240:
+        return text[:239].rstrip() + "..."
+    return text
+
+
+def _sanitize_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    row = dict(event or {})
+    if "reason" in row:
+        row["reason"] = sanitize_event_reason(row.get("status"), row.get("reason"))
+    return row
+
+
 def append_event(path: Path, event: Dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    row = dict(event or {})
+    row = _sanitize_event(event)
     row.setdefault("ts", int(time.time()))
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -173,7 +191,7 @@ def read_recent_events(path: Path, *, limit: int = 100) -> List[Dict[str, Any]]:
                 except Exception:
                     continue
                 if isinstance(item, dict):
-                    rows.append(item)
+                    rows.append(_sanitize_event(item))
     except Exception:
         return []
     return list(reversed(rows))

@@ -94,6 +94,28 @@ class TelegramSignalStoreTest(unittest.TestCase):
 
             self.assertEqual([row["id"] for row in rows], [4, 3])
 
+    def test_event_log_sanitizes_telethon_protocol_payloads_on_write_and_read(self) -> None:
+        from hdzz.core.telegram_signal.store import append_event, read_recent_events
+
+        unsafe = (
+            "Could not find a matching Constructor ID for the TLObject. "
+            "Remaining bytes: b'private-message-content'"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            append_event(path, {"status": "worker_error", "reason": unsafe})
+            self.assertNotIn("private-message-content", path.read_text(encoding="utf-8"))
+
+            # Legacy rows written before sanitization are also safe at the API
+            # read boundary without rewriting the audit file.
+            path.write_text(
+                json.dumps({"status": "worker_error", "reason": unsafe}) + "\n",
+                encoding="utf-8",
+            )
+            rows = read_recent_events(path, limit=1)
+
+        self.assertEqual(rows[0]["reason"], "telegram_protocol_sync_error")
+
 
 if __name__ == "__main__":
     unittest.main()

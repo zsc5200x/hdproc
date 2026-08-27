@@ -14,7 +14,7 @@ from time import time as now_ts
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -31,6 +31,14 @@ from hdzz.core.watcher.order_filter import (
     should_forward_order_for_target,
 )
 from hdzz.core.order_display import parse_bet_display
+from hdzz.common.platform_maintenance import (
+    PLATFORM_MAINTENANCE_CODE,
+    is_platform_maintenance,
+    maintenance_status_message,
+    read_platform_state,
+    record_platform_business_success,
+    refresh_backend_maintenance_state,
+)
 
 
 DEFAULT_HEADERS = {
@@ -486,6 +494,15 @@ def _msg_is_go_to_home(msg: Any) -> bool:
     return "gotohome" in str(msg or "").lower().replace(" ", "")
 
 
+def _response_value_is_go_to_home(data: Mapping[str, Any]) -> bool:
+    if not isinstance(data, Mapping):
+        return False
+    return any(
+        "gotohome" in str(data.get(key) or "").lower().replace(" ", "")
+        for key in ("code", "msg", "message", "error")
+    )
+
+
 def _is_wmc_permission_denied_response(data: Dict[str, Any]) -> bool:
     if not isinstance(data, dict):
         return False
@@ -533,6 +550,8 @@ def looks_like_logged_out(data: Dict[str, Any]) -> bool:
         return True
     # 兜底：根据文本判断
     msg_l = msg.lower()
+    if _response_value_is_go_to_home(data) and not _msg_is_go_to_home(msg_l):
+        return True
     if _msg_is_go_to_home(msg_l):
         return True
     for kw in (
@@ -2570,6 +2589,33 @@ def poll_once(
         target.cookie = str(state.get("cookie") or target.cookie)
 
     data_dir = config_path.parent / "data"
+    # 平台维护是平台级状态，不把所有账号的 goHome/no_systemtime 误判成账号掉线。
+    # 探针只读取结构化维护接口，避免会员 service_main 页面内置的历史隐藏模板造成误报。
+    platform_state = refresh_backend_maintenance_state(
+        session=session,
+        base_url=target.base_url,
+        data_dir_or_path=data_dir,
+        cookie=target.cookie,
+        proxy=target.proxy,
+        timeout_s=min(8, timeout_s),
+    )
+    if is_platform_maintenance(platform_state):
+        state["last_status"] = "maintenance"
+        state["last_error_code"] = PLATFORM_MAINTENANCE_CODE
+        state["last_error_msg"] = maintenance_status_message(platform_state)
+        state["platform_status"] = "maintenance"
+        state["platform_maintenance_until"] = float(platform_state.get("maintenance_until") or 0.0)
+        state["platform_maintenance_start_at"] = float(platform_state.get("maintenance_start_at") or 0.0)
+        state["relogin_in_progress"] = 0
+        state["relogin_started_at"] = 0
+        # 维护期间不递增错误、不更新冷却、不启动重登。
+        save_state(state_dir, target.name, state)
+        if debug and not only_orders:
+            print(f"[{now_cn()}] [{target.name}] {maintenance_status_message(platform_state)}，暂停本轮请求", flush=True)
+        return
+    state["platform_status"] = str(platform_state.get("status") or "unknown")
+    state["platform_maintenance_until"] = float(platform_state.get("maintenance_until") or 0.0)
+    state["platform_maintenance_start_at"] = float(platform_state.get("maintenance_start_at") or 0.0)
     if target.cooldown_on_m_rep:
         cooldown_until = float(state.get("cooldown_until") or 0)
         if cooldown_until and now_ts() < cooldown_until:
@@ -2858,6 +2904,7 @@ def poll_once(
     state["cooldown_until"] = 0
     # 若之前进入过重登流程或状态文件残留标记，一旦成功拉单就应清除黄灯
     state["relogin_in_progress"] = 0
+    record_platform_business_success(data_dir, kind="backend")
 
     # 首次初始化：只同步 maxid，不把返回列表当作新注单（避免启动/新增账号时把历史单刷出来）
     if not int(state.get("initialized") or 0):
@@ -3130,14 +3177,31 @@ def main() -> int:
     cfg_mtime = file_mtime(cfg_path)
     targets_by_name: Dict[str, Target] = {t.name: t for t in targets}
 
+    # 在任何启动重登之前先确认平台是否维护，防止维护期间弹出多个登录窗口。
+    maintenance_session = make_poll_session()
+    try:
+        first_target = targets[0]
+        refresh_backend_maintenance_state(
+            session=maintenance_session,
+            base_url=first_target.base_url,
+            data_dir_or_path=cfg_path.parent / "data",
+            cookie=first_target.cookie,
+            proxy=first_target.proxy,
+            timeout_s=min(8, max(1, int(args.timeout))),
+            min_probe_interval_s=1,
+        )
+    finally:
+        maintenance_session.close()
+
     # 启动时可选：先执行一次自动登录/刷新 Cookie（你即使有 Cookie，也想“启动就自动登录”时用）
-    maybe_relogin_on_start(
-        targets=targets,
-        force=bool(args.relogin_on_start),
-        state_dir=state_dir,
-        cfg_path=cfg_path,
-        debug=bool(args.debug),
-    )
+    if not is_platform_maintenance(read_platform_state(cfg_path.parent / "data")):
+        maybe_relogin_on_start(
+            targets=targets,
+            force=bool(args.relogin_on_start),
+            state_dir=state_dir,
+            cfg_path=cfg_path,
+            debug=bool(args.debug),
+        )
 
     if args.debug:
         print(f"[{now_cn()}] 启动：targets={len(targets)} interval={args.interval}s state_dir={state_dir}", flush=True)
@@ -3217,6 +3281,18 @@ def main() -> int:
                     try:
                         st0 = load_state(state_dir, target.name)
                         if int(st0.get("manual_relogin") or 0) == 1:
+                            if is_platform_maintenance(read_platform_state(cfg_path.parent / "data")):
+                                st0["manual_relogin"] = 0
+                                st0["manual_relogin_requested_at"] = 0
+                                st0["last_status"] = "maintenance"
+                                st0["last_error_code"] = PLATFORM_MAINTENANCE_CODE
+                                st0["last_error_msg"] = maintenance_status_message(
+                                    read_platform_state(cfg_path.parent / "data")
+                                )
+                                st0["relogin_in_progress"] = 0
+                                st0["relogin_started_at"] = 0
+                                save_state(state_dir, target.name, st0)
+                                return target.name, None
                             st0["manual_relogin"] = 0
                             st0["manual_relogin_requested_at"] = 0
                             # last_relogin_at 由 WebUI 置 0 用于绕过间隔，这里保持不改动

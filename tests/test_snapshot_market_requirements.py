@@ -93,9 +93,71 @@ class SnapshotMarketRequirementsTest(unittest.TestCase):
             "market_type": "HANDICAP",
             "period": "FULL_TIME",
             "side": "HOME",
-            "target_line": 0.5,
+            "target_line": -0.5,
         }
         self.assertTrue(server._snapshot_market_matches(snapshot, demand))
+
+    def test_market_match_uses_selected_side_signed_prematch_handicap(self) -> None:
+        import hdzz.api.webui.server as server
+
+        snapshot = {
+            "simple": {
+                "handicap": {
+                    "lines": [
+                        {
+                            "gid": "9018529",
+                            "rawLine": "0.5",
+                            "wtype": "R",
+                            "strong": "H",
+                            "home": {"line": "-0.5", "params": {"wtype": "R"}},
+                            "away": {"line": "+0.5", "params": {"wtype": "R"}},
+                        }
+                    ]
+                }
+            }
+        }
+        demand = {
+            "gid": "9018529",
+            "mode": "today",
+            "market_type": "HANDICAP",
+            "period": "FULL_TIME",
+            "side": "HOME",
+            "target_line": -0.5,
+        }
+
+        self.assertTrue(server._snapshot_market_matches(snapshot, demand))
+        demand["target_line"] = 0.5
+        self.assertFalse(server._snapshot_market_matches(snapshot, demand))
+
+        demand["target_line"] = -0.5
+        filters = []
+
+        def fake_fetch(**kwargs):
+            filters.append(kwargs["market_filter"])
+            result = dict(snapshot)
+            result["_snapshot_diagnostics"] = server._snapshot_market_diagnostics(
+                result, [demand]
+            )
+            return result
+
+        with patch.object(
+            server,
+            "_chashui_get_odds_snapshot_by_resolved",
+            side_effect=fake_fetch,
+        ):
+            result = server._chashui_get_odds_snapshot_with_empty_retry(
+                session=object(),
+                member={},
+                resolved={"gid": "9018529", "mode": "today"},
+                include_raw=False,
+                confirm_odds=False,
+                timeout_s=1,
+                attempts=3,
+                required_markets=[demand],
+            )
+
+        self.assertEqual(filters, ["Main"])
+        self.assertEqual(result["snapshot_fetch_filter"], "Main")
 
     def test_market_match_accepts_corner_half_integer_display_line(self) -> None:
         import hdzz.api.webui.server as server

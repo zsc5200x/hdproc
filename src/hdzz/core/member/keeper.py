@@ -44,6 +44,13 @@ from hdzz.core.member.session_state import (
     cookie_names as session_cookie_names,
     session_fingerprint as member_session_fingerprint,
 )
+from hdzz.common.platform_maintenance import (
+    PLATFORM_MAINTENANCE_CODE,
+    is_platform_maintenance,
+    maintenance_status_message,
+    read_platform_state,
+    record_platform_business_success,
+)
 
 try:
     import urllib3  # type: ignore
@@ -1513,10 +1520,10 @@ def relogin_member_via_playwright(
                 session_ready_reason=str(capture.get("session_ready_reason") or "SESSION_NOT_STABLE"),
             )
         finally:
-            try:
-                ctx.close()
-            except Exception:
-                pass
+            # sync_playwright() 退出时会统一停止 transport/driver。
+            # 原生 persistent context 在成功复用会话后显式 ctx.close() 可能一直等待
+            # Chrome 的关闭确认，阻塞会员线程池并让后续恢复探活无法继续。
+            pass
 
 
 def relogin_member_via_adspower(
@@ -2163,6 +2170,10 @@ def ensure_member_defaults(m: Dict[str, Any]) -> Dict[str, Any]:
     x.setdefault("last_error", "")
     x.setdefault("last_systemtime", "")
     x.setdefault("last_systemtime_at", 0)
+    x.setdefault("session_status", x.get("status") or "unknown")
+    x.setdefault("platform_status", "unknown")
+    x.setdefault("platform_maintenance_start_at", 0)
+    x.setdefault("platform_maintenance_until", 0)
     x.setdefault("manual_login_requested_at", 0)
     x.setdefault("request_fail_count", 0)
     x.setdefault("request_cooldown_until", 0)
@@ -2348,6 +2359,40 @@ def process_member(
 
     now = now_ts()
 
+    platform_state = read_platform_state(doc_path.parent)
+    platform_status = str(platform_state.get("status") or "unknown").strip().lower()
+    if is_platform_maintenance(platform_state):
+        patch_member(
+            doc_path,
+            member_id,
+            {
+                "status": "maintenance",
+                "session_status": prev_status if prev_status not in {"maintenance", "recovering"} else str(m.get("session_status") or "unknown"),
+                "platform_status": "maintenance",
+                "platform_maintenance_start_at": float(platform_state.get("maintenance_start_at") or 0.0),
+                "platform_maintenance_until": float(platform_state.get("maintenance_until") or 0.0),
+                "last_error": maintenance_status_message(platform_state),
+                "manual_login_requested_at": 0,
+                "request_cooldown_until": 0,
+                "relogin_backoff_until": 0,
+            },
+        )
+        return
+
+    recovering_platform = platform_status == "recovering"
+    if recovering_platform and not has_session:
+        patch_member(
+            doc_path,
+            member_id,
+            {
+                "status": "maintenance",
+                "platform_status": "recovering",
+                "last_error": "平台维护结束，等待原会话验证完成",
+                "manual_login_requested_at": 0,
+            },
+        )
+        return
+
     if force_manual_login:
         try:
             patch_member(doc_path, member_id, {"manual_login_requested_at": 0})
@@ -2369,7 +2414,9 @@ def process_member(
 
     if session_provider == "adspower":
         need_ads_sync = False
-        if not (uid and cookie and ver):
+        if recovering_platform:
+            need_ads_sync = False
+        elif not (uid and cookie and ver):
             need_ads_sync = True
         elif prev_status in {"offline", "relogin", "unknown"}:
             need_ads_sync = True
@@ -2400,6 +2447,8 @@ def process_member(
                     "mid": rr_ads.mid,
                     "ver": rr_ads.ver or ver,
                     "status": "online",
+                    "session_status": "online",
+                    "platform_status": platform_status,
                     "last_ok_at": now,
                     "last_error": "",
                     "adspower_last_sync_at": now,
@@ -2416,6 +2465,8 @@ def process_member(
                     patch_ads["proxy"] = rr_ads.proxy
                     proxy = _normalize_proxy_input(str(rr_ads.proxy))
                 patch_member(doc_path, member_id, patch_ads)
+                # AdsPower 会话同步成功也代表会员业务链路已恢复。
+                record_platform_business_success(doc_path.parent, kind="member")
                 uid = rr_ads.uid
                 cookie = rr_ads.cookie
                 ver = rr_ads.ver or ver
@@ -2515,6 +2566,8 @@ def process_member(
             patch.update(
                 {
                     "status": "online",
+                    "session_status": "online",
+                    "platform_status": platform_status,
                     "last_ok_at": now,
                     "last_error": "",
                     "network_health": "healthy",
@@ -2527,6 +2580,7 @@ def process_member(
                 }
             )
             patch_member(doc_path, member_id, patch)
+            record_platform_business_success(doc_path.parent, kind="member")
             if prev_status != "online":
                 log_and_maybe_push(
                     config_path=Path("config.json"),
@@ -2549,6 +2603,20 @@ def process_member(
         err_lower = err.lower()
         is_double_login = err_lower.startswith("double_login")
         is_login_invalid = _is_login_invalid_keepalive_error(err, data_obj)
+        if recovering_platform and not (is_double_login or is_login_invalid):
+            patch_member(
+                doc_path,
+                member_id,
+                {
+                    "status": "maintenance",
+                    "platform_status": "recovering",
+                    "last_error": "平台维护结束，正在验证原会话",
+                    "manual_login_requested_at": 0,
+                    "request_cooldown_until": 0,
+                    "relogin_backoff_until": 0,
+                },
+            )
+            return
         if is_login_invalid:
             force_session_invalid_relogin = True
         if session_provider == "adspower" and (is_double_login or is_login_invalid):
@@ -2766,6 +2834,8 @@ def process_member(
                 "mid": rr_ads2.mid,
                 "ver": rr_ads2.ver or ver,
                 "status": "online",
+                "session_status": "online",
+                "platform_status": platform_status,
                 "last_ok_at": now_ts(),
                 "last_error": "",
                 "relogin_fail_count": 0,
@@ -2794,6 +2864,7 @@ def process_member(
             except Exception:
                 pass
             patch_member(doc_path, member_id, patch_ads2)
+            record_platform_business_success(doc_path.parent, kind="member")
             log_and_maybe_push(
                 config_path=Path("config.json"),
                 data_dir=doc_path.parent,
@@ -2894,6 +2965,8 @@ def process_member(
             "mid": rr.mid,
             "ver": rr.ver or ver,
             "status": "online",
+            "session_status": "online",
+            "platform_status": platform_status,
             "last_ok_at": now_ts(),
             "last_error": "",
             "relogin_fail_count": 0,
@@ -2921,6 +2994,7 @@ def process_member(
         except Exception:
             pass
         patch_member(doc_path, member_id, patch)
+        record_platform_business_success(doc_path.parent, kind="member")
         log_and_maybe_push(
             config_path=Path("config.json"),
             data_dir=doc_path.parent,
@@ -2956,6 +3030,8 @@ def process_member(
                     "mid": rr2.mid,
                     "ver": rr2.ver or ver,
                     "status": "online",
+                    "session_status": "online",
+                    "platform_status": platform_status,
                     "last_ok_at": now_ts(),
                     "last_error": "",
                     "relogin_fail_count": 0,
@@ -2970,6 +3046,7 @@ def process_member(
                 if rr2.base_url:
                     patch["base_url"] = rr2.base_url
                 patch_member(doc_path, member_id, patch)
+                record_platform_business_success(doc_path.parent, kind="member")
                 log_and_maybe_push(
                     config_path=Path("config.json"),
                     data_dir=doc_path.parent,

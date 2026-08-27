@@ -19,7 +19,6 @@ let dashboardCounts = {};
 let activeTaskFilter = 'all';
 let activeLogFilter = 'all';
 let activeLogSplit = 'all';
-let snapshotRevision = 0;
 let lastQueueMeta = { updatedAt: '', serverTime: '' };
 let queueRefreshInFlight = null;
 let executionResultsRefreshInFlight = null;
@@ -34,6 +33,7 @@ const RECOMMENDED_CONFIG = {
 };
 
 let followSettingsCache = null;
+let currentFollowSettings = {};
 
 const ERROR_MESSAGES = {
   ODDS_CHANGED: {
@@ -431,6 +431,97 @@ function setConfigStatus(text, cls) {
   } catch {}
 }
 
+function finiteParameterNumber(value) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatParameterNumber(value) {
+  const number = finiteParameterNumber(value);
+  if (number == null) return '-';
+  if (Number.isInteger(number)) return String(number);
+  return number.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function formatParameterLimit(value) {
+  const number = finiteParameterNumber(value);
+  return number != null && number > 0 ? `¥${formatAmount(number)}` : '不限';
+}
+
+function formatParameterOddsRange(minValue, maxValue) {
+  const min = finiteParameterNumber(minValue);
+  const max = finiteParameterNumber(maxValue);
+  if (min != null && max != null) return `${formatParameterNumber(min)} - ${formatParameterNumber(max)}`;
+  if (min != null) return `≥ ${formatParameterNumber(min)}`;
+  if (max != null) return `≤ ${formatParameterNumber(max)}`;
+  return '不限';
+}
+
+function formatReverseMode(reverseRules) {
+  const rules = reverseRules && typeof reverseRules === 'object' ? reverseRules : {};
+  if (rules.all === true) return '全局反打';
+
+  const enabledRules = [];
+  if (rules.total === true) enabledRules.push('大小球');
+  if (rules.handicap === true) enabledRules.push('让球');
+  return enabledRules.length ? enabledRules.join(' + ') : '关闭';
+}
+
+function buildFollowParameterView(settings) {
+  const src = settings && typeof settings === 'object' ? settings : {};
+  const mode = String(src.mode || 'ratio').trim().toLowerCase();
+  const ratio = finiteParameterNumber(src.ratio_percent);
+  const fixedAmount = finiteParameterNumber(src.fixed_amount);
+  const splitCount = finiteParameterNumber(src.split_count);
+  const splitDelay = finiteParameterNumber(src.split_delay_seconds);
+  const executionMode = String(src.execution_mode || '').trim().toLowerCase();
+  const executionLabel = executionMode === 'snapshot_direct'
+    ? 'Snapshot 直连'
+    : executionMode === 'source_order_direct'
+      ? '原单直连'
+      : executionMode
+        ? executionMode
+        : '默认执行';
+  return {
+    followAmount: mode === 'fixed'
+      ? `固定 ¥${formatAmount(fixedAmount == null ? 0 : fixedAmount)}`
+      : `比例 ${formatParameterNumber(ratio == null ? 100 : ratio)}%`,
+    splitCount: `${Math.max(1, Math.round(splitCount == null ? 1 : splitCount))} 单`,
+    splitDelay: splitDelay != null && splitDelay > 0 ? `${formatParameterNumber(splitDelay)} 秒` : '无延迟',
+    matchLimit: formatParameterLimit(src.match_limit_amount),
+    marketLimit: formatParameterLimit(src.market_limit_amount),
+    oddsRange: formatParameterOddsRange(src.follow_min_odds, src.follow_max_odds),
+    onlyLive: src.only_live === true ? '已开启' : '关闭',
+    reverseMode: formatReverseMode(src.reverse_rules),
+    executionMode: executionLabel,
+    updatedAt: String(src.updated_at || '').trim().split(' ').pop() || '实时',
+  };
+}
+
+function setCurrentParameter(id, value, tone) {
+  const element = $(id);
+  if (!element) return;
+  const text = String(value || '-');
+  element.textContent = text;
+  element.title = text;
+  element.dataset.tone = tone || 'default';
+}
+
+function renderCurrentFollowParameters(settings) {
+  const view = buildFollowParameterView(settings);
+  setCurrentParameter('paramFollowAmount', view.followAmount, 'active');
+  setCurrentParameter('paramSplitCount', view.splitCount, 'mode');
+  setCurrentParameter('paramSplitDelay', view.splitDelay, view.splitDelay === '无延迟' ? 'unlimited' : 'default');
+  setCurrentParameter('paramMatchLimit', view.matchLimit, view.matchLimit === '不限' ? 'unlimited' : 'default');
+  setCurrentParameter('paramMarketLimit', view.marketLimit, view.marketLimit === '不限' ? 'unlimited' : 'default');
+  setCurrentParameter('paramOddsRange', view.oddsRange, view.oddsRange === '不限' ? 'unlimited' : 'default');
+  setCurrentParameter('paramOnlyLive', view.onlyLive, view.onlyLive === '关闭' ? 'off' : 'active');
+  setCurrentParameter('paramReverseMode', view.reverseMode, view.reverseMode === '关闭' ? 'off' : 'active');
+  setCurrentParameter('paramExecutionMode', view.executionMode, 'mode');
+  setText('currentParamsUpdated', view.updatedAt);
+}
+
 function normalizeFollowSettings(doc) {
   const src = doc && typeof doc === 'object' ? doc : {};
   return {
@@ -495,10 +586,13 @@ async function loadFollowSettings() {
   try {
     const data = await fetchJson('/api/follow-settings');
     const settings = data && data.settings ? data.settings : {};
+    currentFollowSettings = settings && typeof settings === 'object' ? settings : {};
     followSettingsCache = normalizeFollowSettings(settings);
     applyConfigToForm(followSettingsCache);
+    renderCurrentFollowParameters(currentFollowSettings);
     setConfigStatus('已同步', 'ok');
   } catch (e) {
+    setText('currentParamsUpdated', '加载失败');
     setConfigStatus('加载失败', 'warn');
     setErrBox(e.message || String(e));
   }
@@ -512,8 +606,10 @@ async function saveFollowSettings() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ settings: payload }),
     });
-    followSettingsCache = normalizeFollowSettings(data && data.settings ? data.settings : payload);
+    currentFollowSettings = data && data.settings ? data.settings : { ...currentFollowSettings, ...payload };
+    followSettingsCache = normalizeFollowSettings(currentFollowSettings);
     applyConfigToForm(followSettingsCache);
+    renderCurrentFollowParameters(currentFollowSettings);
     setConfigStatus('保存成功', 'ok');
     setErrBox('-');
   } catch (e) {
@@ -1301,8 +1397,12 @@ function renderOrderPool() {
     const teams = splitOrderMatch(group.match);
     const tags = orderMarketTags(group);
     const cardMarket = orderCardMarket(group);
+    const league = String(group.league || '').trim();
+    const leagueMarkup = league && league !== '-'
+      ? `<span class="orderLeague" title="${escapeHtml(league)}">${escapeHtml(league)}</span>`
+      : '';
     const matchMarkup = teams.separated
-      ? `<div class="orderTeam homeTeam"><span>主队</span><strong title="${escapeHtml(teams.home)}">${escapeHtml(teams.home)}</strong></div><span class="orderVersus" aria-hidden="true">VS</span><div class="orderTeam awayTeam"><span>客队</span><strong title="${escapeHtml(teams.away)}">${escapeHtml(teams.away)}</strong></div>`
+      ? `<div class="orderTeam homeTeam"><strong title="${escapeHtml(teams.home)}">${escapeHtml(teams.home)}</strong></div><span class="orderVersus" aria-hidden="true">VS</span><div class="orderTeam awayTeam"><strong title="${escapeHtml(teams.away)}">${escapeHtml(teams.away)}</strong></div>`
       : `<div class="orderTeam singleTeam"><span>比赛</span><strong title="${escapeHtml(teams.home)}">${escapeHtml(teams.home)}</strong></div>`;
     const tagMarkup = [tags.market, tags.period, tags.mode]
       .filter(Boolean)
@@ -1312,10 +1412,11 @@ function renderOrderPool() {
       <section class="orderGroup orderSummaryCard ${groupStatus}" data-order-key="${escapeHtml(group.key)}" aria-label="订单 #${escapeHtml(group.orderId)}">
         <header class="orderCardTop">
           <div class="orderCardTitle">
-            <span>订单</span><strong>#${escapeHtml(group.orderId)}</strong><i aria-hidden="true"></i><b>${taskCount} 单</b>
+            <span>订单</span><strong>#${escapeHtml(group.orderId)}</strong><i class="orderTitleDivider" aria-hidden="true"></i><b>${taskCount} 单</b>
             <span class="orderCardTags" aria-label="订单玩法">${tagMarkup}</span>
             <time class="orderCardTime" datetime="${escapeHtml(orderDate.replace(' ', 'T'))}"><i class="fa-regular fa-clock" aria-hidden="true"></i>${escapeHtml(orderDate)}</time>
           </div>
+          ${leagueMarkup}
           <span class="orderStatusBadge ${groupStatus}"><i class="fa-solid ${statusIcon(groupStatus)}" aria-hidden="true"></i>${orderStatusLabel(groupStatus)}</span>
         </header>
         <div class="orderMatchPanel ${teams.separated ? '' : 'singleMatch'}" aria-label="${escapeHtml(group.match)}">${matchMarkup}</div>
@@ -1406,11 +1507,6 @@ function renderExecutionLog() {
   updateHtmlIfChanged(box, nextHtml, box);
 }
 
-function snapshotVersion() {
-  const seed = String(lastQueueMeta.updatedAt || Date.now()).replace(/\D/g, '').slice(-6);
-  return `S${String(seed || snapshotRevision).padStart(6, '0')}`;
-}
-
 function renderPerformanceAndSnapshot() {
   const tasks = flattenExecutionTasks(dashboardTaskGroups);
   const waiting = tasks.filter((task) => task.status === 'waiting' || task.status === 'retry').length;
@@ -1428,19 +1524,11 @@ function renderPerformanceAndSnapshot() {
   const avgFtBet = ftBetTimings.length ? ftBetTimings.reduce((sum, value) => sum + value, 0) / ftBetTimings.length : null;
   const avgOrder = orderTimings.length ? orderTimings.reduce((sum, value) => sum + value, 0) / orderTimings.length : null;
   const load = online ? Math.min(100, (running / online) * 100) : 0;
-  const health = executionMembers.length ? (online / executionMembers.length) * 100 : 0;
-  const version = snapshotVersion();
-  const games = new Set(tasks.map((task) => task.gid).filter(Boolean));
 
   setText('kpiSuccessRate', `${successRate.toFixed(1)}%`);
   setText('kpiAvgAttempt', avgAttempt == null ? '-' : `${avgAttempt.toFixed(2)}s`);
   setText('kpiAvgFtBet', avgFtBet == null ? '-' : `${avgFtBet.toFixed(2)}s`);
   setText('kpiAvgOrderElapsed', avgOrder == null ? '-' : `${avgOrder.toFixed(2)}s`);
-  setText('kpiSnapshotVersion', version);
-  setText('kpiHealth', `${health.toFixed(1)}%`);
-  setText('kpiHealthState', health >= 90 ? 'Healthy' : health >= 60 ? 'Degraded' : 'Attention');
-  const healthState = $('kpiHealthState');
-  if (healthState) healthState.dataset.state = health >= 90 ? 'healthy' : health >= 60 ? 'degraded' : 'attention';
   setText('stSystemLoad', `${load.toFixed(0)}%`);
   setText('stHistoryTasks', toCount(dashboardCounts.done));
   setText('stSuccessCount', success);
@@ -1887,7 +1975,6 @@ async function refreshQueueOnce() {
       dashboardQueueItems = Array.isArray(data.items) ? data.items : [];
       dashboardCounts = data.counts && typeof data.counts === 'object' ? data.counts : {};
       lastQueueMeta = { updatedAt: String(data.updated_at || ''), serverTime: String(data.server_time || '') };
-      snapshotRevision += 1;
       setText('stServerTime', `服务器时间：${data.server_time || '-'}`);
       const c = data.counts || {};
       const pendingOrders = toCount(c.pending_orders);
@@ -2123,6 +2210,7 @@ async function main() {
     }
     refreshMemberStatus();
     refreshExecutionResults();
+    loadFollowSettings();
   }, STATUS_REFRESH_MS);
   restartTimers();
 }

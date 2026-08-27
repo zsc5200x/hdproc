@@ -95,6 +95,49 @@ class ChashuiGamesCacheTest(unittest.TestCase):
         self.assertEqual(rows[0]["GID"], "8994661")
         self.assertEqual(rows[0]["HGID"], "8994662")
 
+    def test_telegram_signal_game_loader_uses_member_and_sanitizes_output(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+        from hdzz.api.webui import server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            arsenal_path = Path(tmp) / "arsenal.json"
+            arsenal_path.write_text(
+                json.dumps(
+                    {
+                        "members": [
+                            {
+                                "id": "read-1",
+                                "usage": "read",
+                                "role": "quote",
+                                "status": "online",
+                                "base_url": "https://example.test",
+                                "uid": "secret-uid",
+                                "ver": "secret-ver",
+                                "cookie": "secret-cookie",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            xml = (
+                "<serverresponse><game><GID>9000001</GID><LEAGUE>中美洲杯</LEAGUE>"
+                "<TEAM_H>希尔迪奥诺</TEAM_H><TEAM_C>安提瓜</TEAM_C>"
+                "<GNUM_H>712001</GNUM_H><GNUM_C>712002</GNUM_C></game></serverresponse>"
+            )
+            with patch.object(server, "_make_member_session", return_value=object()), patch.object(
+                server, "_chashui_get_game_list_xml", return_value=xml
+            ):
+                payload = server._telegram_signal_load_games(arsenal_path, mode="live")
+
+        encoded = json.dumps(payload)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["games"][0]["gid"], "9000001")
+        self.assertNotIn("secret-uid", encoded)
+        self.assertNotIn("secret-cookie", encoded)
+
     def test_resolve_game_by_half_gid_uses_parent_game(self) -> None:
         from hdzz.api.webui import server
 

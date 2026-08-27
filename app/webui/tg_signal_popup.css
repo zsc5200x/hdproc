@@ -268,9 +268,15 @@
 .tg-signal-table-wrap th:nth-child(6) { width: 112px; }
 .tg-signal-event-status { display: inline-block; padding: 2px 6px; border-radius: 4px; background: rgba(56, 189, 248, 0.09); color: var(--primary); white-space: nowrap; }
 .tg-signal-event-status.error,
-.tg-signal-event-status.rejected { color: var(--loss); background: rgba(244, 63, 94, 0.08); }
+.tg-signal-event-status.rejected,
+.tg-signal-event-status.rejected_parse,
+.tg-signal-event-status.rejected_match,
+.tg-signal-event-status.worker_error { color: var(--loss); background: rgba(244, 63, 94, 0.08); }
 .tg-signal-event-status.matched,
-.tg-signal-event-status.accepted { color: var(--win); background: rgba(16, 185, 129, 0.08); }
+.tg-signal-event-status.accepted,
+.tg-signal-event-status.injected { color: var(--win); background: rgba(16, 185, 129, 0.08); }
+.tg-signal-event-status.duplicate_order,
+.tg-signal-event-status.duplicate_message { color: var(--odds); background: rgba(251, 191, 36, 0.08); }
 
 @media (max-width: 920px) {
   .config-popup-box.tg-config { width: calc(100vw - 24px); height: calc(100vh - 24px); max-height: none; }

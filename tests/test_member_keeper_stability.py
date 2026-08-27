@@ -5,6 +5,54 @@ from unittest.mock import patch
 
 
 class TestMemberKeeperStability(unittest.TestCase):
+    def test_platform_maintenance_pauses_member_without_relogin_or_failure_count(self) -> None:
+        from hdzz.core.member import keeper
+
+        member = keeper.ensure_member_defaults(
+            {
+                "id": "m-maintenance",
+                "label": "maintenance-user",
+                "base_url": "https://example.test",
+                "username": "maintenance-user",
+                "password": "p",
+                "uid": "u-maintenance",
+                "cookie": "c=1",
+                "ver": "v1",
+                "status": "online",
+                "request_fail_count": 4,
+                "relogin_fail_count": 2,
+            }
+        )
+
+        with (
+            patch("hdzz.core.member.keeper.read_platform_state", return_value={
+                "status": "maintenance",
+                "maintenance_start_at": 100.0,
+                "maintenance_until": 200.0,
+                "maintenance_message": "平台系统维护",
+            }),
+            patch("hdzz.core.member.keeper.patch_member") as patch_member_mock,
+            patch("hdzz.core.member.keeper.member_ping_member_data") as ping_mock,
+            patch("hdzz.core.member.keeper.relogin_member_via_playwright") as relogin_mock,
+            patch("hdzz.core.member.keeper.relogin_member_via_adspower") as ads_mock,
+        ):
+            keeper.process_member(
+                doc_path=Path("/tmp/arsenal.json"),
+                m=member,
+                user_data_root=Path("/tmp/_pw_member"),
+                ping_timeout_s=8,
+                debug=False,
+            )
+
+        self.assertFalse(ping_mock.called)
+        self.assertFalse(relogin_mock.called)
+        self.assertFalse(ads_mock.called)
+        final_patch = patch_member_mock.call_args_list[-1][0][2]
+        self.assertEqual(final_patch.get("status"), "maintenance")
+        self.assertEqual(final_patch.get("request_cooldown_until"), 0)
+        self.assertEqual(final_patch.get("relogin_backoff_until"), 0)
+        self.assertIn("平台系统维护", str(final_patch.get("last_error") or ""))
+
     def test_process_members_concurrently_does_not_serialize_slow_relogin(self) -> None:
         from hdzz.core.member import keeper
 

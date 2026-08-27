@@ -60,6 +60,12 @@ from hdzz.core.member.adspower_api import (
     normalize_adspower_api_base,
 )
 from hdzz.core.member.keeper import normalize_member_base_url
+from hdzz.common.platform_maintenance import (
+    PLATFORM_MAINTENANCE_CODE,
+    is_platform_maintenance,
+    maintenance_status_message,
+    read_platform_state,
+)
 from hdzz.core.telegram_signal.client import (
     TelegramSignalClientError,
     clear_login_session,
@@ -206,6 +212,34 @@ def build_account_status_entry(target: Dict[str, Any], state: Dict[str, Any], *,
     last_relogin_error_code = str(st.get("last_relogin_error_code") or "").strip()
     last_relogin_error_msg = _compact_status_message(st.get("last_relogin_error_msg"))
     last_relogin_failed_at = _as_float(st.get("last_relogin_failed_at"))
+    platform_status = str(st.get("platform_status") or "").strip().lower()
+    platform_until = _as_float(st.get("platform_maintenance_until"))
+    platform_start = _as_float(st.get("platform_maintenance_start_at"))
+
+    if platform_status in {"maintenance", "recovering"}:
+        recovering = platform_status == "recovering"
+        message = str(
+            st.get("last_error_msg")
+            or ("平台维护结束，正在验证原有会话" if recovering else "平台系统维护")
+        )
+        return {
+            "status": "recovering" if recovering else "maintenance",
+            "last_ok_at": last_ok_at,
+            "last_poll_at": last_poll_at,
+            "last_error_code": PLATFORM_MAINTENANCE_CODE,
+            "last_error_msg": message,
+            "last_relogin_error_code": last_relogin_error_code,
+            "last_relogin_error_msg": last_relogin_error_msg,
+            "last_relogin_failed_at": last_relogin_failed_at,
+            "relogin_in_progress": False,
+            "relogin_started_at": 0.0,
+            "has_session": bool(str(st.get("cookie") or t.get("cookie") or "").strip() or str(st.get("uid") or t.get("uid") or "").strip()),
+            "needs_manual_login": False,
+            "status_message": message,
+            "platform_status": platform_status,
+            "maintenance_start_at": platform_start,
+            "maintenance_until": platform_until,
+        }
 
     status = "offline"
     if last_ok_at and (ts - last_ok_at) <= float(TARGET_ONLINE_TTL_S):
@@ -256,6 +290,9 @@ def build_account_status_entry(target: Dict[str, Any], state: Dict[str, Any], *,
         "has_session": bool(has_session),
         "needs_manual_login": bool(needs_manual_login),
         "status_message": status_message,
+        "platform_status": platform_status or "online",
+        "maintenance_start_at": platform_start,
+        "maintenance_until": platform_until,
     }
 
 
@@ -701,6 +738,50 @@ def telegram_signal_worker_running_flag() -> Tuple[bool, Optional[int]]:
         return (True, alive[0]) if alive else (False, None)
     except Exception:
         return False, None
+
+
+def telegram_signal_worker_health_status(
+    alive: bool,
+    pid: Optional[int],
+    health_path: Path = Path(".run/telegram_signal_health.json"),
+) -> Dict[str, Any]:
+    base: Dict[str, Any] = {
+        "worker_alive": bool(alive),
+        "worker_running": False,
+        "worker_healthy": False,
+        "worker_pid": pid,
+        "worker_state": "stopped" if not alive else "unknown",
+    }
+    if not alive or not pid:
+        return base
+    try:
+        payload = json.loads(Path(health_path).read_text(encoding="utf-8-sig") or "{}")
+    except Exception:
+        # Older listeners do not write health information. Keep the legacy
+        # status until the next restart loads the health-aware worker.
+        base.update({"worker_running": True, "worker_healthy": None})
+        return base
+    if not isinstance(payload, dict) or int(payload.get("pid") or 0) != int(pid):
+        base["worker_state"] = "stale"
+        return base
+    try:
+        heartbeat_age_ms = max(0, int(time.time() * 1000) - int(payload.get("heartbeat_at_ms") or 0))
+    except Exception:
+        heartbeat_age_ms = 10**9
+    state = str(payload.get("state") or "unknown").strip().lower()
+    healthy = state == "healthy" and heartbeat_age_ms <= 15000
+    base.update(
+        {
+            "worker_running": bool(healthy),
+            "worker_healthy": bool(healthy),
+            "worker_state": "stale" if heartbeat_age_ms > 15000 else state,
+            "worker_heartbeat_age_ms": heartbeat_age_ms,
+        }
+    )
+    error = re.sub(r"\s+", " ", str(payload.get("error") or "")).strip()
+    if error:
+        base["worker_error"] = error[:240]
+    return base
 
 def _run_app_command(args: List[str], timeout_s: int = 20) -> Tuple[int, str]:
     runtime_dir = os.getcwd()
@@ -4147,6 +4228,88 @@ def _chashui_simplify_games(games: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return out
 
 
+def _telegram_signal_load_games(arsenal_path: Path, *, mode: str) -> Dict[str, Any]:
+    """Resolve fixture identities for TG intake without exposing credentials or odds."""
+    mode2 = _chashui_normalize_mode(mode)
+    doc = read_json_file(Path(arsenal_path), {"members": []})
+    members_raw = doc.get("members") if isinstance(doc, dict) else []
+    members = [member for member in (members_raw or []) if isinstance(member, dict)]
+
+    def load_for_member(member: Dict[str, Any]) -> Dict[str, Any]:
+        member_id = str(member.get("id") or "").strip()
+        base_url = str(member.get("base_url") or "").strip()
+        uid = str(member.get("uid") or "").strip()
+        ver = str(member.get("ver") or "").strip()
+        cookie = str(member.get("cookie") or "").strip()
+        proxy = str(member.get("proxy") or "").strip()
+        if not (member_id and base_url and uid and ver and cookie):
+            raise RuntimeError("member_missing_uid_cookie_ver")
+
+        cached = _get_chashui_games_cache(member_id, mode2)
+        if cached:
+            return {"mode": mode2, "games": cached["games"], "cached": True}
+
+        session = _make_member_session(base_url=base_url, proxy=proxy, cookie=cookie)
+        xml_text = _chashui_get_game_list_xml(
+            session=session,
+            base_url=base_url,
+            ver=ver,
+            uid=uid,
+            mode=mode2,
+            timeout_s=10,
+        )
+        raw_text = str(xml_text or "").strip()
+        if not raw_text:
+            raise RuntimeError("game_list_empty_response")
+        if not raw_text.startswith("<"):
+            raise RuntimeError(f"game_list_non_xml: {raw_text[:160]}")
+        games_raw = _chashui_parse_game_list_original(raw_text) or _chashui_parse_game_list_xml_games(raw_text)
+        games = _chashui_simplify_games(games_raw)
+        _set_chashui_games_cache(member_id, mode2, games)
+        return {"mode": mode2, "games": games, "cached": False}
+
+    run = _run_readonly_member_with_failover(
+        arsenal_path=Path(arsenal_path),
+        members=members,
+        lane="telegram_signal_games",
+        runner=load_for_member,
+    )
+    if run.get("ok"):
+        payload = dict(run.get("result") or {})
+        payload.update(
+            {
+                "ok": True,
+                "readonly_member": _readonly_member_ref(run.get("member")),
+                "fallback_used": bool(run.get("fallback_used")),
+            }
+        )
+        return payload
+
+    for attempted_id in run.get("attempted_member_ids") or []:
+        stale = _get_chashui_games_cache(
+            attempted_id,
+            mode2,
+            allow_stale_s=CHASHUI_GAMES_CACHE_STALE_TTL_S,
+        )
+        if stale:
+            return {
+                "ok": True,
+                "mode": mode2,
+                "games": stale["games"],
+                "cached": True,
+                "stale": True,
+                "warning": str(run.get("error") or "game_list_failed"),
+                "fallback_used": bool(run.get("fallback_used")),
+            }
+    return {
+        "ok": False,
+        "mode": mode2,
+        "games": [],
+        "message": str(run.get("error") or "readonly_pool_empty"),
+        "fallback_used": bool(run.get("fallback_used")),
+    }
+
+
 def _xml_tag_value(xml_text: str, tag: str) -> str:
     t = str(xml_text or "")
     k = str(tag or "").strip()
@@ -4940,7 +5103,16 @@ def _snapshot_market_matches(snapshot: Dict[str, Any], demand: Dict[str, Any]) -
             continue
         if target_value is None:
             return True
-        current = _line_average(line.get("rawLine") or side.get("line"))
+        # Handicap ``rawLine`` is only the unsigned board magnitude.  The
+        # selected side owns the actual signed line (for example, a home
+        # favourite is ``-0.5`` while rawLine is ``0.5``).  Comparing the
+        # unsigned value makes a valid favourite order look missing and sends
+        # the snapshot worker through every Main/All retry until its deadline.
+        current = (
+            _signed_line_average(side.get("line") or line.get("rawLine"))
+            if market_type == "HANDICAP"
+            else _line_average(line.get("rawLine") or side.get("line"))
+        )
         if current == current and line_matches(
             target_value,
             current,
@@ -5215,21 +5387,39 @@ class Handler(SimpleHTTPRequestHandler):
             secret_status = sanitize_telegram_signal_secret_status(
                 load_telegram_signal_secrets(self._data_dir / "telegram_signal_secrets.json")
             )
-            running, pid = telegram_signal_worker_running_flag()
+            alive, pid = telegram_signal_worker_running_flag()
+            worker_status = telegram_signal_worker_health_status(
+                alive,
+                pid,
+                self._data_dir.parent / ".run/telegram_signal_health.json",
+            )
             self._send_json(
                 200,
                 {
                     "ok": True,
                     "settings": settings,
                     **secret_status,
-                    "worker_running": bool(running),
-                    "worker_pid": pid,
+                    **worker_status,
                     "server_time": now_iso(),
                 },
             )
             return
 
         if u.path == "/api/telegram-signal/chats":
+            alive, _pid = telegram_signal_worker_running_flag()
+            if alive:
+                settings = load_telegram_signal_settings(self._data_dir / "telegram_signal.json")
+                saved = [dict(item) for item in (settings.get("source_chats") or []) if isinstance(item, dict)]
+                known = {str(item.get("id") or "").strip() for item in saved}
+                for chat_id in settings.get("source_chat_ids") or []:
+                    value = str(chat_id or "").strip()
+                    if value and value not in known:
+                        saved.append({"id": value, "title": "已保存来源", "type": "group"})
+                self._send_json(
+                    200,
+                    {"ok": True, "chats": saved, "cached": True, "server_time": now_iso()},
+                )
+                return
             try:
                 chats = list_source_dialogs(self._data_dir / "telegram_signal_secrets.json")
             except TelegramSignalClientError as exc:
@@ -5725,6 +5915,18 @@ class Handler(SimpleHTTPRequestHandler):
         # -------------------------
         # 查水（实时盘口/水位，只读）
         # -------------------------
+        if u.path == "/api/telegram-signal/games":
+            qs = parse_qs(u.query)
+            mode = _chashui_normalize_mode(str((qs.get("mode") or ["live"])[0]).strip())
+            payload = _telegram_signal_load_games(self._arsenal_path, mode=mode)
+            payload["server_time"] = now_iso()
+            if payload.get("ok"):
+                self._send_json(200, payload)
+            else:
+                status = 404 if payload.get("message") == "readonly_pool_empty" else 502
+                self._send_json(status, payload)
+            return
+
         if u.path == "/api/chashui/status":
             # 查水已移除：只返回本地会员状态，严禁展示层通过此路由触发上游访问。
             doc = read_json_file(self._arsenal_path, {"members": []})
@@ -5996,6 +6198,7 @@ class Handler(SimpleHTTPRequestHandler):
             doc = read_json_file(self._arsenal_path, {"members": []})
             members = doc.get("members") or []
             request_cooldown_enabled = _as_bool(doc.get("request_cooldown_enabled"), True)
+            platform_state = read_platform_state(self._data_dir)
             out: List[Dict[str, Any]] = []
             for m in members:
                 if not isinstance(m, dict):
@@ -6005,6 +6208,16 @@ class Handler(SimpleHTTPRequestHandler):
                     ads_sync_interval = max(1, int(m.get("adspower_sync_interval_seconds") or 5))
                 except Exception:
                     ads_sync_interval = 5
+                member_status = m.get("status") or "unknown"
+                member_error = m.get("last_error") or ""
+                if is_platform_maintenance(platform_state) or str(platform_state.get("status") or "").strip().lower() == "recovering":
+                    recovering = str(platform_state.get("status") or "").strip().lower() == "recovering"
+                    member_status = "recovering" if recovering else "maintenance"
+                    member_error = (
+                        "平台维护结束，正在验证原有会话"
+                        if recovering
+                        else maintenance_status_message(platform_state)
+                    )
                 out.append(
                     {
                         "id": m.get("id") or "",
@@ -6065,13 +6278,16 @@ class Handler(SimpleHTTPRequestHandler):
                         "proxy_label": disp.get("label") or "",
                         "proxy_ip": disp.get("proxy_ip") or "",
                         "proxy_geo": disp.get("proxy_geo"),
-                        "status": m.get("status") or "unknown",
+                        "status": member_status,
                         "last_check_at": float(m.get("last_check_at") or 0),
-                        "last_error": m.get("last_error") or "",
+                        "last_error": member_error,
                         "last_systemtime": m.get("last_systemtime") or "",
+                        "platform_status": platform_state.get("status") or "unknown",
+                        "maintenance_start_at": float(platform_state.get("maintenance_start_at") or 0),
+                        "maintenance_until": float(platform_state.get("maintenance_until") or 0),
                     }
                 )
-            self._send_json(200, {"ok": True, "members": out, "server_time": now_iso()})
+            self._send_json(200, {"ok": True, "members": out, "platform": platform_state, "server_time": now_iso()})
             return
 
         if u.path == "/api/follow-settings":
@@ -6288,12 +6504,25 @@ class Handler(SimpleHTTPRequestHandler):
             cfg = self._read_config()
             targets = cfg.get("targets") or []
             now = time.time()
+            platform_state = read_platform_state(self._data_dir)
             statuses: Dict[str, Any] = {}
             for t in targets:
                 name = str(t.get("name") or "").strip()
                 if not name:
                     continue
                 st = self._read_state(name)
+                if is_platform_maintenance(platform_state) or str(platform_state.get("status") or "").strip().lower() == "recovering":
+                    st = dict(st)
+                    recovering = str(platform_state.get("status") or "").strip().lower() == "recovering"
+                    st.update(
+                        {
+                            "platform_status": "recovering" if recovering else "maintenance",
+                            "platform_maintenance_start_at": platform_state.get("maintenance_start_at") or 0,
+                            "platform_maintenance_until": platform_state.get("maintenance_until") or 0,
+                            "last_error_code": PLATFORM_MAINTENANCE_CODE,
+                            "last_error_msg": "平台维护结束，正在验证原有会话" if recovering else maintenance_status_message(platform_state),
+                        }
+                    )
                 statuses[name] = build_account_status_entry(t, st, now=now)
 
             core_running, core_pid_count = core_running_flag()
@@ -6315,6 +6544,7 @@ class Handler(SimpleHTTPRequestHandler):
                 # 用于确认当前运行的 WebUI 版本/路径（避免启动到别的目录的旧代码）
                 "server_file": server_meta["server_file"],
                 "server_mtime": server_meta["server_mtime"],
+                "platform": platform_state,
             })
             return
 
@@ -6357,6 +6587,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _queue_manual_relogin(self, name: str) -> Tuple[bool, str]:
         try:
+            platform_state = read_platform_state(self._data_dir)
+            if is_platform_maintenance(platform_state):
+                return False, maintenance_status_message(platform_state)
             p = self._state_dir / f"{safe_name(name)}.json"
             st = read_json_file(p, {})
             if not isinstance(st, dict):
@@ -6852,6 +7085,18 @@ class Handler(SimpleHTTPRequestHandler):
             if not any(str(t.get("name") or "") == name for t in targets):
                 self._send_json(404, {"ok": False, "message": "未找到该账号"})
                 return
+            platform_state = read_platform_state(self._data_dir)
+            if is_platform_maintenance(platform_state):
+                self._send_json(
+                    409,
+                    {
+                        "ok": False,
+                        "status": "maintenance",
+                        "message": maintenance_status_message(platform_state),
+                        "platform": platform_state,
+                    },
+                )
+                return
 
             # 若 core worker 未启动，则“重登”只会写 state，不会被执行（没有进程去消费）。
             # 这里 best-effort 拉起 core，避免用户误以为“点了没反应”。
@@ -7289,6 +7534,19 @@ class Handler(SimpleHTTPRequestHandler):
                 self._send_json(404, {"ok": False, "message": "未找到该会员账号"})
                 return
 
+            platform_state = read_platform_state(self._data_dir)
+            if is_platform_maintenance(platform_state):
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "status": "maintenance",
+                        "message": maintenance_status_message(platform_state),
+                        "platform": platform_state,
+                    },
+                )
+                return
+
             base_url = normalize_member_base_url(m.get("base_url"))
             username = str(m.get("username") or "").strip()
             password = str(m.get("password") or "").strip()
@@ -7383,6 +7641,19 @@ class Handler(SimpleHTTPRequestHandler):
             member_id = str((data.get("id") or "")).strip()
             if not member_id:
                 self._send_json(400, {"ok": False, "message": "缺少 id"})
+                return
+
+            platform_state = read_platform_state(self._data_dir)
+            if is_platform_maintenance(platform_state):
+                self._send_json(
+                    409,
+                    {
+                        "ok": False,
+                        "status": "maintenance",
+                        "message": maintenance_status_message(platform_state),
+                        "platform": platform_state,
+                    },
+                )
                 return
 
             core_ok, core_started, core_err = self._ensure_core_running()

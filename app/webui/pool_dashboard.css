@@ -180,6 +180,8 @@ button.pool-kpi-card.is-active { box-shadow: inset 0 0 0 1px rgba(22, 199, 245, 
 .pool-monitor-card.is-selected { border-color: var(--ops-cyan); box-shadow: inset 0 0 0 1px rgba(22, 199, 245, 0.13); }
 .pool-monitor-card.status-online::before { background: var(--ops-green); }
 .pool-monitor-card.status-warning::before { background: var(--ops-amber); }
+.pool-monitor-card.status-maintenance::before { background: var(--ops-amber); }
+.pool-monitor-card.status-maintenance { border-color: rgba(247, 184, 61, 0.34); }
 .pool-monitor-card.status-offline::before { background: var(--ops-red); }
 .pool-monitor-card.status-offline { border-color: rgba(255, 89, 107, 0.34); }
 
@@ -192,6 +194,7 @@ button.pool-kpi-card.is-active { box-shadow: inset 0 0 0 1px rgba(22, 199, 245, 
 .pool-monitor-status > i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
 .pool-monitor-status.online { color: var(--ops-lime); border-color: rgba(167, 231, 59, 0.3); }
 .pool-monitor-status.warning { color: var(--ops-amber); border-color: rgba(247, 184, 61, 0.3); }
+.pool-monitor-status.maintenance { color: var(--ops-amber); border-color: rgba(247, 184, 61, 0.34); background: rgba(247, 184, 61, 0.07); }
 .pool-monitor-status.offline { color: #ff8795; border-color: rgba(255, 89, 107, 0.32); }
 
 .pool-monitor-time { min-width: 0; display: grid; grid-template-columns: 1fr auto; grid-template-rows: 10px 18px 10px; align-items: center; padding: 1px 0; border-top: 1px solid rgba(35, 91, 133, 0.34); border-bottom: 1px solid rgba(35, 91, 133, 0.34); }
@@ -208,6 +211,8 @@ button.pool-kpi-card.is-active { box-shadow: inset 0 0 0 1px rgba(22, 199, 245, 
 .pool-monitor-actions button:hover { color: var(--ops-text); border-color: var(--ops-border-strong); background: var(--pool-surface-raised); }
 .pool-monitor-actions button.primary { color: var(--ops-cyan); border-color: rgba(22, 199, 245, 0.34); background: rgba(22, 119, 208, 0.13); }
 .pool-monitor-actions button.danger { color: #ff8795; border-color: rgba(255, 89, 107, 0.3); background: rgba(255, 89, 107, 0.07); }
+.pool-monitor-actions button:disabled,
+.member-row-actions button:disabled { cursor: not-allowed; opacity: 0.42; pointer-events: none; }
 
 /* 会员摘要和表格 */
 .pool-member-kpis { min-width: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; margin-bottom: 5px; flex: 0 0 auto; }
@@ -249,6 +254,7 @@ button.pool-kpi-card.is-active { box-shadow: inset 0 0 0 1px rgba(22, 199, 245, 
 .member-status-badge i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .member-status-badge.online { color: var(--ops-lime); border-color: rgba(167, 231, 59, 0.28); background: rgba(167, 231, 59, 0.06); }
 .member-status-badge.warning { color: var(--ops-amber); border-color: rgba(247, 184, 61, 0.3); background: rgba(247, 184, 61, 0.06); }
+.member-status-badge.maintenance { color: var(--ops-amber); border-color: rgba(247, 184, 61, 0.34); background: rgba(247, 184, 61, 0.08); }
 .member-status-badge.offline { color: #ff8795; border-color: rgba(255, 89, 107, 0.3); background: rgba(255, 89, 107, 0.06); }
 .pool-table-select { width: 100%; height: 24px; padding: 0 19px 0 6px; border: 1px solid var(--ops-border); border-radius: 4px; color: var(--ops-text-2); background: var(--pool-surface-deep); font-size: 8px; }
 .member-balance { color: var(--ops-amber); font: 600 9px/1 "JetBrains Mono", monospace; white-space: nowrap; }
@@ -256,6 +262,8 @@ button.pool-kpi-card.is-active { box-shadow: inset 0 0 0 1px rgba(22, 199, 245, 
 .member-health > span { height: 4px; border-radius: 999px; background: var(--ops-surface-3); overflow: hidden; }
 .member-health > span i { display: block; height: 100%; border-radius: inherit; background: var(--ops-lime); }
 .member-health b { color: var(--ops-text-2); font: 500 8px/1 "JetBrains Mono", monospace; }
+.member-health.is-paused > span i { width: 0 !important; background: var(--ops-amber); }
+.member-health.is-paused b { color: var(--ops-amber); }
 .member-last-active { color: var(--pool-muted); font: 500 8px/1 "JetBrains Mono", monospace; white-space: nowrap; }
 .member-row-actions { display: flex; align-items: center; justify-content: center; gap: 3px; }
 .member-row-actions button { width: 23px; height: 23px; display: grid; place-items: center; border: 1px solid var(--ops-border); border-radius: 4px; color: var(--ops-cyan); background: var(--pool-surface-deep); font-size: 8px; cursor: pointer; }

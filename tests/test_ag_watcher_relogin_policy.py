@@ -28,6 +28,17 @@ class TestAgWatcherReloginPolicy(unittest.TestCase):
             )
         )
 
+    def test_go_to_home_code_field_triggers_relogin(self) -> None:
+        self.assertTrue(
+            ag_watcher.looks_like_logged_out(
+                {
+                    "status": "error",
+                    "code": "goToHome",
+                    "msg": "",
+                }
+            )
+        )
+
     def test_transport_exception_threshold_is_aggressive(self) -> None:
         threshold = ag_watcher.auto_relogin_threshold_for_error(
             "exception",
