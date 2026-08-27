@@ -10,7 +10,7 @@ from typing import Iterable, Optional
 from macos_icon import APP_ICON_NAME, ensure_app_icon_icns
 
 
-DEFAULT_BUNDLE_NAME = "AG Matrix"
+DEFAULT_BUNDLE_NAME = "HD跟单系统v1.0"
 DEFAULT_BUNDLE_ID = "com.hdproc.agmatrix"
 DEFAULT_VERSION = "1.0.0"
 PAYLOAD_DIRNAME = "app_payload"
@@ -191,7 +191,7 @@ def main() -> int:
         default=str(Path(__file__).resolve().parents[2] / "_dist"),
         help="输出目录，默认写入仓库 _dist/",
     )
-    parser.add_argument("--bundle-name", default=DEFAULT_BUNDLE_NAME, help="应用名，例如 AG Matrix")
+    parser.add_argument("--bundle-name", default=DEFAULT_BUNDLE_NAME, help="应用名，例如 HD跟单系统v1.0")
     parser.add_argument("--bundle-id", default=DEFAULT_BUNDLE_ID, help="Bundle Identifier")
     parser.add_argument("--version", default=DEFAULT_VERSION, help="应用版本号")
     args = parser.parse_args()

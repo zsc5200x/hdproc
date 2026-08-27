@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from macos_icon import ensure_app_icon_icns
 
 
-DEFAULT_BUNDLE_NAME = "AG Matrix Standalone"
+DEFAULT_BUNDLE_NAME = "HD跟单系统v1.0"
 DEFAULT_BUNDLE_ID = "com.hdproc.agmatrix.standalone"
 DEFAULT_BUNDLE_PORT = 9999
 

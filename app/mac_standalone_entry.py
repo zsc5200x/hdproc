@@ -22,7 +22,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from typing import List, Optional, Tuple
 from urllib import error, request
 
-DEFAULT_APP_NAME = "AG Matrix Standalone"
+DEFAULT_APP_NAME = "HD跟单系统v1.0"
 DEFAULT_PORT = 9999
 WORKER_MODULES = {
     "ag_wmc_watch": "ag_wmc_watch",

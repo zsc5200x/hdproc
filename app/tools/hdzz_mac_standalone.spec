@@ -10,7 +10,7 @@ from PyInstaller.utils.hooks import collect_submodules
 SOURCE_ROOT = Path(os.environ["HDZZ_SOURCE_ROOT"]).resolve()
 BROWSERS_DIR = Path(os.environ["HDZZ_PLAYWRIGHT_BROWSERS_DIR"]).resolve()
 BROWSERS_ARCHIVE = os.environ.get("HDZZ_PLAYWRIGHT_BROWSERS_ARCHIVE", "").strip()
-APP_NAME = os.environ.get("HDZZ_BUNDLE_NAME", "AG Matrix Standalone")
+APP_NAME = os.environ.get("HDZZ_BUNDLE_NAME", "HD跟单系统v1.0")
 BUNDLE_ID = os.environ.get("HDZZ_BUNDLE_ID", "com.hdproc.agmatrix.standalone")
 APP_ICON_PATH = os.environ.get("HDZZ_APP_ICON_PATH") or None
 INFO_PLIST_JSON = os.environ.get("HDZZ_INFO_PLIST_JSON", "").strip()
