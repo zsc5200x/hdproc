@@ -154,6 +154,30 @@ class TestAgWatcherTelegramPush(unittest.TestCase):
         self.assertIn("时段：全场", txt)
         self.assertIn("选择：大 10.5 @0.88", txt)
 
+    def test_backend_order_message_contains_only_source_order_fields(self) -> None:
+        txt = ag_watcher.format_backend_order_telegram_message(
+            {
+                "league": "联赛杯(美加墨)",
+                "sides": "托拉卡 v 奥斯丁 (4 - 4)",
+                "line": "小 11",
+                "odds": "0.70",
+                "stake": "100.0",
+                "betType": "(滚球) 角球数 - 大 / 小",
+            }
+        )
+
+        self.assertIn("🤣新注单提醒 🤣", txt)
+        self.assertIn("🤣联赛杯(美加墨)", txt)
+        self.assertIn("🤣托拉卡 v 奥斯丁 (4 - 4)", txt)
+        self.assertIn("状态：滚球", txt)
+        self.assertIn("玩法：角球大小", txt)
+        self.assertIn("时段：全场", txt)
+        self.assertIn("选择：小 11 @0.70", txt)
+        self.assertIn("金额：100", txt)
+        self.assertNotIn("跟单金额", txt)
+        self.assertNotIn("跟单成功", txt)
+        self.assertNotIn("会员", txt)
+
     def test_initial_order_message_names_nth_corner_market(self) -> None:
         txt = ag_watcher.format_telegram_message(
             "8hu557555",
@@ -270,6 +294,84 @@ class TestAgWatcherTelegramPush(unittest.TestCase):
             saved = ag_watcher.json.loads(order_lines[0])
             self.assertEqual(saved["_tg_message_id"], 7788)
             self.assertEqual(saved["_tg_chat_id"], "-100123")
+
+    def test_poll_once_sends_independent_backend_order_without_persisting_message_id(self) -> None:
+        target = ag_watcher.Target(
+            name="source-backend",
+            base_url="https://ag.example.test",
+            ver="version-test",
+            uid="uid",
+            cookie="sid=1",
+        )
+        response = {
+            "maxid": "101",
+            "wagers": [
+                {
+                    "TID": "OID-BACKEND-101",
+                    "NAME0": "member01",
+                    "GOLD": "100.0",
+                    "GT": "足球",
+                    "SHOWTEXT_LEAGUE": "联赛杯(美加墨)",
+                    "SHOWTEXT_TEAM": "托拉卡 v 奥斯丁 (4 - 4)",
+                    "WAGERSTYPE": "(滚球) 角球数 - 大 / 小",
+                    "ORDER_TYPE": "小",
+                    "ORDER_CON": "11",
+                    "IORATIO": "0.70",
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state_dir = root / "state"
+            orders_dir = root / "orders"
+            config_path = root / "config.json"
+            config_path.write_text('{"targets":[]}', encoding="utf-8")
+            ag_watcher.save_state(
+                state_dir,
+                target.name,
+                {"initialized": 1, "sel_maxid": "100", "seen": []},
+            )
+
+            with (
+                patch("hdzz.core.watcher.ag_watcher.request_wagers", return_value=response),
+                patch("hdzz.core.watcher.ag_watcher.tg_send", return_value=9901) as send_mock,
+            ):
+                ag_watcher.poll_once(
+                    session=Mock(),
+                    target=target,
+                    state_dir=state_dir,
+                    config_path=config_path,
+                    bot_token="",
+                    default_chat_id="",
+                    order_forward_enabled=False,
+                    timeout_s=10,
+                    tg_timeout_s=10,
+                    tg_proxy="",
+                    order_preview_image="",
+                    ui_theme=None,
+                    debug=False,
+                    only_orders=True,
+                    orders_dir=orders_dir,
+                    interval_s=3,
+                    backend_order_push_enabled=True,
+                    backend_order_bot_token="backend-token",
+                    backend_order_chat_id="-100backend",
+                    backend_order_proxy="socks5://127.0.0.1:7892",
+                )
+
+            self.assertEqual(send_mock.call_count, 1)
+            args = send_mock.call_args.args
+            kwargs = send_mock.call_args.kwargs
+            self.assertEqual(args[0], "backend-token")
+            self.assertEqual(args[1], "-100backend")
+            self.assertIn("金额：100", args[2])
+            self.assertEqual(kwargs["proxy"], "socks5://127.0.0.1:7892")
+            saved = ag_watcher.json.loads(
+                (orders_dir / "source-backend.jsonl").read_text(encoding="utf-8").splitlines()[0]
+            )
+            self.assertNotIn("_tg_message_id", saved)
+            self.assertNotIn("_tg_chat_id", saved)
 
     def test_poll_once_skips_initial_order_push_for_disabled_follow_target(self) -> None:
         target = ag_watcher.Target(

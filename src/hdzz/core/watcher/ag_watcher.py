@@ -22,7 +22,7 @@ from requests.adapters import HTTPAdapter
 from requests.utils import get_environ_proxies
 from urllib3.util.retry import Retry
 
-from tg_status_log import load_tg_push_config, log_and_maybe_push
+from tg_status_log import log_and_maybe_push
 from playwright_proxy import build_playwright_proxy
 from portable_env import ensure_playwright_browsers_path
 from hdzz.core.watcher.order_filter import (
@@ -863,6 +863,37 @@ def format_telegram_message(
     lines.append(_themed_line(_order_card_icon(ui_theme, 'order_id', '🧠'), f"单号：{html.escape(order_id)}", spaced=False))
     lines.append(_themed_line(_order_card_icon(ui_theme, 'time', '🗓'), f"时间：{html.escape(dt or now_cn())}", spaced=False))
     return "\n".join(lines)
+
+
+def format_backend_order_telegram_message(order: Dict[str, Any]) -> str:
+    """Format a one-shot source-order notification that is never edited by follow_engine."""
+    def fmt_amount(value: Any) -> str:
+        try:
+            amount = float(value)
+        except Exception:
+            return str(value or "未知")
+        if abs(amount - round(amount)) < 1e-9:
+            return str(int(round(amount)))
+        return f"{amount:.2f}".rstrip("0").rstrip(".")
+
+    league = html.escape(str(order.get("league") or "未知"))
+    sides = html.escape(str(order.get("sides") or "未知"))
+    order_status = "滚球" if "滚球" in str(order.get("betType") or "") else "早盘"
+    bet_display = parse_bet_display(order, order_status)
+    stake = html.escape(fmt_amount(order.get("stake") or "未知"))
+    return "\n".join(
+        [
+            "<b>🤣新注单提醒 🤣</b>",
+            f"🤣{league}",
+            f"🤣{sides}",
+            "",
+            f"📍 状态：{html.escape(order_status)}",
+            f"玩法：{html.escape(bet_display['bet_label'])}",
+            f"时段：{html.escape(bet_display['period'])}",
+            f"选择：{html.escape(bet_display['selection_text'])}",
+            f"金额：{stake}",
+        ]
+    )
 
 
 def format_console_order(target_name: str, order: Dict[str, Any]) -> str:
@@ -2450,6 +2481,10 @@ def poll_once(
     only_orders: bool,
     orders_dir: Path,
     interval_s: int,
+    backend_order_push_enabled: bool = False,
+    backend_order_bot_token: str = "",
+    backend_order_chat_id: str = "",
+    backend_order_proxy: str = "",
 ) -> None:
     state = load_state(state_dir, target.name)
     poll_mode = (target.poll_mode or "requests").lower()
@@ -2506,7 +2541,6 @@ def poll_once(
         target.cookie = str(state.get("cookie") or target.cookie)
 
     data_dir = config_path.parent / "data"
-    status_push_enabled, _, _, _ = load_tg_push_config(config_path)
     if target.cooldown_on_m_rep:
         cooldown_until = float(state.get("cooldown_until") or 0)
         if cooldown_until and now_ts() < cooldown_until:
@@ -2612,11 +2646,10 @@ def poll_once(
                             message=f"账号掉线，开始重新登录（code={code}）",
                             extra={"code": code, "base_url": target.base_url},
                         )
-                        if status_push_enabled:
-                            state["last_tg_relogin_start_at"] = now
-                            save_state(state_dir, target.name, state)
+                        state["last_tg_relogin_start_at"] = now
+                        save_state(state_dir, target.name, state)
                 except Exception as e:
-                    print(f"[{now_cn()}] [{target.name}] Telegram 重登开始通知失败: {e}", flush=True)
+                    print(f"[{now_cn()}] [{target.name}] 重登状态记录失败: {e}", flush=True)
                 started = start_background_relogin(
                     target,
                     state_dir=state_dir,
@@ -2686,11 +2719,10 @@ def poll_once(
                                     message="重新登录成功",
                                     extra={"base_url": target.base_url},
                                 )
-                                if status_push_enabled:
-                                    state["last_tg_relogin_ok_at"] = now_ok
-                                    save_state(state_dir, target.name, state)
+                                state["last_tg_relogin_ok_at"] = now_ok
+                                save_state(state_dir, target.name, state)
                         except Exception as e:
-                            print(f"[{now_cn()}] [{target.name}] Telegram 重登成功通知失败: {e}", flush=True)
+                            print(f"[{now_cn()}] [{target.name}] 重登成功状态记录失败: {e}", flush=True)
                         if debug and not only_orders:
                             print(
                                 f"[{now_cn()}] [{target.name}] 已重新登录并刷新 Cookie/uid/login_layer，准备继续轮询",
@@ -2723,11 +2755,10 @@ def poll_once(
                                 message=f"重新登录失败：{str(e)[:200]}",
                                 extra={"base_url": target.base_url},
                             )
-                            if status_push_enabled:
-                                state["last_tg_relogin_fail_at"] = now_fail
-                                save_state(state_dir, target.name, state)
+                            state["last_tg_relogin_fail_at"] = now_fail
+                            save_state(state_dir, target.name, state)
                     except Exception as e2:
-                        print(f"[{now_cn()}] [{target.name}] Telegram 重登失败通知失败: {e2}", flush=True)
+                        print(f"[{now_cn()}] [{target.name}] 重登失败状态记录失败: {e2}", flush=True)
                 finally:
                     state["relogin_in_progress"] = 0
                     save_state(state_dir, target.name, state)
@@ -2754,7 +2785,7 @@ def poll_once(
                             extra={"code": code, "base_url": target.base_url},
                         )
                     except Exception as e:
-                        print(f"[{now_cn()}] [{target.name}] Telegram 掉线通知失败: {e}", flush=True)
+                        print(f"[{now_cn()}] [{target.name}] 掉线状态记录失败: {e}", flush=True)
                 elif debug:
                     if not only_orders:
                         remain = max(0, int(max(5, int(target.offline_alert_seconds)) - (now2 - last)))
@@ -2900,6 +2931,22 @@ def poll_once(
             except Exception as e:
                 print(f"[{now_cn()}] [{target.name}] Telegram 推送失败: {e}", flush=True)
 
+    # 独立的后台原单通道只发送一次简版原始订单，不保存 message_id，跟单引擎不会编辑这条消息。
+    if backend_order_push_enabled and backend_order_bot_token and backend_order_chat_id:
+        for order in reversed(new_orders):
+            try:
+                tg_send(
+                    backend_order_bot_token,
+                    backend_order_chat_id,
+                    format_backend_order_telegram_message(order),
+                    timeout_s=tg_timeout_s,
+                    proxy=backend_order_proxy,
+                    reply_markup=None,
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                print(f"[{now_cn()}] [{target.name}] 后台原单推送失败: {e}", flush=True)
+
     # 持久化订单：供 WebUI/回溯使用（包含 _tg_message_id/_tg_chat_id 以支持合并推送）
     if new_orders:
         persist_orders(orders_dir, target.name, new_orders)
@@ -3032,6 +3079,10 @@ def main() -> int:
     default_chat_id = str(raw_cfg.get("telegram_chat_id") or os.getenv("TELEGRAM_CHAT_ID") or "")
     order_forward_enabled = bool(raw_cfg.get("telegram_order_forward_enabled", True))
     tg_proxy = str(raw_cfg.get("telegram_proxy") or os.getenv("TELEGRAM_PROXY") or "")
+    backend_order_push_enabled = bool(raw_cfg.get("telegram_backend_order_push_enabled", False))
+    backend_order_bot_token = str(raw_cfg.get("telegram_backend_order_bot_token") or "").strip()
+    backend_order_chat_id = str(raw_cfg.get("telegram_backend_order_chat_id") or "").strip()
+    backend_order_proxy = str(raw_cfg.get("telegram_backend_order_proxy") or "").strip()
     order_preview_image = str(raw_cfg.get("telegram_order_preview_image") or "").strip()
     tg_ui_theme = _load_tg_ui_theme(raw_cfg)
     if not order_preview_image:
@@ -3073,6 +3124,10 @@ def main() -> int:
                     default_chat_id = str(raw_cfg2.get("telegram_chat_id") or os.getenv("TELEGRAM_CHAT_ID") or "")
                     order_forward_enabled = bool(raw_cfg2.get("telegram_order_forward_enabled", True))
                     tg_proxy = str(raw_cfg2.get("telegram_proxy") or os.getenv("TELEGRAM_PROXY") or "")
+                    backend_order_push_enabled = bool(raw_cfg2.get("telegram_backend_order_push_enabled", False))
+                    backend_order_bot_token = str(raw_cfg2.get("telegram_backend_order_bot_token") or "").strip()
+                    backend_order_chat_id = str(raw_cfg2.get("telegram_backend_order_chat_id") or "").strip()
+                    backend_order_proxy = str(raw_cfg2.get("telegram_backend_order_proxy") or "").strip()
                     order_preview_image = str(raw_cfg2.get("telegram_order_preview_image") or "").strip()
                     tg_ui_theme = _load_tg_ui_theme(raw_cfg2)
                     if not order_preview_image:
@@ -3165,6 +3220,10 @@ def main() -> int:
                         only_orders=args.only_orders,
                         orders_dir=orders_dir,
                         interval_s=args.interval,
+                        backend_order_push_enabled=backend_order_push_enabled,
+                        backend_order_bot_token=backend_order_bot_token,
+                        backend_order_chat_id=backend_order_chat_id,
+                        backend_order_proxy=backend_order_proxy,
                     )
                     return target.name, None
                 except Exception as e:

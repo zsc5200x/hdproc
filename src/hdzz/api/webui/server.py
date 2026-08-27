@@ -984,15 +984,23 @@ def redact_secret_in_text(text: str, secret: str) -> str:
 
 def apply_telegram_config_update(cfg: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(cfg if isinstance(cfg, dict) else {})
+    # 账号状态 Telegram 推送已下线；保存通知配置时清理旧字段，避免旧配置继续产生歧义。
+    for legacy_key in (
+        "telegram_status_push_enabled",
+        "telegram_status_bot_token",
+        "telegram_status_chat_id",
+        "telegram_status_proxy",
+    ):
+        out.pop(legacy_key, None)
     if bool(data.get("clear_config") or False):
         out["telegram_bot_token"] = ""
         out["telegram_chat_id"] = ""
         out["telegram_allow_chat"] = ""
         out["telegram_proxy"] = ""
-        out["telegram_status_push_enabled"] = False
-        out["telegram_status_bot_token"] = ""
-        out["telegram_status_chat_id"] = ""
-        out["telegram_status_proxy"] = ""
+        out["telegram_backend_order_push_enabled"] = False
+        out["telegram_backend_order_bot_token"] = ""
+        out["telegram_backend_order_chat_id"] = ""
+        out["telegram_backend_order_proxy"] = ""
         return out
 
     bot_token = str(data.get("bot_token") or "").strip()
@@ -1001,12 +1009,23 @@ def apply_telegram_config_update(cfg: Dict[str, Any], data: Dict[str, Any]) -> D
     proxy = str(data.get("proxy") or "").strip()
     clear_token = bool(data.get("clear_token") or False)
     order_forward_enabled = data.get("order_forward_enabled", None)
-    status_push_enabled = data.get("status_push_enabled", None)
-    # status_* 仅在请求显式携带字段时才更新，避免被其它保存动作“误清空”
-    status_bot_token = (str(data.get("status_bot_token") or "").strip() if "status_bot_token" in data else None)
-    status_chat_id = (str(data.get("status_chat_id") or "").strip() if "status_chat_id" in data else None)
-    status_proxy = (str(data.get("status_proxy") or "").strip() if "status_proxy" in data else None)
-    clear_status_token = bool(data.get("clear_status_token") or False) if "clear_status_token" in data else False
+    backend_order_push_enabled = data.get("backend_order_push_enabled", None)
+    backend_order_bot_token = (
+        str(data.get("backend_order_bot_token") or "").strip()
+        if "backend_order_bot_token" in data
+        else None
+    )
+    backend_order_chat_id = (
+        str(data.get("backend_order_chat_id") or "").strip()
+        if "backend_order_chat_id" in data
+        else None
+    )
+    backend_order_proxy = (
+        str(data.get("backend_order_proxy") or "").strip()
+        if "backend_order_proxy" in data
+        else None
+    )
+    clear_backend_order_token = bool(data.get("clear_backend_order_token") or False)
 
     if clear_token:
         out["telegram_bot_token"] = ""
@@ -1020,16 +1039,16 @@ def apply_telegram_config_update(cfg: Dict[str, Any], data: Dict[str, Any]) -> D
         out["telegram_proxy"] = proxy
     if order_forward_enabled is not None:
         out["telegram_order_forward_enabled"] = bool(order_forward_enabled)
-    if status_push_enabled is not None:
-        out["telegram_status_push_enabled"] = bool(status_push_enabled)
-    if clear_status_token:
-        out["telegram_status_bot_token"] = ""
-    elif status_bot_token is not None and status_bot_token:
-        out["telegram_status_bot_token"] = status_bot_token
-    if status_chat_id is not None:
-        out["telegram_status_chat_id"] = status_chat_id
-    if status_proxy is not None:
-        out["telegram_status_proxy"] = status_proxy
+    if backend_order_push_enabled is not None:
+        out["telegram_backend_order_push_enabled"] = bool(backend_order_push_enabled)
+    if clear_backend_order_token:
+        out["telegram_backend_order_bot_token"] = ""
+    elif backend_order_bot_token:
+        out["telegram_backend_order_bot_token"] = backend_order_bot_token
+    if backend_order_chat_id is not None:
+        out["telegram_backend_order_chat_id"] = backend_order_chat_id
+    if backend_order_proxy is not None:
+        out["telegram_backend_order_proxy"] = backend_order_proxy
     return out
 
 
@@ -5573,10 +5592,10 @@ class Handler(SimpleHTTPRequestHandler):
             allow_chat = str(cfg.get("telegram_allow_chat") or "").strip()
             proxy = str(cfg.get("telegram_proxy") or "").strip()
             order_forward_enabled = bool(cfg.get("telegram_order_forward_enabled", True))
-            status_push_enabled = bool(cfg.get("telegram_status_push_enabled") or False)
-            status_bot_token = str(cfg.get("telegram_status_bot_token") or "").strip()
-            status_chat_id = str(cfg.get("telegram_status_chat_id") or "").strip()
-            status_proxy = str(cfg.get("telegram_status_proxy") or "").strip()
+            backend_order_push_enabled = bool(cfg.get("telegram_backend_order_push_enabled") or False)
+            backend_order_bot_token = str(cfg.get("telegram_backend_order_bot_token") or "").strip()
+            backend_order_chat_id = str(cfg.get("telegram_backend_order_chat_id") or "").strip()
+            backend_order_proxy = str(cfg.get("telegram_backend_order_proxy") or "").strip()
             self._send_json(
                 200,
                 {
@@ -5587,11 +5606,11 @@ class Handler(SimpleHTTPRequestHandler):
                     "allow_chat": allow_chat,
                     "proxy": proxy,
                     "order_forward_enabled": order_forward_enabled,
-                    "status_push_enabled": status_push_enabled,
-                    "status_configured": bool(status_bot_token and status_chat_id),
-                    "status_token_mask": mask_secret(status_bot_token, keep=4) if status_bot_token else "",
-                    "status_chat_id": status_chat_id,
-                    "status_proxy": status_proxy,
+                    "backend_order_push_enabled": backend_order_push_enabled,
+                    "backend_order_configured": bool(backend_order_bot_token and backend_order_chat_id),
+                    "backend_order_token_mask": mask_secret(backend_order_bot_token, keep=4) if backend_order_bot_token else "",
+                    "backend_order_chat_id": backend_order_chat_id,
+                    "backend_order_proxy": backend_order_proxy,
                     "server_time": now_iso(),
                 },
             )
@@ -6368,9 +6387,7 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/follow-settings",
             "/api/telegram-config",
             "/api/telegram-test",
-            "/api/telegram-status-test",
-            "/api/telegram-test",
-            "/api/telegram-status-test",
+            "/api/telegram-backend-order-test",
             "/api/signal-pull-config",
             "/api/signal-pull-config/delete",
             "/api/manual-signal/login",
@@ -7443,8 +7460,8 @@ class Handler(SimpleHTTPRequestHandler):
             bt = str(cfg.get("telegram_bot_token") or "").strip()
             cid = str(cfg.get("telegram_chat_id") or "").strip()
             allow_chat2 = str(cfg.get("telegram_allow_chat") or "").strip()
-            sbt = str(cfg.get("telegram_status_bot_token") or "").strip()
-            scid = str(cfg.get("telegram_status_chat_id") or "").strip()
+            backend_token = str(cfg.get("telegram_backend_order_bot_token") or "").strip()
+            backend_chat_id = str(cfg.get("telegram_backend_order_chat_id") or "").strip()
             self._send_json(
                 200,
                 {
@@ -7455,11 +7472,11 @@ class Handler(SimpleHTTPRequestHandler):
                     "allow_chat": allow_chat2,
                     "proxy": str(cfg.get("telegram_proxy") or "").strip(),
                     "order_forward_enabled": bool(cfg.get("telegram_order_forward_enabled", True)),
-                    "status_push_enabled": bool(cfg.get("telegram_status_push_enabled") or False),
-                    "status_configured": bool(sbt and scid),
-                    "status_token_mask": mask_secret(sbt, keep=4) if sbt else "",
-                    "status_chat_id": scid,
-                    "status_proxy": str(cfg.get("telegram_status_proxy") or "").strip(),
+                    "backend_order_push_enabled": bool(cfg.get("telegram_backend_order_push_enabled") or False),
+                    "backend_order_configured": bool(backend_token and backend_chat_id),
+                    "backend_order_token_mask": mask_secret(backend_token, keep=4) if backend_token else "",
+                    "backend_order_chat_id": backend_chat_id,
+                    "backend_order_proxy": str(cfg.get("telegram_backend_order_proxy") or "").strip(),
                 },
             )
             return
@@ -7520,15 +7537,23 @@ class Handler(SimpleHTTPRequestHandler):
             )
             return
 
-        if u.path == "/api/telegram-status-test":
+        if u.path == "/api/telegram-backend-order-test":
             cfg = self._read_config()
-            # 允许测试时使用前端“当前输入值”（未保存也能测试），否则回退到 config.json
-            bot_token = str(data.get("bot_token") or cfg.get("telegram_status_bot_token") or "").strip()
-            chat_id = str(data.get("chat_id") or cfg.get("telegram_status_chat_id") or "").strip()
-            proxy = str(data.get("proxy") or cfg.get("telegram_status_proxy") or cfg.get("telegram_proxy") or "").strip()
-            msg = str(data.get("message") or "测试消息：TG 状态推送正常").strip()
+            bot_token = str(data.get("bot_token") or cfg.get("telegram_backend_order_bot_token") or "").strip()
+            chat_id = str(data.get("chat_id") or cfg.get("telegram_backend_order_chat_id") or "").strip()
+            proxy = str(data.get("proxy") or cfg.get("telegram_backend_order_proxy") or "").strip()
+            msg = str(
+                data.get("message")
+                or (
+                    "<b>🤣新注单提醒 🤣</b>\n"
+                    "🤣后台订单推送测试\n"
+                    "🤣主队 v 客队 (0 - 0)\n\n"
+                    "📍 状态：滚球\n玩法：角球大小\n时段：全场\n"
+                    "选择：小 11 @0.70\n金额：100"
+                )
+            ).strip()
             if not (bot_token and chat_id):
-                self._send_json(400, {"ok": False, "message": "请先配置：状态 Bot Token + 状态 Chat ID/频道"})
+                self._send_json(400, {"ok": False, "message": "请先配置后台订单 Bot Token 和群 Chat ID"})
                 return
             res = tg_send_message(bot_token=bot_token, chat_id=chat_id, text=msg, proxy=proxy, timeout_s=15)
             if not res.get("ok"):

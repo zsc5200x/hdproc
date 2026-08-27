@@ -39,10 +39,10 @@
       "time": "5929427322514971930"
     }
   },
-  "telegram_status_push_enabled": false,
-  "telegram_status_bot_token": "PUT_STATUS_BOT_TOKEN_HERE",
-  "telegram_status_chat_id": "PUT_STATUS_CHAT_ID_HERE",
-  "telegram_status_proxy": "",
+  "telegram_backend_order_push_enabled": false,
+  "telegram_backend_order_bot_token": "PUT_BACKEND_ORDER_BOT_TOKEN_HERE",
+  "telegram_backend_order_chat_id": "PUT_BACKEND_ORDER_CHAT_ID_HERE",
+  "telegram_backend_order_proxy": "",
   "signal_webhook_enabled": false,
   "signal_webhook_url": "",
   "signal_webhook_token": "",

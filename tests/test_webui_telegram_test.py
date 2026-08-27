@@ -28,6 +28,10 @@ class TestWebUiTelegramTest(unittest.TestCase):
             "telegram_status_bot_token": "status-token",
             "telegram_status_chat_id": "-100status",
             "telegram_status_proxy": "socks5://127.0.0.1:7891",
+            "telegram_backend_order_push_enabled": True,
+            "telegram_backend_order_bot_token": "backend-token",
+            "telegram_backend_order_chat_id": "-100backend",
+            "telegram_backend_order_proxy": "socks5://127.0.0.1:7892",
         }
 
         updated = server.apply_telegram_config_update(cfg, {"clear_config": True})
@@ -36,10 +40,14 @@ class TestWebUiTelegramTest(unittest.TestCase):
         self.assertEqual(updated["telegram_chat_id"], "")
         self.assertEqual(updated["telegram_allow_chat"], "")
         self.assertEqual(updated["telegram_proxy"], "")
-        self.assertFalse(updated["telegram_status_push_enabled"])
-        self.assertEqual(updated["telegram_status_bot_token"], "")
-        self.assertEqual(updated["telegram_status_chat_id"], "")
-        self.assertEqual(updated["telegram_status_proxy"], "")
+        self.assertNotIn("telegram_status_push_enabled", updated)
+        self.assertNotIn("telegram_status_bot_token", updated)
+        self.assertNotIn("telegram_status_chat_id", updated)
+        self.assertNotIn("telegram_status_proxy", updated)
+        self.assertFalse(updated["telegram_backend_order_push_enabled"])
+        self.assertEqual(updated["telegram_backend_order_bot_token"], "")
+        self.assertEqual(updated["telegram_backend_order_chat_id"], "")
+        self.assertEqual(updated["telegram_backend_order_proxy"], "")
 
     def test_apply_telegram_config_update_empty_token_still_keeps_existing_token(self) -> None:
         cfg = {
@@ -50,7 +58,7 @@ class TestWebUiTelegramTest(unittest.TestCase):
 
         updated = server.apply_telegram_config_update(
             cfg,
-            {"bot_token": "", "chat_id": "-100new", "proxy": "", "status_push_enabled": False},
+            {"bot_token": "", "chat_id": "-100new", "proxy": ""},
         )
 
         self.assertEqual(updated["telegram_bot_token"], "old-token")
@@ -65,16 +73,40 @@ class TestWebUiTelegramTest(unittest.TestCase):
 
         self.assertTrue(updated["telegram_order_forward_enabled"])
 
+    def test_apply_telegram_config_update_persists_independent_backend_order_robot(self) -> None:
+        updated = server.apply_telegram_config_update(
+            {
+                "telegram_backend_order_bot_token": "old-backend-token",
+                "telegram_status_push_enabled": True,
+            },
+            {
+                "backend_order_push_enabled": True,
+                "backend_order_bot_token": "new-backend-token",
+                "backend_order_chat_id": "-100backend",
+                "backend_order_proxy": "socks5://127.0.0.1:7892",
+            },
+        )
+
+        self.assertTrue(updated["telegram_backend_order_push_enabled"])
+        self.assertEqual(updated["telegram_backend_order_bot_token"], "new-backend-token")
+        self.assertEqual(updated["telegram_backend_order_chat_id"], "-100backend")
+        self.assertEqual(updated["telegram_backend_order_proxy"], "socks5://127.0.0.1:7892")
+        self.assertNotIn("telegram_status_push_enabled", updated)
+
     def test_telegram_config_page_has_clear_button_binding(self) -> None:
         html = (APP_DIR / "webui" / "index.html").read_text(encoding="utf-8")
         js = (APP_DIR / "webui" / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('id="tg-clear"', html)
         self.assertIn('id="tg-order-forward"', html)
+        self.assertIn('id="tg-backend-order-push"', html)
+        self.assertIn('id="tg-backend-order-token"', html)
+        self.assertIn('id="tg-backend-order-chat"', html)
         self.assertIn("清除当前配置", html)
         self.assertIn("async function clearTelegramConfig", js)
         self.assertIn('"clear_config": true', js)
         self.assertIn('$("tg-clear")?.addEventListener("click", clearTelegramConfig)', js)
+        self.assertIn('$("tg-backend-order-test")?.addEventListener("click", testBackendOrderTelegram)', js)
 
     def test_tg_send_message_falls_back_to_direct_when_proxy_ssl_fails(self) -> None:
         proxy_ssl_error = server.requests.exceptions.SSLError(

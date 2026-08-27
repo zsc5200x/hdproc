@@ -3179,10 +3179,12 @@ async function loadTelegramConfig() {
   if ($("tg-proxy")) $("tg-proxy").value = String(data.proxy || "");
   const orderForwardEl = $("tg-order-forward");
   if (orderForwardEl) orderForwardEl.checked = data.order_forward_enabled !== false;
-  const pushEl = $("tg-status-push"); if (pushEl) pushEl.checked = !!data.status_push_enabled;
-  const sHint  = $("tg-status-token-hint"); if (sHint) sHint.textContent = data.status_token_mask || "";
-  if ($("tg-status-chat"))  $("tg-status-chat").value  = String(data.status_chat_id || "");
-  if ($("tg-status-proxy")) $("tg-status-proxy").value = String(data.status_proxy || "");
+  const backendPushEl = $("tg-backend-order-push");
+  if (backendPushEl) backendPushEl.checked = !!data.backend_order_push_enabled;
+  const backendTokenHint = $("tg-backend-order-token-hint");
+  if (backendTokenHint) backendTokenHint.textContent = data.backend_order_token_mask || "";
+  if ($("tg-backend-order-chat")) $("tg-backend-order-chat").value = String(data.backend_order_chat_id || "");
+  if ($("tg-backend-order-proxy")) $("tg-backend-order-proxy").value = String(data.backend_order_proxy || "");
   renderSystemCenterTelegramSummary();
 }
 
@@ -3191,9 +3193,10 @@ async function saveTelegramConfig() {
   const chatId = ($("tg-chat")?.value  || "").trim();
   const proxy  = ($("tg-proxy")?.value || "").trim();
   const orderForwardEnabled = $("tg-order-forward") ? !!$("tg-order-forward").checked : true;
-  const statusPushEnabled = !!$("tg-status-push")?.checked;
-  const statusChatId = ($("tg-status-chat")?.value || "").trim();
-  const statusProxy = ($("tg-status-proxy")?.value || "").trim();
+  const backendOrderPushEnabled = !!$("tg-backend-order-push")?.checked;
+  const backendOrderBotToken = ($("tg-backend-order-token")?.value || "").trim();
+  const backendOrderChatId = ($("tg-backend-order-chat")?.value || "").trim();
+  const backendOrderProxy = ($("tg-backend-order-proxy")?.value || "").trim();
   const hint = $("tg-hint");
   if (hint) { hint.textContent = "正在保存..."; hint.className = "form-hint"; }
   try {
@@ -3204,13 +3207,15 @@ async function saveTelegramConfig() {
         chat_id: chatId,
         proxy,
         order_forward_enabled: orderForwardEnabled,
-        status_push_enabled: statusPushEnabled,
-        status_chat_id: statusChatId,
-        status_proxy: statusProxy,
+        backend_order_push_enabled: backendOrderPushEnabled,
+        backend_order_bot_token: backendOrderBotToken,
+        backend_order_chat_id: backendOrderChatId,
+        backend_order_proxy: backendOrderProxy,
       }),
     });
     if (!data.ok) throw new Error(data.message || "保存失败");
     if ($("tg-token")) $("tg-token").value = "";
+    if ($("tg-backend-order-token")) $("tg-backend-order-token").value = "";
     await loadTelegramConfig();
     if (hint) { hint.textContent = "保存成功"; hint.className = "form-hint success"; }
     toast("消息通知配置已保存", "success");
@@ -3236,11 +3241,11 @@ async function clearTelegramConfig() {
       body: JSON.stringify({ "clear_config": true }),
     });
     if (!data.ok) throw new Error(data.message || "清除失败");
-    ["tg-token", "tg-chat", "tg-proxy", "tg-status-chat", "tg-status-proxy"].forEach((id) => {
+    ["tg-token", "tg-chat", "tg-proxy", "tg-backend-order-token", "tg-backend-order-chat", "tg-backend-order-proxy"].forEach((id) => {
       const el = $(id);
       if (el) el.value = "";
     });
-    const pushEl = $("tg-status-push");
+    const pushEl = $("tg-backend-order-push");
     if (pushEl) pushEl.checked = false;
     await loadTelegramConfig();
     if (hint) { hint.textContent = "当前配置已清除，请填写新的机器人信息"; hint.className = "form-hint success"; }
@@ -3277,6 +3282,33 @@ async function testTelegram() {
     if (hint) { hint.textContent = `错误: ${msg}`; hint.className = "form-hint error"; }
     toast(`发送失败: ${msg}`, "error");
     recordSystemCenterActivity(`测试通知发送失败：${msg}`, "error");
+  }
+}
+
+async function testBackendOrderTelegram() {
+  const hint = $("tg-hint");
+  if (hint) { hint.textContent = "正在发送后台订单测试..."; hint.className = "form-hint"; }
+  try {
+    const payload = {};
+    const token = ($("tg-backend-order-token")?.value || "").trim();
+    const chatId = ($("tg-backend-order-chat")?.value || "").trim();
+    const proxy = ($("tg-backend-order-proxy")?.value || "").trim();
+    if (token) payload.bot_token = token;
+    if (chatId) payload.chat_id = chatId;
+    if (proxy) payload.proxy = proxy;
+    const data = await fetchJson("/api/telegram-backend-order-test", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!data.ok) throw new Error(data.message || "发送失败");
+    if (hint) { hint.textContent = "后台订单测试已发送"; hint.className = "form-hint success"; }
+    toast("后台订单推送测试成功", "success");
+    recordSystemCenterActivity("后台订单推送测试成功", "success");
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e);
+    if (hint) { hint.textContent = `错误: ${msg}`; hint.className = "form-hint error"; }
+    toast(`发送失败: ${msg}`, "error");
+    recordSystemCenterActivity(`后台订单测试失败：${msg}`, "error");
   }
 }
 
@@ -6027,11 +6059,16 @@ function renderSystemCenterTelegramSummary() {
   const configured = !!data.configured;
   const hasChat = !!String(data.chat_id || "").trim();
   const hasProxy = !!String(data.proxy || "").trim();
-  const pushEnabled = !!data.status_push_enabled;
+  const pushEnabled = !!data.backend_order_push_enabled;
+  const backendConfigured = !!data.backend_order_configured;
   setSystemCenterSummaryState("sc-notify-bot", configured ? "已认证" : "未配置", configured ? "ok" : "off");
   setSystemCenterSummaryState("sc-notify-chat", hasChat ? "已设置" : "未设置", hasChat ? "ok" : "off");
   setSystemCenterSummaryState("sc-notify-proxy", hasProxy ? "已配置" : "直连", hasProxy ? "ok" : "off");
-  setSystemCenterSummaryState("sc-notify-push", pushEnabled ? "已启用" : "已关闭", pushEnabled ? "ok" : "off");
+  setSystemCenterSummaryState(
+    "sc-notify-push",
+    pushEnabled ? (backendConfigured ? "已启用" : "缺少配置") : "已关闭",
+    pushEnabled && backendConfigured ? "ok" : (pushEnabled ? "error" : "off"),
+  );
 }
 
 function renderSystemCenterStatusBar() {
@@ -6097,19 +6134,21 @@ function openSystemCenter() {
 }
 
 function bindSystemCenter() {
-  $("tg-token-toggle")?.addEventListener("click", (event) => {
+  const bindSecretToggle = (buttonId, inputId, label) => $(buttonId)?.addEventListener("click", (event) => {
     const button = event.currentTarget;
-    const input = $("tg-token");
+    const input = $(inputId);
     if (!input) return;
     const reveal = input.type === "password";
     input.type = reveal ? "text" : "password";
     button.setAttribute("aria-pressed", reveal ? "true" : "false");
-    button.setAttribute("aria-label", reveal ? "隐藏 Bot Token" : "显示 Bot Token");
+    button.setAttribute("aria-label", `${reveal ? "隐藏" : "显示"}${label}`);
     const icon = button.querySelector("i");
     if (icon) icon.className = `fa-solid ${reveal ? "fa-eye-slash" : "fa-eye"}`;
   });
+  bindSecretToggle("tg-token-toggle", "tg-token", " Bot Token");
+  bindSecretToggle("tg-backend-order-token-toggle", "tg-backend-order-token", "后台订单 Bot Token");
   [
-    "tg-token", "tg-chat", "tg-proxy", "tg-status-push", "tg-status-chat", "tg-status-proxy",
+    "tg-token", "tg-chat", "tg-proxy", "tg-backend-order-push", "tg-backend-order-token", "tg-backend-order-chat", "tg-backend-order-proxy",
   ].forEach((id) => {
     const field = $(id);
     if (!field || field.dataset.systemSummaryBound === "true") return;
@@ -6392,6 +6431,7 @@ async function loadInitial(opts = {}) {
   // Telegram
   $("tg-save")?.addEventListener("click", saveTelegramConfig);
   $("tg-test")?.addEventListener("click", testTelegram);
+  $("tg-backend-order-test")?.addEventListener("click", testBackendOrderTelegram);
   $("tg-clear")?.addEventListener("click", clearTelegramConfig);
 
   // Signal pull

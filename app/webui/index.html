@@ -4197,27 +4197,36 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
         </div>
 
         <div class="panel">
-          <div class="panel-title"><div class="panel-dot"></div>状态推送</div>
+          <div class="panel-title"><div class="panel-dot"></div>后台订单推送</div>
           <div class="form-grid" style="gap:12px">
             <div class="toggle-row">
               <div>
-                <div class="toggle-label">启用状态推送</div>
-                <div class="toggle-sub">系统启停时自动推送通知</div>
+                <div class="toggle-label">只推后台订单</div>
+                <div class="toggle-sub">仅发送后台原始来单，不包含会员状态和跟单结果</div>
               </div>
               <label class="toggle-sw">
-                <input type="checkbox" id="tg-status-push">
+                <input type="checkbox" id="tg-backend-order-push">
                 <span class="toggle-track"></span>
               </label>
             </div>
+            <div class="form-group">
+              <label class="form-label" for="tg-backend-order-token">后台订单 Bot Token</label>
+              <div class="sc-secret-field">
+                <input class="form-input" type="password" id="tg-backend-order-token" autocomplete="new-password" placeholder="输入新的机器人 Token（留空则保持现有）">
+                <button class="sc-secret-toggle" id="tg-backend-order-token-toggle" type="button" aria-label="显示后台订单 Bot Token" aria-pressed="false" title="显示或隐藏后台订单 Bot Token">
+                  <i class="fa-solid fa-eye" aria-hidden="true"></i>
+                </button>
+              </div>
+              <div class="form-hint" id="tg-backend-order-token-hint"></div>
+            </div>
             <div class="form-2 form-grid" style="gap:10px">
               <div class="form-group">
-                <label class="form-label" for="tg-status-chat">状态推送 Chat ID</label>
-                <input class="form-input" type="text" id="tg-status-chat" placeholder="留空则使用主 Chat ID">
+                <label class="form-label" for="tg-backend-order-chat">后台订单群 Chat ID</label>
+                <input class="form-input" type="text" id="tg-backend-order-chat" placeholder="-1001234567890">
               </div>
               <div class="form-group">
-                <label class="form-label" for="tg-status-proxy">状态推送代理</label>
-                <input class="form-input" type="text" id="tg-status-proxy" placeholder="socks5://...">
-                <div class="form-hint" id="tg-status-token-hint"></div>
+                <label class="form-label" for="tg-backend-order-proxy">后台订单代理（可选）</label>
+                <input class="form-input" type="text" id="tg-backend-order-proxy" placeholder="socks5://...">
               </div>
             </div>
           </div>
@@ -4225,7 +4234,8 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
 
         <div class="sc-notify-actions flex gap-2 mt-3">
           <button class="btn btn-primary" id="tg-save"><i class="fa-solid fa-floppy-disk"></i>保存配置</button>
-          <button class="btn btn-ghost" id="tg-test"><i class="fa-brands fa-telegram"></i>发送测试</button>
+          <button class="btn btn-ghost" id="tg-test"><i class="fa-brands fa-telegram"></i>测试主机器人</button>
+          <button class="btn btn-ghost" id="tg-backend-order-test"><i class="fa-solid fa-paper-plane"></i>测试后台订单</button>
           <button class="btn btn-danger" id="tg-clear"><i class="fa-solid fa-trash-can"></i>清除当前配置</button>
         </div>
         <div class="form-hint mt-3" id="tg-hint"></div>
@@ -4243,15 +4253,15 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
               <i class="fa-solid fa-route" aria-hidden="true"></i><span><b>代理通道</b><small>检查中</small></span>
             </div>
             <div class="sc-notify-status" id="sc-notify-push" data-tone="pending">
-              <i class="fa-solid fa-shield-halved" aria-hidden="true"></i><span><b>状态推送</b><small>检查中</small></span>
+              <i class="fa-solid fa-receipt" aria-hidden="true"></i><span><b>后台原单</b><small>检查中</small></span>
             </div>
           </div>
         </section>
 
         <section class="sc-notify-activity" aria-labelledby="sc-notify-activity-title">
-          <div class="panel-title" id="sc-notify-activity-title"><div class="panel-dot"></div>最近通知记录</div>
+          <div class="panel-title" id="sc-notify-activity-title"><div class="panel-dot"></div>后台订单推送说明</div>
           <div class="sc-activity-list" id="system-notification-activity" aria-live="polite">
-            <div class="sc-activity-empty"><i class="fa-solid fa-inbox" aria-hidden="true"></i><span>当前接口未提供历史通知记录</span></div>
+            <div class="sc-activity-empty"><i class="fa-solid fa-receipt" aria-hidden="true"></i><span>开启后只发送后台原始来单，金额取后台订单金额，不发送会员状态。</span></div>
           </div>
         </section>
       </div>
