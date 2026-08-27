@@ -75,8 +75,6 @@ def find_recent_confirmed_match(
 ) -> Optional[Dict[str, Any]]:
     home_number = _text(signal.get("home_number"))
     away_number = _text(signal.get("away_number"))
-    if not home_number or not away_number:
-        return None
 
     path = Path(orders_dir) / f"{_text(target_name) or 'telegram_signal'}.jsonl"
     rows: deque = deque(maxlen=max(1, int(max_lines or 1)))
@@ -100,13 +98,17 @@ def find_recent_confirmed_match(
 
     for order in reversed(rows):
         raw = order.get("raw") if isinstance(order.get("raw"), dict) else {}
-        if _game_value(raw, "GNUM_H", "gnumH") != home_number:
+        if home_number and _game_value(raw, "GNUM_H", "gnumH", "NUM_H") != home_number:
             continue
-        if _game_value(raw, "GNUM_C", "gnumC") != away_number:
+        if away_number and _game_value(raw, "GNUM_C", "gnumC", "NUM_C") != away_number:
             continue
-        if expected_home and _normalized_name(_game_value(raw, "TEAM_H", "teamH")) != expected_home:
+        raw_home = _game_value(raw, "TEAM_H", "teamH")
+        raw_away = _game_value(raw, "TEAM_C", "teamC")
+        # New order-card messages omit provider numbers.  In that format the
+        # fixture names and league are the only stable identity available.
+        if expected_home and _normalized_name(raw_home) != expected_home:
             continue
-        if expected_away and _normalized_name(_game_value(raw, "TEAM_C", "teamC")) != expected_away:
+        if expected_away and _normalized_name(raw_away) != expected_away:
             continue
         if expected_league and _normalized_name(order.get("league")) != expected_league:
             continue
@@ -124,8 +126,8 @@ def find_recent_confirmed_match(
             "league": _text(order.get("league")) or _text(signal.get("league")),
             "teamH": _game_value(raw, "TEAM_H", "teamH") or _text(signal.get("home")),
             "teamC": _game_value(raw, "TEAM_C", "teamC") or _text(signal.get("away")),
-            "gnumH": home_number,
-            "gnumC": away_number,
+            "gnumH": home_number or _game_value(raw, "GNUM_H", "gnumH", "NUM_H"),
+            "gnumC": away_number or _game_value(raw, "GNUM_C", "gnumC", "NUM_C"),
         }
     return None
 

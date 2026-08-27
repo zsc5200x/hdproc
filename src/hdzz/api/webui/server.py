@@ -639,7 +639,7 @@ def _ensure_snapshot_watch_running() -> Tuple[bool, bool, str, Optional[int]]:
             "--active-seconds", os.environ.get("ODDS_SNAPSHOT_ACTIVE_SECONDS", "120"),
             "--max-workers", os.environ.get("ODDS_SNAPSHOT_MAX_WORKERS", "4"),
             "--target-interval-ms", os.environ.get("ODDS_SNAPSHOT_TARGET_INTERVAL_MS", "400"),
-            "--market-deadline-ms", os.environ.get("ODDS_SNAPSHOT_MARKET_DEADLINE_MS", "2000"),
+            "--market-deadline-ms", os.environ.get("ODDS_SNAPSHOT_MARKET_DEADLINE_MS", "6000"),
             "--public-timeout-s", os.environ.get("ODDS_SNAPSHOT_PUBLIC_TIMEOUT_S", "2"),
             "--hedge-delay-ms", os.environ.get("ODDS_SNAPSHOT_HEDGE_DELAY_MS", "350"),
             "--scheduler-tick-ms", os.environ.get("ODDS_SNAPSHOT_SCHEDULER_TICK_MS", "50"),
@@ -4716,6 +4716,7 @@ def _chashui_resolve_game_by_gid(
     wanted_away = _fixture_text(locator.get("team_c"), strip_corner=True)
     wanted_num_h = _fixture_text(locator.get("gnum_h"))
     wanted_num_c = _fixture_text(locator.get("gnum_c"))
+    locator_is_corner = bool(locator.get("is_corner"))
 
     def _fixture_candidates(games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not ((wanted_home and wanted_away) or (wanted_num_h and wanted_num_c)):
@@ -4732,7 +4733,18 @@ def _chashui_resolve_game_by_gid(
                 continue
             if wanted_home and wanted_away and actual_home and actual_away and not names_match:
                 continue
-            if wanted_num_h and wanted_num_c and actual_num_h and actual_num_c and not numbers_match:
+            # CN corner boards use different provider team numbers from their
+            # parent FT fixture. Exact team names plus league identify the
+            # parent; get_game_more later proves the requested child gid is on
+            # that parent before a snapshot can be published.
+            if (
+                not locator_is_corner
+                and wanted_num_h
+                and wanted_num_c
+                and actual_num_h
+                and actual_num_c
+                and not numbers_match
+            ):
                 continue
             actual_league = _fixture_text(_field_ci(game, "LEAGUE"))
             if wanted_league and actual_league and actual_league != wanted_league:
@@ -7692,7 +7704,8 @@ def main() -> int:
             "mode": "fixed",
             "fixed_amount": 50,
             "ratio_percent": 100,
-            "max_amount": 0,
+            "match_limit_amount": 0,
+            "market_limit_amount": 0,
             "split_count": 1,
             "split_delay_seconds": 0,
             "targets": [],

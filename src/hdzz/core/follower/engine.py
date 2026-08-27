@@ -3780,7 +3780,6 @@ def compute_follow_stake(order: Dict[str, Any], settings: Dict[str, Any]) -> flo
     mode = str(settings.get("mode") or "fixed")
     fixed_amount = float(settings.get("fixed_amount") or 0)
     ratio_percent = float(settings.get("ratio_percent") or 0)
-    max_amount = float(settings.get("max_amount") or 0)
     source_name = resolve_order_source_name(order)
     target_ratio_override = target_ratio_percent_override(settings, source_name)
     if target_ratio_override is not None:
@@ -3798,8 +3797,6 @@ def compute_follow_stake(order: Dict[str, Any], settings: Dict[str, Any]) -> flo
     else:
         stake = fixed_amount
 
-    if max_amount and stake > max_amount:
-        stake = max_amount
     if stake < 0:
         stake = 0.0
     # 下注金额必须为整数：有小数就向上取整（多买 1 块），避免 2499.75 这类无法下注。
@@ -3915,6 +3912,358 @@ def classify_order_market(order: Dict[str, Any]) -> Tuple[str, str]:
     return ("other", "其他")
 
 
+LIMIT_MARKET_LABELS: Dict[str, str] = {
+    "handicap": "让球",
+    "total_over": "大球",
+    "total_under": "小球",
+    "moneyline": "独赢",
+    "other": "其他",
+}
+
+
+def _limit_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _limit_token(value: Any) -> str:
+    return re.sub(r"\s+", "", _limit_text(value)).lower()
+
+
+def _canonical_match_key(gtype: Any, gid: Any) -> str:
+    gid_text = _limit_text(gid)
+    if not gid_text:
+        return ""
+    return f"{_limit_text(gtype).upper() or 'UNKNOWN'}:{gid_text}"
+
+
+def classify_effective_limit_market(order: Dict[str, Any], settings: Dict[str, Any]) -> Tuple[str, str]:
+    """Return the market bucket actually submitted after reverse rules."""
+    market_code, market_label = classify_order_market(order)
+    rules = normalize_reverse_rules(settings)
+    reverse_total = bool(rules.get("all") or rules.get("total"))
+    if reverse_total and market_code == "total_over":
+        return ("total_under", LIMIT_MARKET_LABELS["total_under"])
+    if reverse_total and market_code == "total_under":
+        return ("total_over", LIMIT_MARKET_LABELS["total_over"])
+    return (market_code, market_label)
+
+
+def follow_limit_identity(order: Dict[str, Any], settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Build stable match and market keys for cumulative amount limits."""
+    payload = order if isinstance(order, dict) else {}
+    raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+    gtype = _limit_text(raw.get("GTYPE") or payload.get("gtype") or payload.get("sport"))
+    gid = _limit_text(payload.get("gid") or raw.get("_EVENT") or raw.get("GID"))
+    match_key = _canonical_match_key(gtype, gid)
+
+    if not match_key:
+        home_no = _limit_token(raw.get("NUM_H") or raw.get("GNUM_H") or payload.get("home_number"))
+        away_no = _limit_token(raw.get("NUM_C") or raw.get("GNUM_C") or payload.get("away_number"))
+        if home_no and away_no:
+            match_key = f"{gtype.upper() or 'UNKNOWN'}:NUM:{home_no}:{away_no}"
+
+    match_label = _limit_text(payload.get("sides"))
+    if not match_label:
+        home = _limit_text(raw.get("TEAM_H") or payload.get("home"))
+        away = _limit_text(raw.get("TEAM_C") or payload.get("away"))
+        match_label = f"{home} v {away}".strip(" v")
+    if not match_key:
+        league = _limit_token(payload.get("league") or raw.get("LEAGUE"))
+        home = _limit_token(raw.get("TEAM_H") or payload.get("home"))
+        away = _limit_token(raw.get("TEAM_C") or payload.get("away"))
+        date = _limit_token(payload.get("date") or raw.get("DATE"))
+        if home and away:
+            raw_key = "|".join((gtype.upper() or "UNKNOWN", date, league, home, away))
+            match_key = f"FALLBACK:{hashlib.sha256(raw_key.encode('utf-8')).hexdigest()[:24]}"
+
+    market_code, market_label = classify_effective_limit_market(payload, settings or {})
+    market_key = f"{match_key}|{market_code}" if match_key else ""
+    return {
+        "match_key": match_key,
+        "match_label": match_label or gid or match_key,
+        "market_key": market_key,
+        "market_code": market_code,
+        "market_label": market_label or LIMIT_MARKET_LABELS.get(market_code, market_code),
+    }
+
+
+def _market_identity_from_intent(intent: Dict[str, Any]) -> Tuple[str, str]:
+    market_type = _limit_text(intent.get("market_type")).upper()
+    side = _limit_text(intent.get("side")).upper()
+    if market_type == "TOTAL":
+        code = "total_under" if side == "UNDER" else "total_over"
+    elif market_type == "HANDICAP":
+        code = "handicap"
+    elif market_type == "MONEYLINE":
+        code = "moneyline"
+    else:
+        code = "other"
+    return code, LIMIT_MARKET_LABELS.get(code, code)
+
+
+def follow_limit_identity_from_result(result: Dict[str, Any]) -> Dict[str, str]:
+    """Recover limit keys from new metadata or historical Snapshot results."""
+    payload = result if isinstance(result, dict) else {}
+    explicit_match = _limit_text(payload.get("limit_match_key"))
+    explicit_market = _limit_text(payload.get("limit_market_key"))
+    if explicit_match and explicit_market:
+        return {
+            "match_key": explicit_match,
+            "match_label": _limit_text(payload.get("limit_match_label")) or explicit_match,
+            "market_key": explicit_market,
+            "market_code": _limit_text(payload.get("limit_market_code")) or explicit_market.rsplit("|", 1)[-1],
+            "market_label": _limit_text(payload.get("limit_market_label")) or explicit_market,
+        }
+
+    intent = payload.get("snapshot_direct_intent")
+    if not isinstance(intent, dict):
+        intent = payload.get("snapshot_direct_source_intent")
+    if not isinstance(intent, dict):
+        intent = {}
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    gid = _limit_text(intent.get("gid") or params.get("gid") or payload.get("market_row_gid"))
+    gtype = _limit_text(intent.get("gtype") or params.get("gtype"))
+    match_key = _canonical_match_key(gtype, gid)
+    market_code, market_label = _market_identity_from_intent(intent)
+    return {
+        "match_key": match_key,
+        "match_label": gid or match_key,
+        "market_key": f"{match_key}|{market_code}" if match_key else "",
+        "market_code": market_code,
+        "market_label": market_label,
+    }
+
+
+def load_follow_limit_usage(results_path: Path) -> Tuple[Dict[str, float], Dict[str, float], set[str]]:
+    """Restore successful exposure totals; ticket ids make the scan idempotent."""
+    match_usage: Dict[str, float] = {}
+    market_usage: Dict[str, float] = {}
+    success_keys: set[str] = set()
+    try:
+        handle = Path(results_path).open("r", encoding="utf-8-sig")
+    except OSError:
+        return match_usage, market_usage, success_keys
+    with handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(item, dict) or item.get("ok") is not True:
+                continue
+            identity = follow_limit_identity_from_result(item)
+            match_key = identity.get("match_key") or ""
+            market_key = identity.get("market_key") or ""
+            if not match_key or not market_key:
+                continue
+            ticket_id = _limit_text(item.get("ticket_id"))
+            success_key = (
+                f"ticket:{ticket_id}"
+                if ticket_id
+                else "result:"
+                + "|".join(
+                    (
+                        _limit_text(item.get("target")),
+                        _limit_text(item.get("orderId") or item.get("order_id")),
+                        _limit_text(item.get("split_index")),
+                        _limit_text(item.get("ts_ms") or item.get("ts")),
+                    )
+                )
+            )
+            if success_key in success_keys:
+                continue
+            amount = _safe_float(item.get("stake"), 0.0)
+            if amount <= 0:
+                continue
+            success_keys.add(success_key)
+            match_usage[match_key] = match_usage.get(match_key, 0.0) + amount
+            market_usage[market_key] = market_usage.get(market_key, 0.0) + amount
+    return match_usage, market_usage, success_keys
+
+
+def job_remaining_limit_reservation(job: RetryJob) -> float:
+    parts = [max(0.0, _safe_float(value, 0.0)) for value in (job.split_stakes or [])]
+    index = max(0, int(job.split_index or 0))
+    if parts:
+        if bool(job.independent_split):
+            return parts[index] if index < len(parts) else 0.0
+        return float(sum(parts[index:]))
+    return max(0.0, _safe_float(job.stake, 0.0))
+
+
+def collect_active_limit_reservations(
+    jobs: Dict[str, RetryJob],
+    *,
+    settings: Optional[Dict[str, Any]] = None,
+    exclude_parent_key: str = "",
+) -> Tuple[Dict[str, float], Dict[str, float]]:
+    match_reserved: Dict[str, float] = {}
+    market_reserved: Dict[str, float] = {}
+    excluded = _limit_text(exclude_parent_key)
+    for job in (jobs or {}).values():
+        if not isinstance(job, RetryJob):
+            continue
+        parent_key = _limit_text(job.parent_key or job.key)
+        if excluded and parent_key == excluded:
+            continue
+        identity = follow_limit_identity(job.order, settings or {})
+        stored = job.order.get("_follow_limit") if isinstance(job.order.get("_follow_limit"), dict) else {}
+        match_key = _limit_text(stored.get("match_key") or identity.get("match_key"))
+        market_key = _limit_text(stored.get("market_key") or identity.get("market_key"))
+        amount = job_remaining_limit_reservation(job)
+        if amount <= 0 or not match_key or not market_key:
+            continue
+        match_reserved[match_key] = match_reserved.get(match_key, 0.0) + amount
+        market_reserved[market_key] = market_reserved.get(market_key, 0.0) + amount
+    return match_reserved, market_reserved
+
+
+def apply_follow_amount_limits(
+    *,
+    order: Dict[str, Any],
+    settings: Dict[str, Any],
+    requested_stake: float,
+    match_committed: Dict[str, float],
+    market_committed: Dict[str, float],
+    match_reserved: Dict[str, float],
+    market_reserved: Dict[str, float],
+    min_stake: float = 1.0,
+) -> Tuple[float, str, Dict[str, Any]]:
+    """Cap a new order by match and same-match market exposure."""
+    identity = follow_limit_identity(order, settings)
+    requested = float(int(math.ceil(max(0.0, _safe_float(requested_stake, 0.0)))))
+    match_limit = max(0.0, _safe_float(settings.get("match_limit_amount"), 0.0))
+    market_limit = max(0.0, _safe_float(settings.get("market_limit_amount"), 0.0))
+    match_key = identity.get("match_key") or ""
+    market_key = identity.get("market_key") or ""
+    meta: Dict[str, Any] = {
+        **identity,
+        "requested_stake": requested,
+        "match_limit_amount": match_limit,
+        "market_limit_amount": market_limit,
+        "match_committed_amount": _safe_float(match_committed.get(match_key), 0.0),
+        "market_committed_amount": _safe_float(market_committed.get(market_key), 0.0),
+        "match_reserved_amount": _safe_float(match_reserved.get(match_key), 0.0),
+        "market_reserved_amount": _safe_float(market_reserved.get(market_key), 0.0),
+    }
+    if requested <= 0:
+        meta["allowed_stake"] = 0.0
+        return 0.0, "跟单金额为 0。", meta
+    if (match_limit > 0 or market_limit > 0) and not match_key:
+        meta["allowed_stake"] = 0.0
+        return 0.0, "无法识别比赛，已按累计限额保护跳过。", meta
+
+    allowed = requested
+    reached: List[str] = []
+    if match_limit > 0:
+        match_remaining = match_limit - meta["match_committed_amount"] - meta["match_reserved_amount"]
+        meta["match_remaining_amount"] = max(0.0, match_remaining)
+        allowed = min(allowed, max(0.0, match_remaining))
+        if match_remaining <= 0:
+            reached.append("单场限额")
+    if market_limit > 0:
+        market_remaining = market_limit - meta["market_committed_amount"] - meta["market_reserved_amount"]
+        meta["market_remaining_amount"] = max(0.0, market_remaining)
+        allowed = min(allowed, max(0.0, market_remaining))
+        if market_remaining <= 0:
+            reached.append(f"{identity.get('market_label') or '盘口'}限额")
+
+    allowed_int = float(max(0, int(math.floor(allowed + 1e-9))))
+    minimum = max(1.0, float(math.ceil(max(0.0, _safe_float(min_stake, 1.0)))))
+    if allowed_int < minimum:
+        meta["allowed_stake"] = 0.0
+        reason = "、".join(reached) or "累计限额剩余额度"
+        return 0.0, f"已按{reason}跳过：剩余额度不足最小下注金额 {minimum:g} 元。", meta
+    meta["allowed_stake"] = allowed_int
+    meta["limited"] = allowed_int < requested
+    return allowed_int, "", meta
+
+
+def store_follow_limit_metadata(order: Dict[str, Any], meta: Dict[str, Any]) -> None:
+    if not isinstance(order, dict) or not isinstance(meta, dict):
+        return
+    order["_follow_limit"] = {
+        key: meta.get(key)
+        for key in (
+            "match_key",
+            "match_label",
+            "market_key",
+            "market_code",
+            "market_label",
+            "requested_stake",
+            "allowed_stake",
+            "match_limit_amount",
+            "market_limit_amount",
+            "match_committed_amount",
+            "market_committed_amount",
+            "match_reserved_amount",
+            "market_reserved_amount",
+            "limited",
+        )
+    }
+
+
+def attach_follow_limit_metadata(result: Dict[str, Any], order: Dict[str, Any], settings: Dict[str, Any]) -> None:
+    if not isinstance(result, dict):
+        return
+    stored = order.get("_follow_limit") if isinstance(order.get("_follow_limit"), dict) else {}
+    identity = follow_limit_identity(order, settings)
+    combined = dict(identity)
+    combined.update(stored)
+    for source, target in (
+        ("match_key", "limit_match_key"),
+        ("match_label", "limit_match_label"),
+        ("market_key", "limit_market_key"),
+        ("market_code", "limit_market_code"),
+        ("market_label", "limit_market_label"),
+        ("requested_stake", "limit_requested_stake"),
+        ("allowed_stake", "limit_allowed_stake"),
+        ("match_limit_amount", "limit_match_amount"),
+        ("market_limit_amount", "limit_market_amount"),
+    ):
+        if combined.get(source) not in (None, ""):
+            result[target] = combined.get(source)
+
+
+def record_follow_limit_success(
+    result: Dict[str, Any],
+    *,
+    match_committed: Dict[str, float],
+    market_committed: Dict[str, float],
+    success_keys: set[str],
+) -> bool:
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return False
+    identity = follow_limit_identity_from_result(result)
+    match_key = identity.get("match_key") or ""
+    market_key = identity.get("market_key") or ""
+    if not match_key or not market_key:
+        return False
+    ticket_id = _limit_text(result.get("ticket_id"))
+    success_key = (
+        f"ticket:{ticket_id}"
+        if ticket_id
+        else "result:"
+        + "|".join(
+            (
+                _limit_text(result.get("target")),
+                _limit_text(result.get("orderId") or result.get("order_id")),
+                _limit_text(result.get("split_index")),
+                _limit_text(result.get("ts_ms") or result.get("ts")),
+            )
+        )
+    )
+    if success_key in success_keys:
+        return False
+    amount = _safe_float(result.get("stake"), 0.0)
+    if amount <= 0:
+        return False
+    success_keys.add(success_key)
+    match_committed[match_key] = match_committed.get(match_key, 0.0) + amount
+    market_committed[market_key] = market_committed.get(market_key, 0.0) + amount
+    return True
+
+
 def apply_market_rule_to_stake(
     *,
     order: Dict[str, Any],
@@ -3971,7 +4320,8 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             "mode": "fixed",
             "fixed_amount": 50,
             "ratio_percent": 100,
-            "max_amount": 0,
+            "match_limit_amount": 0,
+            "market_limit_amount": 0,
             # 防止重启/重登时把历史订单当新单：只“监听启动后”的订单
             # - 若订单含 bet_ts（下注时间戳），且 bet_ts < (引擎启动时间 - grace) 则直接忽略该订单
             "ignore_history_on_start": True,
@@ -4064,6 +4414,7 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             doc.setdefault(k, v)
     else:
         doc = dict(defaults)
+    doc.pop("max_amount", None)
     # 硬隔离：quote/read 号永远不参与真实下注
     doc["allow_quote_members"] = False
     # 当前生产执行模式：Snapshot 精确盘口 + 同会话 FT_order_view。
@@ -7384,6 +7735,7 @@ def main() -> int:
     retry_scheduler = RetryScheduler(jobs)
     jobs = retry_scheduler.retry_jobs
     hydrate_done_from_results(done, results_path)
+    limit_match_committed, limit_market_committed, limit_success_keys = load_follow_limit_usage(results_path)
     follow_generated_order_keys = collect_follow_generated_order_keys(done=done, results_path=results_path)
     if follow_generated_order_keys:
         for key in list(pending_orders.keys()):
@@ -7519,6 +7871,7 @@ def main() -> int:
         result.setdefault("orderId", job.order_id)
         result.setdefault("target", job.target)
         result.setdefault("stake", float(meta.get("cur_stake") or 0.0))
+        attach_follow_limit_metadata(result, job.order, settings)
         candidate_at = float(meta.get("candidate_snapshot_at") or job.first_candidate_snapshot_at or 0.0)
         member_acquired_at = float(meta.get("member_acquired_at") or 0.0)
         result["candidate_snapshot_at"] = candidate_at
@@ -7685,6 +8038,12 @@ def main() -> int:
         except Exception:
             pass
         persist_started_at, persist_finished_at = _append_jsonl_timed(results_path, result)
+        record_follow_limit_success(
+            result,
+            match_committed=limit_match_committed,
+            market_committed=limit_market_committed,
+            success_keys=limit_success_keys,
+        )
         result["result_persist_started_at"] = persist_started_at
         result["result_persist_finished_at"] = persist_finished_at
         result["result_persist_elapsed_ms"] = round(max(0.0, persist_finished_at - persist_started_at) * 1000.0, 3)
@@ -8286,6 +8645,8 @@ def main() -> int:
             if key in done:
                 continue
 
+            parent_jobs = retry_scheduler.get_jobs_for_parent(key)
+
             if not target_follow_enabled(settings, target):
                 try:
                     result = {
@@ -8382,6 +8743,99 @@ def main() -> int:
                     pass
                 continue
 
+            if not parent_jobs:
+                match_reserved, market_reserved = collect_active_limit_reservations(
+                    retry_scheduler.retry_jobs,
+                    settings=settings,
+                    exclude_parent_key=key,
+                )
+                limited_stake, limit_skip_msg, limit_meta = apply_follow_amount_limits(
+                    order=order,
+                    settings=settings,
+                    requested_stake=total_stake,
+                    match_committed=limit_match_committed,
+                    market_committed=limit_market_committed,
+                    match_reserved=match_reserved,
+                    market_reserved=market_reserved,
+                    min_stake=split_min_stake_cfg,
+                )
+                store_follow_limit_metadata(order, limit_meta)
+                if limit_skip_msg:
+                    result = {
+                        "ts": int(now_ts()),
+                        "ts_ms": int(now_ts_ms()),
+                        "live": bool(is_live_backend_order(order)),
+                        "member_id": "",
+                        "member": "-",
+                        "target": target,
+                        "orderId": order_id,
+                        "stake": 0.0,
+                        "source_stake": _safe_float(order.get("stake"), 0.0),
+                        "policy_base_stake": float(base_stake),
+                        "policy_market_stake": float(total_stake),
+                        "ok": False,
+                        "message": str(limit_skip_msg),
+                        "skipped": True,
+                        "skip_reason": "amount_limit",
+                    }
+                    attach_follow_limit_metadata(result, order, settings)
+                    append_jsonl(results_path, result)
+                    done[key] = {"status": "skipped", "reason": str(limit_skip_msg), "ts": int(now_ts())}
+                    pending_orders.pop(key, None)
+                    _append_trace_jsonl(
+                        trace_path,
+                        {
+                            "event": "amount_limit_skipped",
+                            "key": key,
+                            "target": target,
+                            "orderId": order_id,
+                            "message": str(limit_skip_msg),
+                            **{f"limit_{name}": value for name, value in limit_meta.items()},
+                        },
+                    )
+                    try:
+                        bot_token, default_chat_id, proxy, order_preview_image, ui_theme = load_tg_config(Path("config.json"))
+                        if bot_token:
+                            order_chat_id = str(order.get("_tg_chat_id") or default_chat_id).strip()
+                            if order_chat_id:
+                                merged = build_order_follow_combined_message(order=order, follow_result=result, ui_theme=ui_theme)
+                                new_mid = tg_upsert_order_message(
+                                    bot_token=bot_token,
+                                    chat_id=order_chat_id,
+                                    message_id=order.get("_tg_message_id"),
+                                    html_text=merged,
+                                    order_id=order_id,
+                                    order_preview_image=order_preview_image,
+                                    timeout_s=10,
+                                    proxy=proxy,
+                                    ui_theme=ui_theme,
+                                )
+                                if new_mid:
+                                    order["_tg_message_id"] = int(new_mid)
+                                    order["_tg_chat_id"] = order_chat_id
+                    except Exception:
+                        pass
+                    continue
+                total_stake = float(limited_stake)
+                if bool(limit_meta.get("limited")):
+                    _append_trace_jsonl(
+                        trace_path,
+                        {
+                            "event": "amount_limit_applied",
+                            "key": key,
+                            "target": target,
+                            "orderId": order_id,
+                            "requested_stake": _safe_float(limit_meta.get("requested_stake"), 0.0),
+                            "allowed_stake": float(total_stake),
+                            "match_key": str(limit_meta.get("match_key") or ""),
+                            "market_key": str(limit_meta.get("market_key") or ""),
+                            "match_committed_amount": _safe_float(limit_meta.get("match_committed_amount"), 0.0),
+                            "match_reserved_amount": _safe_float(limit_meta.get("match_reserved_amount"), 0.0),
+                            "market_committed_amount": _safe_float(limit_meta.get("market_committed_amount"), 0.0),
+                            "market_reserved_amount": _safe_float(limit_meta.get("market_reserved_amount"), 0.0),
+                        },
+                    )
+
             # per-target 过滤：仅跟滚球
             try:
                 only_live = bool(target_only_live(settings, target) or False)
@@ -8444,7 +8898,6 @@ def main() -> int:
                     pass
                 continue
 
-            parent_jobs = retry_scheduler.get_jobs_for_parent(key)
             if not parent_jobs:
                 eff_split = effective_split_count(total_stake, split_count_cfg, split_min_stake_cfg)
                 parts = split_stakes(total_stake, eff_split)
@@ -8462,7 +8915,7 @@ def main() -> int:
                 print(
                     f"[{now_iso()}] stake_calc target={target} order={order_id} src_stake={src_stake} "
                     f"mode={settings.get('mode')} ratio%={settings.get('ratio_percent')} fixed={settings.get('fixed_amount')} "
-                    f"max={settings.get('max_amount')} split={eff_split} total={float(sum([p for p in parts if isinstance(p,(int,float))]))} "
+                    f"split={eff_split} total={float(sum([p for p in parts if isinstance(p,(int,float))]))} "
                     f"parts={parts_preview}",
                     flush=True,
                 )
@@ -8499,17 +8952,7 @@ def main() -> int:
                         flush=True,
                     )
             elif parent_jobs:
-                # 配置变更时（固定金额/比例/封顶）允许动态更新 stake
-                # 分单已开始（已有成功票）则不再动态改拆分，避免一单多次变更导致金额/次数混乱
-                job = parent_jobs[0]
-                if (not bool(job.independent_split)) and (job.split_index or 0) == 0 and not job.split_tickets:
-                    eff_split = effective_split_count(total_stake, split_count_cfg, split_min_stake_cfg)
-                    parts = split_stakes(total_stake, eff_split)
-                    if parts:
-                        job.split_stakes = parts
-                        job.split_count = int(len(parts) or 1)
-                        job.split_delay_seconds = float(split_delay_seconds_cfg)
-                        job.stake = float(sum(parts))
+                # 已入队任务保留创建时的金额和额度预留，避免运行中改设置导致任务被放大。
                 for parent_job in parent_jobs:
                     parent_job.order = order
 
@@ -9152,7 +9595,6 @@ def main() -> int:
                     "settings_mode": str(one_shot_settings.get("mode") or ""),
                     "settings_ratio_percent": _safe_float(one_shot_settings.get("ratio_percent"), 0.0),
                     "settings_fixed_amount": _safe_float(one_shot_settings.get("fixed_amount"), 0.0),
-                    "settings_max_amount": _safe_float(one_shot_settings.get("max_amount"), 0.0),
                     "ok": False,
                     "message": "FT_bet 结果不确定，正在核验，禁止重复提交。",
                     "execution_mode": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
@@ -9196,6 +9638,7 @@ def main() -> int:
             result.setdefault("split_order_id", job.key)
             result["split_index"] = int(job.split_index or 0) + 1
             result["split_count"] = int(job.split_count or 1)
+            attach_follow_limit_metadata(result, job.order, one_shot_settings)
             _apply_market_submit_breaker(
                 job,
                 result,
@@ -9372,6 +9815,12 @@ def main() -> int:
                 pass
             result["error_class"] = classify_execution_error(result)
             persist_started_at, persist_finished_at = _append_jsonl_timed(results_path, result)
+            record_follow_limit_success(
+                result,
+                match_committed=limit_match_committed,
+                market_committed=limit_market_committed,
+                success_keys=limit_success_keys,
+            )
             result["result_persist_started_at"] = persist_started_at
             result["result_persist_finished_at"] = persist_finished_at
             result["result_persist_elapsed_ms"] = round(max(0.0, persist_finished_at - persist_started_at) * 1000.0, 3)

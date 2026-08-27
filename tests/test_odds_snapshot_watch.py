@@ -174,6 +174,7 @@ class OddsSnapshotWatchTest(unittest.TestCase):
         self.assertEqual(demand["fixture_locator"]["team_h"], "布洛马波卡纳")
         self.assertEqual(demand["fixture_locator"]["team_c"], "戴戈福斯")
         self.assertEqual(demand["fixture_locator"]["gnum_h"], "701572")
+        self.assertTrue(demand["fixture_locator"]["is_corner"])
 
     def test_market_scheduler_keeps_expired_attempt_owned_until_it_finishes(self) -> None:
         import odds_snapshot_watch as worker

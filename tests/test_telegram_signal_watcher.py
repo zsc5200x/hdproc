@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_telegram_signal_parser import HANDICAP_SIGNAL
+from test_telegram_signal_parser import HANDICAP_SIGNAL, ORDER_CARD_SIGNAL
 
 
 GAME = {
@@ -127,6 +127,39 @@ class TelegramSignalWatcherTest(unittest.TestCase):
         self.assertEqual(result["order"]["betType"], "(滚球) 大 / 小 - 上半场")
         self.assertEqual(result["order"]["line"], "大 1.5 / 2")
 
+    def test_native_order_card_reuses_recent_match_without_provider_numbers(self) -> None:
+        self.orders_dir.mkdir(parents=True, exist_ok=True)
+        prior = {
+            "ts": 1787739000,
+            "target": "source_backend",
+            "orderId": "25172900001",
+            "league": "中美洲杯",
+            "gid": "9000001",
+            "raw": {
+                "GID": "9000001",
+                "GNUM_H": "712001",
+                "GNUM_C": "712002",
+                "TEAM_H": "希尔迪奥诺",
+                "TEAM_C": "安提瓜",
+            },
+        }
+        (self.orders_dir / "telegram_signal.jsonl").write_text(
+            json.dumps(prior, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        message = dict(
+            self.message,
+            message_id="428501",
+            text=ORDER_CARD_SIGNAL,
+            received_ts=1787739075,
+        )
+
+        result = self._process(message=message, games=[])
+
+        self.assertEqual(result["status"], "dry_run")
+        self.assertEqual(result["order"]["gid"], "9000001")
+        self.assertEqual(result["order"]["raw"]["GNUM_H"], "712001")
+
     def test_dry_run_resolves_but_does_not_write_order(self) -> None:
         result = self._process()
 
@@ -154,6 +187,58 @@ class TelegramSignalWatcherTest(unittest.TestCase):
         self.assertEqual(second["status"], "duplicate_order")
         lines = (self.orders_dir / "telegram_signal.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 1)
+
+    def test_native_order_card_can_resolve_by_team_names(self) -> None:
+        game = {
+            "gid": "9000001",
+            "league": "中美洲杯",
+            "teamH": "希尔迪奥诺",
+            "teamC": "安提瓜",
+        }
+        result = self._process(
+            message=dict(self.message, message_id="428500", text=ORDER_CARD_SIGNAL),
+            games=[game],
+        )
+
+        self.assertEqual(result["status"], "dry_run")
+        self.assertEqual(result["order"]["gid"], "9000001")
+        self.assertEqual(result["order"]["line"], "小 2")
+
+    def test_load_games_uses_local_snapshot_identity(self) -> None:
+        from hdzz.core.telegram_signal.watcher import load_games_from_webui
+
+        data_dir = self.orders_dir.parent / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "odds_snapshot_cache.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "matches": {
+                        "live|9000001": {
+                            "gid": "9000001",
+                            "meta": {
+                                "masterGid": "9000001",
+                                "league": "中美洲杯",
+                                "teamH": "希尔迪奥诺",
+                                "teamC": "安提瓜",
+                            },
+                        }
+                    },
+                    "aliases": {},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        games = load_games_from_webui(
+            {"mode": "live"},
+            base_url="http://127.0.0.1:2299",
+            data_dir=data_dir,
+            orders_dir=self.orders_dir,
+        )
+
+        self.assertEqual(games[0]["gid"], "9000001")
+        self.assertEqual(games[0]["teamH"], "希尔迪奥诺")
 
 
 if __name__ == "__main__":

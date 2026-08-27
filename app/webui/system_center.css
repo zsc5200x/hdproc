@@ -378,7 +378,6 @@ body[data-view="system-center"] .sc-follow-config-grid {
 }
 
 body[data-view="system-center"] .sc-follow-config-grid > .form-group { margin: 0; }
-body[data-view="system-center"] .sc-mode-value-field,
 body[data-view="system-center"] .sc-delay-field { grid-column: 1 / -1; }
 body[data-view="system-center"] .sc-follow-config-grid > [hidden] { display: none !important; }
 

@@ -7,9 +7,12 @@ import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from .ingest import MatchResolutionError, build_follow_order, find_recent_confirmed_match, resolve_signal_match
 from .parser import SignalParseError, parse_telegram_bet_signal
+from .credentials import resolve_telegram_credentials
 from .store import (
     append_event,
     load_private_json,
@@ -84,7 +87,7 @@ def process_signal_message(
         try:
             game = resolve_signal_match(signal, games)
         except MatchResolutionError as exc:
-            if str(exc) != "number_pair_not_found":
+            if str(exc) not in {"number_pair_not_found", "name_match_not_found"}:
                 raise
             game = find_recent_confirmed_match(
                 signal,
@@ -141,9 +144,126 @@ def process_signal_message(
     return {"status": "injected", "order": order, "path": str(out_path)}
 
 
-def load_games_from_webui(signal: Dict[str, Any], *, base_url: str) -> List[Dict[str, Any]]:
-    """查水已移除；信号处理只允许使用最近已确认订单兜底。"""
-    return []
+def _cache_games(path: Path) -> List[Dict[str, Any]]:
+    """Read match identity from the local snapshot cache (no odds exposed)."""
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, TypeError):
+        return []
+    matches = document.get("matches") if isinstance(document, dict) else {}
+    if not isinstance(matches, dict):
+        return []
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for record in matches.values():
+        if not isinstance(record, dict):
+            continue
+        meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
+        gid = _text(record.get("gid") or meta.get("masterGid") or meta.get("requestedGid"))
+        if not gid or gid in seen:
+            continue
+        home = _text(meta.get("teamH"))
+        away = _text(meta.get("teamC"))
+        if not home or not away:
+            continue
+        seen.add(gid)
+        out.append(
+            {
+                "gid": gid,
+                "league": _text(meta.get("league")),
+                "teamH": home,
+                "teamC": away,
+                "gnumH": _text(meta.get("gnumH")),
+                "gnumC": _text(meta.get("gnumC")),
+            }
+        )
+    return out
+
+
+def _order_games(orders_dir: Path, *, max_files: int = 128, max_lines: int = 3000) -> List[Dict[str, Any]]:
+    """Use recently stored source orders as a short-lived identity fallback."""
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    try:
+        paths = sorted(Path(orders_dir).glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:max_files]
+    except OSError:
+        return out
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8-sig").splitlines()[-max_lines:]
+        except OSError:
+            continue
+        for line in reversed(lines):
+            try:
+                order = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(order, dict):
+                continue
+            raw = order.get("raw") if isinstance(order.get("raw"), dict) else {}
+            gid = _text(order.get("gid") or raw.get("GID") or raw.get("_EVENT"))
+            home = _text(raw.get("TEAM_H") or raw.get("teamH"))
+            away = _text(raw.get("TEAM_C") or raw.get("teamC"))
+            if not gid or not home or not away or gid in seen:
+                continue
+            seen.add(gid)
+            out.append(
+                {
+                    "gid": gid,
+                    "league": _text(order.get("league") or raw.get("LEAGUE")),
+                    "teamH": home,
+                    "teamC": away,
+                    "gnumH": _text(raw.get("GNUM_H") or raw.get("NUM_H")),
+                    "gnumC": _text(raw.get("GNUM_C") or raw.get("NUM_C")),
+                }
+            )
+    return out
+
+
+def _webui_games(signal: Dict[str, Any], base_url: str) -> List[Dict[str, Any]]:
+    base = _text(base_url).rstrip("/")
+    if not base:
+        return []
+    mode = "live" if _text(signal.get("mode")) == "live" else "today"
+    query = urlencode({"mode": mode})
+    try:
+        request = Request(f"{base}/api/chashui/games?{query}", headers={"Accept": "application/json"})
+        with urlopen(request, timeout=4) as response:  # nosec B310 - base_url is local-only by settings validation
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return []
+    games = payload.get("games") if isinstance(payload, dict) else payload
+    return [dict(item) for item in games if isinstance(item, dict)] if isinstance(games, list) else []
+
+
+def load_games_from_webui(
+    signal: Dict[str, Any],
+    *,
+    base_url: str,
+    data_dir: Path | None = None,
+    orders_dir: Path | None = None,
+) -> List[Dict[str, Any]]:
+    """Load identity-only fixtures from local cache and the optional WebUI API.
+
+    The WebUI's legacy chashui route may intentionally return an empty list;
+    local snapshots/orders remain useful for matching without triggering any
+    upstream member request from the Telegram listener.
+    """
+    root = Path(data_dir) if data_dir is not None else Path("data")
+    order_root = Path(orders_dir) if orders_dir is not None else Path("orders")
+    candidates: List[Dict[str, Any]] = []
+    candidates.extend(_cache_games(root / "odds_snapshot_cache.json"))
+    candidates.extend(_order_games(order_root))
+    candidates.extend(_webui_games(signal, base_url))
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for game in candidates:
+        gid = _text(game.get("gid") or game.get("GID"))
+        if not gid or gid in seen:
+            continue
+        seen.add(gid)
+        out.append(game)
+    return out
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -167,15 +287,17 @@ async def _run_listener(args: argparse.Namespace) -> int:
     secret_status = sanitize_secret_status(secret)
     if not settings.get("enabled"):
         raise RuntimeError("listener_disabled")
-    if not secret_status.get("credentials_configured"):
-        raise RuntimeError("credentials_missing")
+    try:
+        api_id, api_hash = resolve_telegram_credentials(secret)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
     if not secret_status.get("session_configured"):
         raise RuntimeError("telegram_login_required")
     source_ids = [int(item) for item in (settings.get("source_chat_ids") or [])]
     if not source_ids:
         raise RuntimeError("source_chats_missing")
 
-    client = TelegramClient(StringSession(_text(secret.get("session"))), int(secret.get("api_id")), _text(secret.get("api_hash")))
+    client = TelegramClient(StringSession(_text(secret.get("session"))), api_id, api_hash)
     await client.connect()
     if not await client.is_user_authorized():
         await client.disconnect()
@@ -203,7 +325,12 @@ async def _run_listener(args: argparse.Namespace) -> int:
             lambda: process_signal_message(
                 settings=current_settings,
                 message=message,
-                games_loader=lambda signal: load_games_from_webui(signal, base_url=_text(current_settings.get("webui_url"))),
+                games_loader=lambda signal: load_games_from_webui(
+                    signal,
+                    base_url=_text(current_settings.get("webui_url")),
+                    data_dir=Path(args.events).parent,
+                    orders_dir=Path(args.orders_dir),
+                ),
                 state_path=Path(args.state),
                 event_log_path=Path(args.events),
                 orders_dir=Path(args.orders_dir),

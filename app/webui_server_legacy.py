@@ -761,7 +761,8 @@ class Handler(SimpleHTTPRequestHandler):
                     "mode": "fixed",
                     "fixed_amount": 50,
                     "ratio_percent": 100,
-                    "max_amount": 0,
+                    "match_limit_amount": 0,
+                    "market_limit_amount": 0,
                     "split_count": 1,
                     "split_delay_seconds": 0,
                     "targets": [],
@@ -769,9 +770,11 @@ class Handler(SimpleHTTPRequestHandler):
                     "updated_at": "",
                 },
             )
-            # 兼容旧文件：补齐新增字段，保证前端可直接显示
+            # 兼容旧文件：补齐累计限额字段，同时不再回传已废弃的单注封顶字段。
             if isinstance(doc, dict):
-                doc.setdefault("max_amount", 0)
+                doc.pop("max_amount", None)
+                doc.setdefault("match_limit_amount", 0)
+                doc.setdefault("market_limit_amount", 0)
                 doc.setdefault("split_count", 1)
                 doc.setdefault("split_delay_seconds", 0)
                 doc.setdefault("targets", [])
@@ -1522,7 +1525,8 @@ class Handler(SimpleHTTPRequestHandler):
                     "mode": "fixed",
                     "fixed_amount": 50,
                     "ratio_percent": 100,
-                    "max_amount": 0,
+                    "match_limit_amount": 0,
+                    "market_limit_amount": 0,
                     "split_count": 1,
                     "split_delay_seconds": 0,
                     "targets": [],
@@ -1530,8 +1534,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "updated_at": "",
                 },
             )
-            # 重要：只在请求显式携带该字段时才更新，避免旧版 UI “缺字段”把 TG 写入的设置覆盖成 0。
-            #（例如旧 UI 没有 max_amount 输入框，会导致保存时把封顶清空）
+            # 重要：只在请求显式携带字段时才更新，避免旧版 UI 缺字段覆盖已有设置。
             if "enabled" in settings:
                 doc["enabled"] = bool(settings.get("enabled") or False)
             if "mode" in settings:
@@ -1540,8 +1543,11 @@ class Handler(SimpleHTTPRequestHandler):
                 doc["fixed_amount"] = float(settings.get("fixed_amount") or 0)
             if "ratio_percent" in settings:
                 doc["ratio_percent"] = float(settings.get("ratio_percent") or 0)
-            if "max_amount" in settings:
-                doc["max_amount"] = float(settings.get("max_amount") or 0)
+            if "match_limit_amount" in settings:
+                doc["match_limit_amount"] = max(0.0, float(settings.get("match_limit_amount") or 0))
+            if "market_limit_amount" in settings:
+                doc["market_limit_amount"] = max(0.0, float(settings.get("market_limit_amount") or 0))
+            doc.pop("max_amount", None)
             if "split_count" in settings:
                 doc["split_count"] = int(settings.get("split_count") or 1)
             if "split_delay_seconds" in settings:
@@ -1823,7 +1829,8 @@ def main() -> int:
             "mode": "fixed",
             "fixed_amount": 50,
             "ratio_percent": 100,
-            "max_amount": 0,
+            "match_limit_amount": 0,
+            "market_limit_amount": 0,
             "split_count": 1,
             "split_delay_seconds": 0,
             "targets": [],

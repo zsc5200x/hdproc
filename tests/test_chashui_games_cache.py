@@ -228,6 +228,7 @@ class ChashuiGamesCacheTest(unittest.TestCase):
             "<ECID>11379304</ECID><LID>100146</LID>"
             "<LEAGUE>瑞典超级联赛</LEAGUE>"
             "<TEAM_H>布洛马波卡纳</TEAM_H><TEAM_C>戴戈福斯</TEAM_C>"
+            "<GNUM_H>701564</GNUM_H><GNUM_C>701563</GNUM_C>"
             "</game></serverresponse>"
         )
         with patch.object(server, "_chashui_get_game_list_xml", return_value=xml):
@@ -243,6 +244,7 @@ class ChashuiGamesCacheTest(unittest.TestCase):
                     "team_c": "戴戈福斯",
                     "gnum_h": "701572",
                     "gnum_c": "701571",
+                    "is_corner": True,
                 },
             )
 
@@ -250,6 +252,32 @@ class ChashuiGamesCacheTest(unittest.TestCase):
         self.assertEqual(resolved["gid"], "8980053")
         self.assertTrue(resolved["resolvedByFixture"])
         self.assertFalse(resolved["resolvedFromHalfGid"])
+
+    def test_non_corner_fixture_rejects_mismatched_provider_team_numbers(self) -> None:
+        from hdzz.api.webui import server
+
+        xml = (
+            "<serverresponse><game><GID>parent-gid</GID><ECID>ec-1</ECID><LID>lid-1</LID>"
+            "<LEAGUE>测试联赛</LEAGUE><TEAM_H>主队</TEAM_H><TEAM_C>客队</TEAM_C>"
+            "<GNUM_H>100</GNUM_H><GNUM_C>101</GNUM_C></game></serverresponse>"
+        )
+        with patch.object(server, "_chashui_get_game_list_xml", return_value=xml):
+            with self.assertRaisesRegex(RuntimeError, "game_not_found"):
+                server._chashui_resolve_game_by_gid(
+                    session=object(),
+                    member={"base_url": "https://example.test", "ver": "v", "uid": "u"},
+                    requested_gid="different-gid",
+                    mode="live",
+                    timeout_s=1,
+                    fixture_locator={
+                        "league": "测试联赛",
+                        "team_h": "主队",
+                        "team_c": "客队",
+                        "gnum_h": "200",
+                        "gnum_c": "201",
+                        "is_corner": False,
+                    },
+                )
 
     def test_fixture_resolved_snapshot_requires_requested_child_gid(self) -> None:
         from hdzz.api.webui import server

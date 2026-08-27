@@ -100,7 +100,6 @@ FOLLOW_SETTINGS_DEFAULTS: Dict[str, Any] = {
     "mode": "fixed",
     "fixed_amount": 50,
     "ratio_percent": 100,
-    "max_amount": 0,
     "match_limit_amount": 0,
     "market_limit_amount": 0,
     "follow_min_odds": None,
@@ -141,6 +140,8 @@ def ensure_follow_settings_defaults(doc: Dict[str, Any]) -> Dict[str, Any]:
         out = dict(doc)
         for k, v in FOLLOW_SETTINGS_DEFAULTS.items():
             out.setdefault(k, v)
+    # max_amount 已从产品和执行链路移除；旧文件中的遗留值不再回传给客户端。
+    out.pop("max_amount", None)
 
     # Keep the tri-state migration behavior documented above.  A boolean is
     # the only value emitted by the current UI, while None preserves legacy
@@ -225,6 +226,7 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
         out: Dict[str, Any] = dict(FOLLOW_SETTINGS_DEFAULTS)
     else:
         out = dict(existing)
+    out.pop("max_amount", None)
 
     if not isinstance(incoming, dict):
         return ensure_follow_settings_defaults(out)
@@ -252,11 +254,6 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
             out["ratio_percent"] = float(incoming.get("ratio_percent") or 0)
         except Exception:
             out["ratio_percent"] = 0.0
-    if "max_amount" in incoming:
-        try:
-            out["max_amount"] = float(incoming.get("max_amount") or 0)
-        except Exception:
-            out["max_amount"] = 0.0
     if "match_limit_amount" in incoming:
         out["match_limit_amount"] = _sanitize_nonnegative_amount(incoming.get("match_limit_amount"))
     if "market_limit_amount" in incoming:

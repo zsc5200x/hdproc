@@ -9,6 +9,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+from .credentials import telegram_credentials_configured
+
 
 def default_settings() -> Dict[str, Any]:
     return {
@@ -116,11 +118,9 @@ def _mask_phone(phone: Any) -> str:
 
 def sanitize_secret_status(secret: Dict[str, Any]) -> Dict[str, Any]:
     secret = secret if isinstance(secret, dict) else {}
-    api_id = str(secret.get("api_id") or "").strip()
-    api_hash = str(secret.get("api_hash") or "").strip()
     session = str(secret.get("session") or "").strip()
     return {
-        "credentials_configured": bool(api_id and api_hash),
+        "credentials_configured": telegram_credentials_configured(secret),
         "session_configured": bool(session),
         "phone_masked": _mask_phone(secret.get("phone")),
     }

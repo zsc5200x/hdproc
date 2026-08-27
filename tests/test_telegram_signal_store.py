@@ -59,6 +59,15 @@ class TelegramSignalStoreTest(unittest.TestCase):
             self.assertNotIn("session", status)
             self.assertNotIn("12345678", json.dumps(status))
 
+    def test_empty_secret_uses_built_in_credentials_without_exposing_them(self) -> None:
+        from hdzz.core.telegram_signal.store import sanitize_secret_status
+
+        status = sanitize_secret_status({})
+
+        self.assertTrue(status["credentials_configured"])
+        self.assertNotIn("api_id", status)
+        self.assertNotIn("api_hash", status)
+
     def test_remember_message_deduplicates_and_bounds_state(self) -> None:
         from hdzz.core.telegram_signal.store import remember_message
 

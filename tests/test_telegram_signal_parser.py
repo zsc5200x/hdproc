@@ -29,6 +29,26 @@ TOTAL_SIGNAL = """10215c监控 会员：cpb3k（D1）单号：***65904
 ￥：12000"""
 
 
+ORDER_CARD_SIGNAL = """🤣新注单提醒 🤣
+🤣中美洲杯
+🤣希尔迪奥诺 v 安提瓜 (1 - 0)
+
+📍 状态：滚球
+玩法：进球大小
+时段：全场
+选择：小 2 @0.98
+
+💰 原注金额：20000
+💲 跟单金额：5601
+🐦‍⬛跟单成功：处理中
+
+来源后台：uq20mvvl4t
+🧠单号：25172905787
+🗓时间：08-26-2026 21:51:11"""
+
+COMPLETED_ORDER_CARD_SIGNAL = ORDER_CARD_SIGNAL.replace("跟单成功：处理中", "跟单成功：5601")
+
+
 class TelegramSignalParserTest(unittest.TestCase):
     def test_parses_live_handicap_signal(self) -> None:
         from hdzz.core.telegram_signal.parser import parse_telegram_bet_signal
@@ -80,6 +100,30 @@ class TelegramSignalParserTest(unittest.TestCase):
 
         self.assertEqual(signal["amount"], 5270.0)
         self.assertEqual(signal["order_id"], "24929088407")
+
+    def test_parses_native_order_card_format(self) -> None:
+        from hdzz.core.telegram_signal.parser import parse_telegram_bet_signal
+
+        signal = parse_telegram_bet_signal(ORDER_CARD_SIGNAL)
+
+        self.assertEqual(signal["order_id"], "25172905787")
+        self.assertEqual(signal["league"], "中美洲杯")
+        self.assertEqual(signal["home"], "希尔迪奥诺")
+        self.assertEqual(signal["away"], "安提瓜")
+        self.assertEqual(signal["score_home"], 1)
+        self.assertEqual(signal["score_away"], 0)
+        self.assertEqual(signal["mode"], "live")
+        self.assertEqual(signal["market"], "total_under")
+        self.assertEqual(signal["selection"], "小")
+        self.assertEqual(signal["line_text"], "2")
+        self.assertEqual(signal["odds"], "0.98")
+        self.assertEqual(signal["amount"], 20000.0)
+
+    def test_rejects_completed_result_card_to_prevent_self_loop(self) -> None:
+        from hdzz.core.telegram_signal.parser import SignalParseError, parse_telegram_bet_signal
+
+        with self.assertRaisesRegex(SignalParseError, "completed_result"):
+            parse_telegram_bet_signal(COMPLETED_ORDER_CARD_SIGNAL)
 
     def test_rejects_unrelated_group_message(self) -> None:
         from hdzz.core.telegram_signal.parser import SignalParseError, parse_telegram_bet_signal

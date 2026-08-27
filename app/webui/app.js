@@ -4710,7 +4710,6 @@ function bindFollowFormDirtyTracking() {
     "follow-mode",
     "follow-fixed",
     "follow-ratio",
-    "follow-max",
     "follow-match-limit",
     "follow-market-limit",
     "follow-min-odds",
@@ -4784,7 +4783,6 @@ function renderFollowForm(options = {}) {
     setFollowModeValue(s.mode);
     if ($("follow-fixed"))       $("follow-fixed").value       = String(s.fixed_amount ?? 0);
     if ($("follow-ratio"))       $("follow-ratio").value       = String(s.ratio_percent ?? 0);
-    if ($("follow-max"))         $("follow-max").value         = String(s.max_amount ?? 0);
     if ($("follow-match-limit")) $("follow-match-limit").value = String(s.match_limit_amount ?? 0);
     if ($("follow-market-limit")) $("follow-market-limit").value = String(s.market_limit_amount ?? 0);
     if ($("follow-split-count")) $("follow-split-count").value = String(s.split_count ?? 1);
@@ -5160,7 +5158,6 @@ function getFollowFormData() {
   const mode        = getFollowModeValue();
   const fixedAmount = parseFloat(($("follow-fixed")?.value || "0").trim()) || 0;
   const ratioPercent= parseFloat(($("follow-ratio")?.value || "0").trim()) || 0;
-  const maxAmount   = parseFloat(($("follow-max")?.value   || "0").trim()) || 0;
   const matchLimitAmount = parseFloat(($("follow-match-limit")?.value || "0").trim()) || 0;
   const marketLimitAmount = parseFloat(($("follow-market-limit")?.value || "0").trim()) || 0;
   const minOddsRaw  = ($("follow-min-odds")?.value || "").trim();
@@ -5228,7 +5225,7 @@ function getFollowFormData() {
 
   return {
     enabled, only_live: onlyLive, mode, fixed_amount: fixedAmount, ratio_percent: ratioPercent,
-    max_amount: maxAmount, match_limit_amount: matchLimitAmount, market_limit_amount: marketLimitAmount,
+    match_limit_amount: matchLimitAmount, market_limit_amount: marketLimitAmount,
     split_count: splitCount, split_delay_seconds: splitDelay,
     follow_min_odds, follow_max_odds,
     reverse_rules, market_rules, targets,
