@@ -132,6 +132,18 @@ def _write_private(path: Path, data: bytes) -> None:
         temp.unlink(missing_ok=True)
 
 
+def _merge_runtime_seed_defaults(config_path: Path, seed_path: Path) -> None:
+    """Backfill non-secret presentation defaults without replacing user configuration."""
+    if not config_path.is_file() or not seed_path.is_file():
+        return
+    config = _read_config(config_path)
+    seed = _read_config(seed_path)
+    if isinstance(config.get("telegram_ui"), dict) or not isinstance(seed.get("telegram_ui"), dict):
+        return
+    config["telegram_ui"] = seed["telegram_ui"]
+    _write_private(config_path, json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8"))
+
+
 def import_config(source: Path, runtime_root: Path) -> Path:
     """Safely import a user config, preserving the current one first."""
 
@@ -286,18 +298,19 @@ def seed_runtime(root: Path, bundle_root: Optional[Path] = None) -> Path:
         _copy_tree(webui_src, webui_dst)
 
     config_dst = root / "config.json"
+    config_seed = bundle / "app" / "tauri_config.example.json"
+    if not config_seed.is_file():
+        config_seed = bundle / "app" / "config.example.json"
     if not config_dst.exists():
         legacy = _legacy_config_candidate(bundle)
         if legacy is not None:
             import_config(legacy, root)
         else:
-            config_src = bundle / "app" / "tauri_config.example.json"
-            if not config_src.is_file():
-                config_src = bundle / "app" / "config.example.json"
-            if config_src.is_file():
+            if config_seed.is_file():
                 # Validate the template before it becomes the user's config.
-                _read_config(config_src)
-                _write_private(config_dst, config_src.read_bytes())
+                _read_config(config_seed)
+                _write_private(config_dst, config_seed.read_bytes())
+    _merge_runtime_seed_defaults(config_dst, config_seed)
     return root
 
 

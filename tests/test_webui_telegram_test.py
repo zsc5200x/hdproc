@@ -93,6 +93,23 @@ class TestWebUiTelegramTest(unittest.TestCase):
         self.assertEqual(updated["telegram_backend_order_proxy"], "socks5://127.0.0.1:7892")
         self.assertNotIn("telegram_status_push_enabled", updated)
 
+    def test_backend_order_test_message_reuses_configured_custom_emoji_theme(self) -> None:
+        message = server.format_backend_order_telegram_test_message(
+            {
+                "telegram_ui": {
+                    "order_text_custom_emoji_ids": {
+                        "title": "theme-title",
+                        "stake": "theme-stake",
+                    }
+                }
+            }
+        )
+
+        self.assertIn('emoji-id="theme-title"', message)
+        self.assertIn('emoji-id="theme-stake"', message)
+        self.assertIn("后台订单推送测试", message)
+        self.assertIn("金额：100", message)
+
     def test_telegram_config_page_has_clear_button_binding(self) -> None:
         html = (APP_DIR / "webui" / "index.html").read_text(encoding="utf-8")
         js = (APP_DIR / "webui" / "app.js").read_text(encoding="utf-8")

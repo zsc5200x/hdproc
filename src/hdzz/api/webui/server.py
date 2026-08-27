@@ -40,6 +40,10 @@ from hdzz.core.follower.strategy import encode_total_line as _encode_total_line
 from hdzz.core.follower.strategy import format_handicap_line_value as _format_handicap_line_value
 from hdzz.core.follower.strategy import format_total_line_value as _format_total_line_value
 from hdzz.core.watcher.order_filter import normalize_member_names
+from hdzz.core.watcher.ag_watcher import (
+    _load_tg_ui_theme as _load_order_tg_ui_theme,
+    format_backend_order_telegram_message,
+)
 from hdzz.api.webui.follow_settings import FOLLOW_SETTINGS_DEFAULTS, ensure_follow_settings_defaults, merge_follow_settings
 from hdzz.api.webui.manual_signal import build_manual_signal_payload, send_manual_signal
 from hdzz.api.webui.signal_pull_config import ensure_signal_pull_config_defaults, merge_signal_pull_config, reset_signal_pull_config
@@ -1050,6 +1054,20 @@ def apply_telegram_config_update(cfg: Dict[str, Any], data: Dict[str, Any]) -> D
     if backend_order_proxy is not None:
         out["telegram_backend_order_proxy"] = backend_order_proxy
     return out
+
+
+def format_backend_order_telegram_test_message(cfg: Dict[str, Any]) -> str:
+    return format_backend_order_telegram_message(
+        {
+            "league": "后台订单推送测试",
+            "sides": "主队 v 客队 (0 - 0)",
+            "betType": "(滚球) 角球数 - 大 / 小",
+            "line": "小 11",
+            "odds": "0.70",
+            "stake": "100",
+        },
+        ui_theme=_load_order_tg_ui_theme(cfg),
+    )
 
 
 def tg_send_message(
@@ -7542,16 +7560,9 @@ class Handler(SimpleHTTPRequestHandler):
             bot_token = str(data.get("bot_token") or cfg.get("telegram_backend_order_bot_token") or "").strip()
             chat_id = str(data.get("chat_id") or cfg.get("telegram_backend_order_chat_id") or "").strip()
             proxy = str(data.get("proxy") or cfg.get("telegram_backend_order_proxy") or "").strip()
-            msg = str(
-                data.get("message")
-                or (
-                    "<b>🤣新注单提醒 🤣</b>\n"
-                    "🤣后台订单推送测试\n"
-                    "🤣主队 v 客队 (0 - 0)\n\n"
-                    "📍 状态：滚球\n玩法：角球大小\n时段：全场\n"
-                    "选择：小 11 @0.70\n金额：100"
-                )
-            ).strip()
+            msg = str(data.get("message") or "").strip()
+            if not msg:
+                msg = format_backend_order_telegram_test_message(cfg)
             if not (bot_token and chat_id):
                 self._send_json(400, {"ok": False, "message": "请先配置后台订单 Bot Token 和群 Chat ID"})
                 return

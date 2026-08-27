@@ -58,6 +58,43 @@ class TauriBackendEntryTest(unittest.TestCase):
             backend.seed_runtime(root, bundle)
             self.assertEqual(json.loads((root / "config.json").read_text())["targets"][0]["name"], "existing")
 
+    def test_existing_config_gets_missing_telegram_ui_without_replacing_user_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "runtime"
+            bundle = Path(temp) / "bundle"
+            (bundle / "app").mkdir(parents=True)
+            (bundle / "app" / "tauri_config.example.json").write_text(
+                json.dumps(
+                    {
+                        "telegram_ui": {"order_text_custom_emoji_ids": {"title": "custom-title"}},
+                        "targets": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            root.mkdir(parents=True)
+            (root / "config.json").write_text(
+                json.dumps(
+                    {
+                        "telegram_bot_token": "keep-token",
+                        "telegram_chat_id": "keep-chat",
+                        "targets": [{"name": "existing"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            backend.seed_runtime(root, bundle)
+
+            config = json.loads((root / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["telegram_bot_token"], "keep-token")
+            self.assertEqual(config["telegram_chat_id"], "keep-chat")
+            self.assertEqual(config["targets"], [{"name": "existing"}])
+            self.assertEqual(
+                config["telegram_ui"]["order_text_custom_emoji_ids"]["title"],
+                "custom-title",
+            )
+
     def test_existing_runtime_webui_is_refreshed_from_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "runtime"

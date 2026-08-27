@@ -178,6 +178,34 @@ class TestAgWatcherTelegramPush(unittest.TestCase):
         self.assertNotIn("跟单成功", txt)
         self.assertNotIn("会员", txt)
 
+    def test_backend_order_message_reuses_custom_emoji_theme(self) -> None:
+        txt = ag_watcher.format_backend_order_telegram_message(
+            {
+                "league": "联赛杯(美加墨)",
+                "sides": "托拉卡 v 奥斯丁 (4 - 4)",
+                "line": "小 11",
+                "odds": "0.70",
+                "stake": "100.0",
+                "betType": "(滚球) 角球数 - 大 / 小",
+            },
+            ui_theme={
+                "text_custom_emoji_ids": {
+                    "title": "101",
+                    "title_suffix": "102",
+                    "league": "103",
+                    "match": "104",
+                    "status": "105",
+                    "stake": "106",
+                },
+                "divider_custom_emoji_ids": ["201", "202"],
+            },
+        )
+
+        for emoji_id in ("101", "102", "103", "104", "105", "106", "201", "202"):
+            self.assertIn(f'emoji-id="{emoji_id}"', txt)
+        self.assertIn("金额：100", txt)
+        self.assertNotIn("跟单金额", txt)
+
     def test_initial_order_message_names_nth_corner_market(self) -> None:
         txt = ag_watcher.format_telegram_message(
             "8hu557555",
@@ -349,7 +377,7 @@ class TestAgWatcherTelegramPush(unittest.TestCase):
                     tg_timeout_s=10,
                     tg_proxy="",
                     order_preview_image="",
-                    ui_theme=None,
+                    ui_theme={"text_custom_emoji_ids": {"title": "theme-title"}},
                     debug=False,
                     only_orders=True,
                     orders_dir=orders_dir,
@@ -366,6 +394,7 @@ class TestAgWatcherTelegramPush(unittest.TestCase):
             self.assertEqual(args[0], "backend-token")
             self.assertEqual(args[1], "-100backend")
             self.assertIn("金额：100", args[2])
+            self.assertIn('emoji-id="theme-title"', args[2])
             self.assertEqual(kwargs["proxy"], "socks5://127.0.0.1:7892")
             saved = ag_watcher.json.loads(
                 (orders_dir / "source-backend.jsonl").read_text(encoding="utf-8").splitlines()[0]

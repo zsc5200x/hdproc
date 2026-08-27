@@ -865,7 +865,10 @@ def format_telegram_message(
     return "\n".join(lines)
 
 
-def format_backend_order_telegram_message(order: Dict[str, Any]) -> str:
+def format_backend_order_telegram_message(
+    order: Dict[str, Any],
+    ui_theme: Optional[Dict[str, Any]] = None,
+) -> str:
     """Format a one-shot source-order notification that is never edited by follow_engine."""
     def fmt_amount(value: Any) -> str:
         try:
@@ -876,24 +879,50 @@ def format_backend_order_telegram_message(order: Dict[str, Any]) -> str:
             return str(int(round(amount)))
         return f"{amount:.2f}".rstrip("0").rstrip(".")
 
-    league = html.escape(str(order.get("league") or "未知"))
-    sides = html.escape(str(order.get("sides") or "未知"))
+    league = str(order.get("league") or "未知")
+    sides = str(order.get("sides") or "未知")
     order_status = "滚球" if "滚球" in str(order.get("betType") or "") else "早盘"
     bet_display = parse_bet_display(order, order_status)
     stake = html.escape(fmt_amount(order.get("stake") or "未知"))
-    return "\n".join(
+    lines = [
+        (
+            f"<b>{_order_card_icon(ui_theme, 'title', '🤣')}新注单提醒"
+            f"{_order_card_suffix(ui_theme, 'title', '🤣')}</b>"
+        )
+    ]
+    divider = _order_card_divider(ui_theme, fallback=_ORDER_DIVIDER_FALLBACKS)
+    if divider:
+        lines.append(divider)
+    lines.extend(
         [
-            "<b>🤣新注单提醒 🤣</b>",
-            f"🤣{league}",
-            f"🤣{sides}",
+            _themed_line(_order_card_icon(ui_theme, "league", "🤣"), html.escape(league), spaced=False),
+            _themed_line(_order_card_icon(ui_theme, "match", "🤣"), html.escape(sides), spaced=False),
             "",
-            f"📍 状态：{html.escape(order_status)}",
-            f"玩法：{html.escape(bet_display['bet_label'])}",
-            f"时段：{html.escape(bet_display['period'])}",
-            f"选择：{html.escape(bet_display['selection_text'])}",
-            f"金额：{stake}",
+            _themed_line(
+                _order_card_icon(ui_theme, "status", "📍"),
+                f"状态：{html.escape(order_status)}",
+                spaced=True,
+            ),
+            _themed_line(
+                _order_card_icon(ui_theme, "play", ""),
+                f"玩法：{html.escape(bet_display['bet_label'])}",
+                spaced=False,
+            ),
+            _themed_line(
+                _order_card_icon(ui_theme, "play", ""),
+                f"时段：{html.escape(bet_display['period'])}",
+                spaced=False,
+            ),
+            _themed_line(
+                _order_card_icon(ui_theme, "play", ""),
+                f"选择：{html.escape(bet_display['selection_text'])}",
+                spaced=False,
+            ),
+            "",
+            _themed_line(_order_card_icon(ui_theme, "stake", "💰"), f"金额：{stake}", spaced=True),
         ]
     )
+    return "\n".join(lines)
 
 
 def format_console_order(target_name: str, order: Dict[str, Any]) -> str:
@@ -2938,7 +2967,7 @@ def poll_once(
                 tg_send(
                     backend_order_bot_token,
                     backend_order_chat_id,
-                    format_backend_order_telegram_message(order),
+                    format_backend_order_telegram_message(order, ui_theme=ui_theme),
                     timeout_s=tg_timeout_s,
                     proxy=backend_order_proxy,
                     reply_markup=None,
