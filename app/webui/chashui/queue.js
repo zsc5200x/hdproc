@@ -1070,8 +1070,7 @@ function deriveMemberExecutionState(member, tasks, nowSeconds) {
   if (status !== 'online') return 'offline';
   const memberId = String((member && member.id) || '').trim();
   if ((tasks || []).some((task) => task && task.memberId === memberId && task.status === 'running')) return 'running';
-  const cooldownUntil = Number((member && member.request_cooldown_until) || 0);
-  if (cooldownUntil > Number(nowSeconds || Date.now() / 1000)) return 'cooldown';
+  // 会员不再有请求冷却；旧版 arsenal.json 的时间戳也不能显示“冷却中”。
   return 'idle';
 }
 
@@ -1293,13 +1292,10 @@ function renderMemberPool() {
     if (String(member.status || '').toLowerCase() === 'online') onlineCount += 1;
     const stats = memberExecutionStats(memberId);
     const activeTask = tasks.find((task) => task.memberId === memberId && task.status === 'running');
-    const cooldownSeconds = Math.max(0, Math.ceil(Number(member.request_cooldown_until || 0) - now));
     const ftBetText = stats.avgFtBetSeconds == null ? '-' : `${stats.avgFtBetSeconds.toFixed(2)}s`;
     const footText = state === 'running'
       ? `FT_bet ${ftBetText} · 正在执行 ${activeTask ? activeTask.label : '拆分单'}`
-      : state === 'cooldown'
-        ? `FT_bet ${ftBetText} · 冷却剩余 ${formatCountdown(now + cooldownSeconds)}`
-        : state === 'offline'
+      : state === 'offline'
           ? `FT_bet ${ftBetText} · 最后在线 ${timestampTime(member.last_ok_at)}`
           : `FT_bet ${ftBetText} · 等待任务分配`;
     const label = String(member.label || member.username || member.id || '未命名会员');

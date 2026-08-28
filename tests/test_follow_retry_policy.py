@@ -147,7 +147,7 @@ class TestFollowRetryPolicy(unittest.TestCase):
 
             self.assertIsNotNone(selected)
             self.assertEqual(selected["id"], "member-b")
-            self.assertTrue(engine._member_has_transient_network_issue(latest_snapshot[0]))
+            self.assertFalse(engine._member_has_transient_network_issue(latest_snapshot[0]))
 
     def test_all_cooldown_members_enter_wait_pool(self) -> None:
         from hdzz.core.follower import engine
@@ -172,14 +172,13 @@ class TestFollowRetryPolicy(unittest.TestCase):
             },
         ]
 
-        self.assertIsNone(
-            engine.pick_random_member_for_stake(
-                members,
-                50.0,
-                target="",
-                mappings={},
-            )
+        selected = engine.pick_random_member_for_stake(
+            members,
+            50.0,
+            target="",
+            mappings={},
         )
+        self.assertIsNotNone(selected)
 
     def test_diagnostic_unknown_result_stays_reconcile_only_retryable(self) -> None:
         from hdzz.core.follower.engine import is_retryable_follow_result

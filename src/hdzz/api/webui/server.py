@@ -6197,7 +6197,8 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/arsenal":
             doc = read_json_file(self._arsenal_path, {"members": []})
             members = doc.get("members") or []
-            request_cooldown_enabled = _as_bool(doc.get("request_cooldown_enabled"), True)
+            # 会员冷却已废弃；旧数据中的时间戳不应再被 WebUI 展示为冷却中。
+            request_cooldown_enabled = False
             platform_state = read_platform_state(self._data_dir)
             out: List[Dict[str, Any]] = []
             for m in members:
@@ -6240,9 +6241,7 @@ class Handler(SimpleHTTPRequestHandler):
                         "last_ok_at": float(m.get("last_ok_at") or 0),
                         "relogin_fail_count": int(m.get("relogin_fail_count") or 0),
                         "request_fail_count": int(m.get("request_fail_count") or 0),
-                        "request_cooldown_until": float(m.get("request_cooldown_until") or 0)
-                        if request_cooldown_enabled
-                        else 0.0,
+                        "request_cooldown_until": 0.0,
                         "request_cooldown_enabled": request_cooldown_enabled,
                         "relogin_backoff_until": float(m.get("relogin_backoff_until") or 0),
                         "balance": _to_float_or_none(m.get("maxcredit") or m.get("nowcredit") or m.get("cash")),

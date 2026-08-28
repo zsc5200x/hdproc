@@ -355,7 +355,7 @@ test('aggregates mixed split statuses as a partial failure', () => {
   assert.equal(groups[0].tasks[1].amount, 80);
 });
 
-test('derives member execution state from task ownership and cooldown', () => {
+test('derives member execution state from task ownership without cooldown', () => {
   const context = loadQueueContext();
   const tasks = [
     { status: 'running', memberId: 'member-a' },
@@ -365,7 +365,7 @@ test('derives member execution state from task ownership and cooldown', () => {
   assert.equal(context.deriveMemberExecutionState({ id: 'member-a', status: 'online' }, tasks, 100), 'running');
   assert.equal(
     context.deriveMemberExecutionState({ id: 'member-c', status: 'online', request_cooldown_until: 130 }, tasks, 100),
-    'cooldown'
+    'idle'
   );
   assert.equal(context.deriveMemberExecutionState({ id: 'member-d', status: 'offline' }, tasks, 100), 'offline');
   assert.equal(context.deriveMemberExecutionState({ id: 'member-e', status: 'online' }, tasks, 100), 'idle');

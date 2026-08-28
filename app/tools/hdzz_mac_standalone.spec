@@ -48,6 +48,7 @@ hiddenimports = [
     "ag_wmc_watch",
     "webui_server",
     "member_arsenal_watch",
+    "odds_snapshot_watch",
     "follow_engine",
     "telegram_bot",
     "telegram_signal_watch",

@@ -1,3 +1,4 @@
+import ast
 import json
 import sys
 import tempfile
@@ -13,6 +14,29 @@ if str(TOOLS_DIR) not in sys.path:
 
 
 class TestMacStandaloneBundleBuilder(unittest.TestCase):
+    def test_actual_pyinstaller_spec_includes_every_standalone_worker(self) -> None:
+        def assignment_value(path: Path, name: str):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in tree.body:
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+                    return node.value
+            self.fail(f"{path} missing assignment: {name}")
+
+        worker_node = assignment_value(ROOT / "app" / "mac_standalone_entry.py", "WORKER_MODULES")
+        worker_modules = set(ast.literal_eval(worker_node).values())
+
+        hiddenimports_node = assignment_value(TOOLS_DIR / "hdzz_mac_standalone.spec", "hiddenimports")
+        packed_modules = {
+            node.value
+            for node in ast.walk(hiddenimports_node)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+
+        self.assertEqual(worker_modules - packed_modules, set())
+
     def test_prepare_telegram_credentials_seed_strips_account_session(self) -> None:
         import build_mac_standalone_app as builder
 

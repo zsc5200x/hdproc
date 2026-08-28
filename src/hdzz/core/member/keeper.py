@@ -2056,7 +2056,8 @@ def patch_member(doc_path: Path, member_id: str, patch: Dict[str, Any]) -> None:
         members = doc.get("members") or []
         changed = False
         out = []
-        cooldown_enabled = _to_bool(doc.get("request_cooldown_enabled"), True)
+        # 会员请求冷却已停用；兼容旧版字段但始终清理旧时间戳。
+        cooldown_enabled = False
         for m in members:
             if isinstance(m, dict) and str(m.get("id") or "") == member_id:
                 nm = dict(m)
@@ -2092,8 +2093,9 @@ def patch_member(doc_path: Path, member_id: str, patch: Dict[str, Any]) -> None:
                         nm["session_stable"] = False
                         nm["session_ready"] = False
                         nm["session_ready_reason"] = "SESSION_CHANGED"
-                if not cooldown_enabled:
-                    nm["request_cooldown_enabled"] = False
+                nm["request_cooldown_enabled"] = False
+                nm["request_cooldown_until"] = 0
+                nm["network_cooldown_until"] = 0
                 out.append(nm)
                 changed = True
             else:
@@ -2180,7 +2182,7 @@ def ensure_member_defaults(m: Dict[str, Any]) -> Dict[str, Any]:
     x.setdefault("network_health", "unknown")
     x.setdefault("network_last_error", "")
     x.setdefault("network_cooldown_until", 0)
-    x.setdefault("request_cooldown_enabled", True)
+    x["request_cooldown_enabled"] = False
     x.setdefault("headful_online_since", 0)
     x.setdefault("auto_switch_back_headless_seconds", 600)
     x.setdefault("auto_relogin", True)
@@ -2291,13 +2293,15 @@ def extract_balance_from_member_data(data: Dict[str, Any]) -> Dict[str, Any]:
 def normalize_doc(doc_path: Path) -> None:
     doc = read_json_file(doc_path, {"members": []})
     members = doc.get("members") or []
-    request_cooldown_enabled = _to_bool(doc.get("request_cooldown_enabled"), True)
+    request_cooldown_enabled = False
     out = []
     for m in members:
         if not isinstance(m, dict):
             continue
         normalized = ensure_member_defaults(m)
         normalized["request_cooldown_enabled"] = request_cooldown_enabled
+        normalized["request_cooldown_until"] = 0
+        normalized["network_cooldown_until"] = 0
         out.append(normalized)
     doc["members"] = out
     doc["request_cooldown_enabled"] = request_cooldown_enabled
@@ -2344,10 +2348,7 @@ def process_member(
     systemtime_min_interval = int(m.get("systemtime_min_interval_seconds") or 0)
     relogin_fail_count = _to_int(m.get("relogin_fail_count"), 0)
     relogin_backoff_until = _to_float(m.get("relogin_backoff_until"), 0.0)
-    cooldown_enabled = _to_bool(
-        m.get("request_cooldown_enabled") if request_cooldown_enabled is None else request_cooldown_enabled,
-        True,
-    )
+    cooldown_enabled = False
     manual_login_requested_at = _to_float(m.get("manual_login_requested_at"), 0.0)
     force_manual_login = manual_login_requested_at > 0
     last_ok_at_initial = _to_float(m.get("last_ok_at"), 0.0)
@@ -2649,9 +2650,9 @@ def process_member(
             if network_error_class:
                 patch.update(
                     {
-                        "network_health": "cooldown",
+                        "network_health": "degraded",
                         "network_last_error": network_error_class,
-                        "network_cooldown_until": now + NETWORK_COOLDOWN_SECONDS,
+                        "network_cooldown_until": 0,
                     }
                 )
 
@@ -2715,9 +2716,9 @@ def process_member(
             if network_error_class:
                 patch.update(
                     {
-                        "network_health": "cooldown",
+                        "network_health": "degraded",
                         "network_last_error": network_error_class,
-                        "network_cooldown_until": now + NETWORK_COOLDOWN_SECONDS,
+                        "network_cooldown_until": 0,
                     }
                 )
             last_ok_at = _to_float(m.get("last_ok_at"), 0.0)
@@ -3145,7 +3146,7 @@ def main() -> int:
 
     while True:
         doc = read_json_file(doc_path, {"members": []})
-        request_cooldown_enabled = _to_bool(doc.get("request_cooldown_enabled"), True)
+        request_cooldown_enabled = False
         members = []
         for raw_member in (doc.get("members") or []):
             if not isinstance(raw_member, dict):

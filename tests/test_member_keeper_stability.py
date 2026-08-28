@@ -236,10 +236,10 @@ class TestMemberKeeperStability(unittest.TestCase):
         final_patch = patch_member_mock.call_args_list[-1][0][2]
         self.assertEqual(final_patch.get("status"), "online")
         self.assertEqual(final_patch.get("request_fail_count"), 1)
-        self.assertGreater(float(final_patch.get("request_cooldown_until") or 0), 1000.0)
-        self.assertEqual(final_patch.get("network_health"), "cooldown")
+        self.assertEqual(float(final_patch.get("request_cooldown_until") or 0), 0.0)
+        self.assertEqual(final_patch.get("network_health"), "degraded")
         self.assertEqual(final_patch.get("network_last_error"), "UPSTREAM_502")
-        self.assertGreater(float(final_patch.get("network_cooldown_until") or 0), 1000.0)
+        self.assertEqual(float(final_patch.get("network_cooldown_until") or 0), 0.0)
         self.assertIn("network_transient:", str(final_patch.get("last_error") or ""))
 
     def test_stale_transient_request_does_not_drop_online_before_threshold(self) -> None:
@@ -285,9 +285,9 @@ class TestMemberKeeperStability(unittest.TestCase):
         final_patch = patch_member_mock.call_args_list[-1][0][2]
         self.assertEqual(final_patch.get("status"), "online")
         self.assertEqual(final_patch.get("request_fail_count"), 1)
-        self.assertEqual(final_patch.get("network_health"), "cooldown")
+        self.assertEqual(final_patch.get("network_health"), "degraded")
         self.assertEqual(final_patch.get("network_last_error"), "READ_TIMEOUT")
-        self.assertGreater(float(final_patch.get("network_cooldown_until") or 0), 1000.0)
+        self.assertEqual(float(final_patch.get("network_cooldown_until") or 0), 0.0)
         self.assertIn("network_transient:", str(final_patch.get("last_error") or ""))
 
     def test_stale_transient_request_keeps_session_after_threshold(self) -> None:
@@ -381,7 +381,7 @@ class TestMemberKeeperStability(unittest.TestCase):
         self.assertNotIn("uid", final_patch)
         self.assertNotIn("cookie", final_patch)
         self.assertIn("network_transient:", str(final_patch.get("last_error") or ""))
-        self.assertGreater(float(final_patch.get("request_cooldown_until") or 0), 1000.0)
+        self.assertEqual(float(final_patch.get("request_cooldown_until") or 0), 0.0)
 
     def test_server_error_first_time_only_marks_offline_and_no_relogin(self) -> None:
         from hdzz.core.member import keeper
@@ -426,7 +426,7 @@ class TestMemberKeeperStability(unittest.TestCase):
         final_patch = patch_member_mock.call_args_list[-1][0][2]
         self.assertEqual(final_patch.get("status"), "offline")
         self.assertEqual(final_patch.get("request_fail_count"), 1)
-        self.assertGreater(float(final_patch.get("request_cooldown_until") or 0), 1000.0)
+        self.assertEqual(float(final_patch.get("request_cooldown_until") or 0), 0.0)
 
     def test_double_login_error_relogins_immediately(self) -> None:
         from hdzz.core.member import keeper

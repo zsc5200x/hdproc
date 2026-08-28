@@ -352,16 +352,8 @@ def _attach_order_preview_image(html_text: str, image_url: str) -> str:
 
 
 def _cooldown_member(member_id: str, seconds: float) -> None:
-    mid = str(member_id or "").strip()
-    if not mid:
-        return
-    try:
-        sec = float(seconds or 0.0)
-    except Exception:
-        sec = 0.0
-    if sec <= 0:
-        return
-    _MEMBER_COOLDOWN_UNTIL[mid] = float(now_ts()) + float(sec)
+    # 会员冷却已停用，保留调用点兼容历史状态恢复。
+    return
 
 
 def _is_member_in_cooldown(member_id: str) -> bool:
@@ -5004,11 +4996,12 @@ def _flag_enabled(value: Any, default: bool = True) -> bool:
 
 def load_arsenal(data_dir: Path) -> Dict[str, Any]:
     doc = _JSON_FILE_CACHE.read_dict(data_dir / "arsenal.json", {"members": []})
-    if "request_cooldown_enabled" in doc:
-        enabled = _flag_enabled(doc.get("request_cooldown_enabled"), True)
-        for member in doc.get("members") or []:
-            if isinstance(member, dict):
-                member["request_cooldown_enabled"] = enabled
+    doc["request_cooldown_enabled"] = False
+    for member in doc.get("members") or []:
+        if isinstance(member, dict):
+            member["request_cooldown_enabled"] = False
+            member["request_cooldown_until"] = 0
+            member["network_cooldown_until"] = 0
     return doc
 
 
@@ -5057,25 +5050,8 @@ def member_balance(member: Dict[str, Any]) -> float:
 
 
 def _member_has_transient_network_issue(member: Dict[str, Any], *, now_s: Optional[float] = None) -> bool:
-    # request_cooldown_enabled=false 表示用户明确要求不做会员请求冷却。
-    # 仍保留 last_error 记录，但不要因此把会员从稳定执行池中排除。
-    if isinstance(member, dict) and not _flag_enabled(member.get("request_cooldown_enabled"), True):
-        return False
-    now_eff = float(now_s if now_s is not None else now_ts())
-    err = str((member or {}).get("last_error") or "").strip().lower()
-    if "network_transient:" in err or "keepalive_transient:" in err:
-        return True
-    if "request_failed:" in err and ("connection aborted" in err or "bad gateway" in err or "remote end closed" in err):
-        return True
-    try:
-        cooldown_until = float((member or {}).get("request_cooldown_until") or 0.0)
-    except Exception:
-        cooldown_until = 0.0
-    try:
-        network_cooldown_until = float((member or {}).get("network_cooldown_until") or 0.0)
-    except Exception:
-        network_cooldown_until = 0.0
-    return max(cooldown_until, network_cooldown_until) > now_eff
+    # 502/超时只记录诊断，不阻止会员再次被选中。
+    return False
 
 
 def _network_error_class(result: Dict[str, Any]) -> str:
@@ -5111,9 +5087,11 @@ def _mark_member_network_cooldown(*, data_dir: Path, member_id: str, error_class
             data_dir / "arsenal.json",
             member_id,
             {
-                "network_health": "cooldown",
+                "network_health": "degraded",
                 "network_last_error": error_class,
-                "network_cooldown_until": now_ts() + NETWORK_COOLDOWN_SECONDS,
+                "network_cooldown_until": 0,
+                "request_cooldown_until": 0,
+                "request_cooldown_enabled": False,
             },
         )
     except Exception:
@@ -5154,8 +5132,7 @@ def _member_eligible_for_stake(
         return False
     if str((member or {}).get("status") or "").strip().lower() != "online":
         return False
-    if _member_has_transient_network_issue(member):
-        return False
+    # 网络抖动不再触发会员冷却；真正的可用性由在线状态和会话完整性决定。
     if not all(
         str((member or {}).get(key) or "").strip()
         for key in ("base_url", "ver", "uid", "cookie")
