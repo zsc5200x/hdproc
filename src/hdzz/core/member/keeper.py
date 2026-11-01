@@ -1,5 +1,6 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import ipaddress
 import json
 import os
@@ -38,6 +39,18 @@ from hdzz.core.member.adspower_api import (
     adspower_stop_profile,
     normalize_adspower_api_base,
 )
+from hdzz.core.member.session_state import (
+    cookie_fingerprint as session_cookie_fingerprint,
+    cookie_names as session_cookie_names,
+    session_fingerprint as member_session_fingerprint,
+)
+from hdzz.common.platform_maintenance import (
+    PLATFORM_MAINTENANCE_CODE,
+    is_platform_maintenance,
+    maintenance_status_message,
+    read_platform_state,
+    record_platform_business_success,
+)
 
 try:
     import urllib3  # type: ignore
@@ -70,6 +83,13 @@ RELOGIN_BACKOFF_MAX_SECONDS = 30
 RELOGIN_TIMEOUT_SWITCH_VISIBLE_FAILS = 1
 # 非请求型探活异常（空响应/非 XML/服务端业务错误）达到阈值后才允许重登。
 TRANSIENT_FAILS_BEFORE_RELOGIN = 3
+NETWORK_COOLDOWN_SECONDS = 30
+
+# 登录响应返回成功后，站点仍可能通过异步脚本继续写入 Cookie。只用一个
+# 固定 sleep 会在不同机器/网络上产生竞态，因此使用短窗口内的连续采样。
+SESSION_STABILIZATION_INTERVAL_MS = 250
+SESSION_STABILIZATION_CONSECUTIVE_SAMPLES = 3
+SESSION_STABILIZATION_TIMEOUT_MS = 5000
 
 
 def _login_form_wait_timeout_ms(timeout_s: int) -> int:
@@ -148,8 +168,31 @@ def _is_transient_request_failure(err_msg: str) -> bool:
     return any(k in s for k in keys)
 
 
+def _network_error_class(err_msg: str) -> str:
+    """Classify read-only transport failures separately from session state."""
+
+    s = str(err_msg or "").lower()
+    if "502" in s or "bad gateway" in s:
+        return "UPSTREAM_502"
+    if "read timed out" in s or "readtimeout" in s:
+        return "READ_TIMEOUT"
+    if "ssl" in s and ("eof" in s or "error" in s):
+        return "SSL_EOF"
+    if "proxyerror" in s:
+        return "PROXY_ERROR"
+    if "connection reset" in s or "connection aborted" in s or "remote disconnected" in s:
+        return "CONNECTION_ERROR"
+    return ""
+
+
 def _force_system_chrome_only() -> bool:
     return _to_bool(os.environ.get("HDZZ_PLAYWRIGHT_SYSTEM_CHROME_ONLY"), False)
+
+
+def _force_bundled_chromium_only() -> bool:
+    """Frozen/Tauri runtimes must not silently fall back to host Chrome."""
+
+    return _to_bool(os.environ.get("HDZZ_PLAYWRIGHT_BUNDLED_ONLY"), False)
 
 
 def _playwright_launch_args(platform_name: str) -> list[str]:
@@ -175,12 +218,16 @@ def _playwright_launch_candidates(
     platform_name: str,
     prefer_system_chrome: bool,
     force_system_chrome_only: bool,
+    bundled_chromium_only: bool = False,
 ) -> list[tuple[str, dict[str, Any]]]:
     candidates: list[tuple[str, dict[str, Any]]] = [("bundled_chromium", {})]
     platform_name = str(platform_name or "")
 
     if force_system_chrome_only:
         return [("channel_chrome", {"channel": "chrome"})]
+
+    if bundled_chromium_only:
+        return candidates
 
     if platform_name == "darwin":
         if prefer_system_chrome:
@@ -312,10 +359,12 @@ def _launch_persistent_context_with_recovery(
         "proxy": proxy_cfg,
     }
     force_system_chrome_only = _force_system_chrome_only()
+    bundled_chromium_only = _force_bundled_chromium_only()
     candidates = _playwright_launch_candidates(
         platform_name=platform_name,
         prefer_system_chrome=prefer_system_chrome,
         force_system_chrome_only=force_system_chrome_only,
+        bundled_chromium_only=bundled_chromium_only,
     )
 
     launch_errors: list[tuple[str, Exception]] = []
@@ -721,6 +770,111 @@ def cookies_to_header(cookies: list[Dict[str, Any]], host: str) -> str:
     return dedupe_cookie_pairs(pairs)
 
 
+def _cookie_capture_fingerprint(cookies: list[Dict[str, Any]]) -> Tuple[list[str], str]:
+    """Return cookie names and a value fingerprint without exposing values."""
+
+    pairs: list[Tuple[str, str]] = []
+    for item in cookies or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        pairs.append((name, str(item.get("value") or "")))
+    pairs.sort(key=lambda pair: pair[0].casefold())
+    names = sorted({name for name, _ in pairs}, key=str.casefold)
+    digest = hashlib.sha256(
+        "\n".join(f"{name}={value}" for name, value in pairs).encode("utf-8")
+    ).hexdigest()
+    return names, digest
+
+
+def stabilize_browser_session(
+    context: Any,
+    page: Any,
+    *,
+    uid: str = "",
+    ver: str = "",
+    base_url: str = "",
+    host: str = "",
+    timeout_ms: int = SESSION_STABILIZATION_TIMEOUT_MS,
+    interval_ms: int = SESSION_STABILIZATION_INTERVAL_MS,
+    consecutive_samples: int = SESSION_STABILIZATION_CONSECUTIVE_SAMPLES,
+    require_uid: bool = True,
+) -> Dict[str, Any]:
+    """Capture a browser session only after its identity remains stable.
+
+    The helper intentionally keeps raw cookie values in memory only. The
+    returned metadata is safe to persist in ``arsenal.json`` and diagnostics.
+    ``require_uid=False`` is used while discovering a UID from an already
+    logged-in page; the final capture always requires the verified UID.
+    """
+
+    timeout_eff = max(1, int(timeout_ms or SESSION_STABILIZATION_TIMEOUT_MS))
+    interval_eff = max(1, int(interval_ms or SESSION_STABILIZATION_INTERVAL_MS))
+    samples_needed = max(2, int(consecutive_samples or SESSION_STABILIZATION_CONSECUTIVE_SAMPLES))
+    deadline = time.monotonic() + (timeout_eff / 1000.0)
+    previous_fingerprint = ""
+    stable_count = 0
+    last_capture: Dict[str, Any] = {}
+
+    while True:
+        try:
+            cookies = list(context.cookies() or [])
+        except Exception as exc:
+            raise RuntimeError(f"SESSION_NOT_STABLE: cookies unavailable ({type(exc).__name__})") from exc
+
+        page_url = ""
+        try:
+            page_url = str(page.url or "")
+        except Exception:
+            page_url = ""
+        host_eff = str(host or "").strip()
+        try:
+            host_eff = urlparse(page_url).hostname or host_eff
+        except Exception:
+            pass
+        base_eff = _infer_base_url_from_page_urls([page_url]) or normalize_member_base_url(base_url)
+        cookie_str = cookies_to_header(cookies, host=host_eff or (urlparse(base_eff).hostname or ""))
+        cookie_names, cookie_fingerprint = _cookie_capture_fingerprint(cookies)
+        uid_text = str(uid or "").strip()
+        ver_text = str(ver or "").strip()
+        session_fingerprint = hashlib.sha256(
+            "|".join((base_eff, uid_text, ver_text, cookie_fingerprint)).encode("utf-8")
+        ).hexdigest()
+        last_capture = {
+            "cookie": cookie_str,
+            "uid": uid_text,
+            "ver": ver_text,
+            "base_url": base_eff,
+            "cookie_names": cookie_names,
+            "cookie_fingerprint": cookie_fingerprint,
+            "session_fingerprint": session_fingerprint,
+        }
+
+        valid = bool(cookie_str and ver_text and (uid_text or not require_uid))
+        if valid and session_fingerprint == previous_fingerprint:
+            stable_count += 1
+        else:
+            stable_count = 1 if valid else 0
+        previous_fingerprint = session_fingerprint
+        if valid and stable_count >= samples_needed:
+            last_capture["stable_samples"] = stable_count
+            last_capture["session_stable"] = True
+            last_capture["session_ready_reason"] = "SESSION_STABLE"
+            return last_capture
+
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "SESSION_NOT_STABLE: identity did not remain stable within "
+                f"{timeout_eff}ms (cookie_count={len(cookie_names)})"
+            )
+        try:
+            page.wait_for_timeout(min(interval_eff, max(1, int((deadline - time.monotonic()) * 1000))))
+        except Exception:
+            time.sleep(min(interval_eff, 50) / 1000.0)
+
+
 def member_ping_system_time(
     *,
     base_url: str,
@@ -867,6 +1021,24 @@ class ReloginResult:
     ver: str
     base_url: str = ""
     proxy: str = ""
+    cookie_names: tuple[str, ...] = ()
+    cookie_fingerprint: str = ""
+    session_fingerprint: str = ""
+    session_stable: bool = False
+    session_ready_reason: str = "SESSION_NOT_STABLE"
+
+
+def _relogin_session_patch(result: ReloginResult) -> Dict[str, Any]:
+    """Convert a stabilized login result into non-sensitive arsenal fields."""
+
+    return {
+        "cookie_names": list(result.cookie_names),
+        "cookie_fingerprint": str(result.cookie_fingerprint or ""),
+        "session_fingerprint": str(result.session_fingerprint or ""),
+        "session_stable": bool(result.session_stable),
+        "session_ready": bool(result.session_stable),
+        "session_ready_reason": str(result.session_ready_reason or "SESSION_NOT_STABLE"),
+    }
 
 
 def relogin_member_via_playwright(
@@ -1052,8 +1224,40 @@ def relogin_member_via_playwright(
                     if chk.get("ok"):
                         data = chk.get("data") or {}
                         mid_try = str(data.get("mid") or data.get("MID") or "").strip()
+                        capture = stabilize_browser_session(
+                            ctx,
+                            page,
+                            uid=uid_try,
+                            ver=ver_try,
+                            base_url=base,
+                            host=host0,
+                        )
+                        stable_cookie = str(capture.get("cookie") or "")
+                        if not stable_cookie:
+                            continue
+                        stable_chk = member_ping_member_data(
+                            base_url=str(capture.get("base_url") or base),
+                            ver=ver_try,
+                            uid=uid_try,
+                            cookie=stable_cookie,
+                            proxy=proxy,
+                            timeout_s=timeout_probe,
+                        )
+                        if not stable_chk.get("ok"):
+                            continue
                         log(f"检测到已登录会话（uid={uid_try} ver={ver_try}），直接复用")
-                        return ReloginResult(cookie=cookie_str, uid=uid_try, mid=mid_try, ver=ver_try)
+                        return ReloginResult(
+                            cookie=stable_cookie,
+                            uid=uid_try,
+                            mid=mid_try,
+                            ver=ver_try,
+                            base_url=str(capture.get("base_url") or base),
+                            cookie_names=tuple(capture.get("cookie_names") or ()),
+                            cookie_fingerprint=str(capture.get("cookie_fingerprint") or ""),
+                            session_fingerprint=str(capture.get("session_fingerprint") or ""),
+                            session_stable=bool(capture.get("session_stable")),
+                            session_ready_reason=str(capture.get("session_ready_reason") or "SESSION_NOT_STABLE"),
+                        )
                 except Exception:
                     continue
         return None
@@ -1268,13 +1472,6 @@ def relogin_member_via_playwright(
             qs = parse_qs(urlparse(resp.url).query)
             ver = (qs.get("ver") or [""])[0].strip()
 
-            # 有些站点会在登录后通过 JS 再写入一批关键 cookie（例如 myGameVer/iorChgSw 等）
-            # 这里稍等片刻再取 cookie，提高下注接口通过率
-            try:
-                page.wait_for_timeout(1200)
-            except Exception:
-                pass
-
             # 触发登录后初始化请求（抓包里常见：memSet/check、service_mainget/login=Y、get_version）
             # 目的：让站点补齐一批关键 cookie / server-side session 状态，避免后续接口报 doubleLogin。
             try:
@@ -1293,34 +1490,40 @@ def relogin_member_via_playwright(
                 api.post(transform_url, form={"p": "get_version", "uid": uid, "langx": "zh-cn"})
             except Exception:
                 pass
-            try:
-                page.wait_for_timeout(800)
-            except Exception:
-                pass
-            cookies = ctx.cookies()
-            # cookie domain 以“最终页面/响应的 host”为准（输入 IP 时经常会跳到域名，否则会过滤掉关键 cookie）
-            host_eff = host0
-            try:
-                host_eff = urlparse(str(page.url or "")).hostname or host_eff
-            except Exception:
-                pass
-            try:
-                host_eff = urlparse(str(resp.url or "")).hostname or host_eff
-            except Exception:
-                pass
-            cookie_str = cookies_to_header(cookies, host=host_eff or host0)
-            if not cookie_str:
-                raise RuntimeError("登录后未拿到 cookie（可能登录未成功或站点策略变化）")
             if not uid:
                 raise RuntimeError("登录后未拿到 uid（响应里没有 uid）")
 
+            capture = stabilize_browser_session(
+                ctx,
+                page,
+                uid=uid,
+                ver=ver,
+                base_url=base,
+                host=host0,
+            )
+            cookie_str = str(capture.get("cookie") or "")
+            if not cookie_str:
+                raise RuntimeError("登录后未拿到 cookie（可能登录未成功或站点策略变化）")
+            base_eff = str(capture.get("base_url") or base).strip()
+
             log("已重新登录并刷新 Cookie/UID，准备继续在线检测")
-            return ReloginResult(cookie=cookie_str, uid=uid, mid=mid, ver=ver)
+            return ReloginResult(
+                cookie=cookie_str,
+                uid=uid,
+                mid=mid,
+                ver=ver,
+                base_url=base_eff,
+                cookie_names=tuple(capture.get("cookie_names") or ()),
+                cookie_fingerprint=str(capture.get("cookie_fingerprint") or ""),
+                session_fingerprint=str(capture.get("session_fingerprint") or ""),
+                session_stable=bool(capture.get("session_stable")),
+                session_ready_reason=str(capture.get("session_ready_reason") or "SESSION_NOT_STABLE"),
+            )
         finally:
-            try:
-                ctx.close()
-            except Exception:
-                pass
+            # sync_playwright() 退出时会统一停止 transport/driver。
+            # 原生 persistent context 在成功复用会话后显式 ctx.close() 可能一直等待
+            # Chrome 的关闭确认，阻塞会员线程池并让后续恢复探活无法继续。
+            pass
 
 
 def relogin_member_via_adspower(
@@ -1418,6 +1621,14 @@ def relogin_member_via_adspower(
                     if chk.get("ok"):
                         data = chk.get("data") or {}
                         mid_try = str(data.get("mid") or data.get("MID") or "").strip()
+                        cookie_items = [
+                            {"name": key, "value": value}
+                            for key, value in parse_cookie_header(cookie_str).items()
+                        ]
+                        cookie_names, cookie_fingerprint = _cookie_capture_fingerprint(cookie_items)
+                        session_fingerprint = hashlib.sha256(
+                            "|".join((base_eff, uid_try, ver_try, cookie_fingerprint)).encode("utf-8")
+                        ).hexdigest()
                         return ReloginResult(
                             cookie=cookie_str,
                             uid=uid_try,
@@ -1425,6 +1636,11 @@ def relogin_member_via_adspower(
                             ver=ver_try,
                             base_url=base_eff,
                             proxy=proxy_eff,
+                            cookie_names=tuple(cookie_names),
+                            cookie_fingerprint=cookie_fingerprint,
+                            session_fingerprint=session_fingerprint,
+                            session_stable=True,
+                            session_ready_reason="ADSPOWER_COOKIE_SNAPSHOT",
                         )
                 except Exception:
                     continue
@@ -1636,6 +1852,22 @@ def relogin_member_via_adspower(
             uid_candidates.extend(adspower_extract_uid_candidates_from_cookies(cookies2))
             uid_candidates.extend(_extract_uid_candidates_from_text(html))
 
+            # AdsPower 页面也可能在登录成功后异步补写 fingerprint Cookie；
+            # 在候选 UID/ver 验证前先做一次短窗口稳定采样。
+            try:
+                capture = stabilize_browser_session(
+                    ctx,
+                    page,
+                    ver=(ver_candidates[0] if ver_candidates else str(ver_hint or "")),
+                    base_url=base_eff,
+                    host=host_eff,
+                    require_uid=False,
+                )
+                if capture.get("cookie"):
+                    cookie_str2 = str(capture["cookie"])
+            except Exception:
+                return None
+
             return verify_candidates(cookie_str2, ver_candidates, uid_candidates)
 
         def try_click_login_submit(page) -> bool:
@@ -1824,13 +2056,46 @@ def patch_member(doc_path: Path, member_id: str, patch: Dict[str, Any]) -> None:
         members = doc.get("members") or []
         changed = False
         out = []
-        cooldown_enabled = _to_bool(doc.get("request_cooldown_enabled"), True)
+        # 会员请求冷却已停用；兼容旧版字段但始终清理旧时间戳。
+        cooldown_enabled = False
         for m in members:
             if isinstance(m, dict) and str(m.get("id") or "") == member_id:
                 nm = dict(m)
+                old_session_fp = str(nm.get("session_fingerprint") or "") or member_session_fingerprint(nm)
+                old_generation = max(0, _to_int(nm.get("session_generation"), 0))
                 nm.update(patch)
-                if not cooldown_enabled:
-                    nm["request_cooldown_enabled"] = False
+                if "cookie" in patch:
+                    nm["cookie_fingerprint"] = session_cookie_fingerprint(str(nm.get("cookie") or ""))
+                    nm["cookie_names"] = session_cookie_names(str(nm.get("cookie") or ""))
+                new_session_fp = member_session_fingerprint(nm)
+                identity_changed = bool(old_session_fp and new_session_fp and old_session_fp != new_session_fp)
+                session_refreshed = bool(
+                    patch.get("session_stable") is True
+                    and any(key in patch for key in ("cookie", "uid", "ver", "base_url"))
+                )
+                if new_session_fp:
+                    nm["session_fingerprint"] = new_session_fp
+                    if "cookie" in patch or not nm.get("cookie_fingerprint"):
+                        nm["cookie_fingerprint"] = session_cookie_fingerprint(str(nm.get("cookie") or ""))
+                    if "cookie" in patch or not nm.get("cookie_names"):
+                        nm["cookie_names"] = session_cookie_names(str(nm.get("cookie") or ""))
+                    if old_generation <= 0:
+                        nm["session_generation"] = 1
+                    elif identity_changed or session_refreshed:
+                        nm["session_generation"] = old_generation + 1
+                    else:
+                        nm["session_generation"] = old_generation
+                    # A watcher-side identity update must not be considered
+                    # bet-ready until the stabilized login result is persisted.
+                    if identity_changed and not any(
+                        key in patch for key in ("session_ready", "session_stable", "session_ready_reason")
+                    ):
+                        nm["session_stable"] = False
+                        nm["session_ready"] = False
+                        nm["session_ready_reason"] = "SESSION_CHANGED"
+                nm["request_cooldown_enabled"] = False
+                nm["request_cooldown_until"] = 0
+                nm["network_cooldown_until"] = 0
                 out.append(nm)
                 changed = True
             else:
@@ -1884,6 +2149,20 @@ def ensure_member_defaults(m: Dict[str, Any]) -> Dict[str, Any]:
     x.setdefault("mid", "")
     x.setdefault("cookie", "")
     x.setdefault("ver", "")
+    if x.get("cookie_names") is None:
+        x["cookie_names"] = session_cookie_names(str(x.get("cookie") or ""))
+    if x.get("cookie_fingerprint") is None:
+        x["cookie_fingerprint"] = session_cookie_fingerprint(str(x.get("cookie") or ""))
+    if x.get("session_fingerprint") is None:
+        x["session_fingerprint"] = member_session_fingerprint(x)
+    if x.get("session_generation") is None:
+        x["session_generation"] = 1 if x.get("session_fingerprint") else 0
+    if x.get("session_stable") is None:
+        x["session_stable"] = bool(x.get("uid") and x.get("cookie") and x.get("ver"))
+    if x.get("session_ready") is None:
+        x["session_ready"] = bool(x.get("uid") and x.get("cookie") and x.get("ver"))
+    if x.get("session_ready_reason") is None:
+        x["session_ready_reason"] = "LEGACY_SESSION" if x.get("session_ready") else "SESSION_MISSING"
     x.setdefault("status", "unknown")
     x.setdefault("last_check_at", 0)
     x.setdefault("last_ok_at", 0)
@@ -1893,10 +2172,17 @@ def ensure_member_defaults(m: Dict[str, Any]) -> Dict[str, Any]:
     x.setdefault("last_error", "")
     x.setdefault("last_systemtime", "")
     x.setdefault("last_systemtime_at", 0)
+    x.setdefault("session_status", x.get("status") or "unknown")
+    x.setdefault("platform_status", "unknown")
+    x.setdefault("platform_maintenance_start_at", 0)
+    x.setdefault("platform_maintenance_until", 0)
     x.setdefault("manual_login_requested_at", 0)
     x.setdefault("request_fail_count", 0)
     x.setdefault("request_cooldown_until", 0)
-    x.setdefault("request_cooldown_enabled", True)
+    x.setdefault("network_health", "unknown")
+    x.setdefault("network_last_error", "")
+    x.setdefault("network_cooldown_until", 0)
+    x["request_cooldown_enabled"] = False
     x.setdefault("headful_online_since", 0)
     x.setdefault("auto_switch_back_headless_seconds", 600)
     x.setdefault("auto_relogin", True)
@@ -2007,13 +2293,15 @@ def extract_balance_from_member_data(data: Dict[str, Any]) -> Dict[str, Any]:
 def normalize_doc(doc_path: Path) -> None:
     doc = read_json_file(doc_path, {"members": []})
     members = doc.get("members") or []
-    request_cooldown_enabled = _to_bool(doc.get("request_cooldown_enabled"), True)
+    request_cooldown_enabled = False
     out = []
     for m in members:
         if not isinstance(m, dict):
             continue
         normalized = ensure_member_defaults(m)
         normalized["request_cooldown_enabled"] = request_cooldown_enabled
+        normalized["request_cooldown_until"] = 0
+        normalized["network_cooldown_until"] = 0
         out.append(normalized)
     doc["members"] = out
     doc["request_cooldown_enabled"] = request_cooldown_enabled
@@ -2060,10 +2348,7 @@ def process_member(
     systemtime_min_interval = int(m.get("systemtime_min_interval_seconds") or 0)
     relogin_fail_count = _to_int(m.get("relogin_fail_count"), 0)
     relogin_backoff_until = _to_float(m.get("relogin_backoff_until"), 0.0)
-    cooldown_enabled = _to_bool(
-        m.get("request_cooldown_enabled") if request_cooldown_enabled is None else request_cooldown_enabled,
-        True,
-    )
+    cooldown_enabled = False
     manual_login_requested_at = _to_float(m.get("manual_login_requested_at"), 0.0)
     force_manual_login = manual_login_requested_at > 0
     last_ok_at_initial = _to_float(m.get("last_ok_at"), 0.0)
@@ -2074,6 +2359,40 @@ def process_member(
     force_session_invalid_relogin = False
 
     now = now_ts()
+
+    platform_state = read_platform_state(doc_path.parent)
+    platform_status = str(platform_state.get("status") or "unknown").strip().lower()
+    if is_platform_maintenance(platform_state):
+        patch_member(
+            doc_path,
+            member_id,
+            {
+                "status": "maintenance",
+                "session_status": prev_status if prev_status not in {"maintenance", "recovering"} else str(m.get("session_status") or "unknown"),
+                "platform_status": "maintenance",
+                "platform_maintenance_start_at": float(platform_state.get("maintenance_start_at") or 0.0),
+                "platform_maintenance_until": float(platform_state.get("maintenance_until") or 0.0),
+                "last_error": maintenance_status_message(platform_state),
+                "manual_login_requested_at": 0,
+                "request_cooldown_until": 0,
+                "relogin_backoff_until": 0,
+            },
+        )
+        return
+
+    recovering_platform = platform_status == "recovering"
+    if recovering_platform and not has_session:
+        patch_member(
+            doc_path,
+            member_id,
+            {
+                "status": "maintenance",
+                "platform_status": "recovering",
+                "last_error": "平台维护结束，等待原会话验证完成",
+                "manual_login_requested_at": 0,
+            },
+        )
+        return
 
     if force_manual_login:
         try:
@@ -2096,7 +2415,9 @@ def process_member(
 
     if session_provider == "adspower":
         need_ads_sync = False
-        if not (uid and cookie and ver):
+        if recovering_platform:
+            need_ads_sync = False
+        elif not (uid and cookie and ver):
             need_ads_sync = True
         elif prev_status in {"offline", "relogin", "unknown"}:
             need_ads_sync = True
@@ -2127,6 +2448,8 @@ def process_member(
                     "mid": rr_ads.mid,
                     "ver": rr_ads.ver or ver,
                     "status": "online",
+                    "session_status": "online",
+                    "platform_status": platform_status,
                     "last_ok_at": now,
                     "last_error": "",
                     "adspower_last_sync_at": now,
@@ -2135,6 +2458,7 @@ def process_member(
                     "request_fail_count": 0,
                     "request_cooldown_until": 0,
                 }
+                patch_ads.update(_relogin_session_patch(rr_ads))
                 if rr_ads.base_url:
                     patch_ads["base_url"] = rr_ads.base_url
                     base_url = str(rr_ads.base_url)
@@ -2142,6 +2466,8 @@ def process_member(
                     patch_ads["proxy"] = rr_ads.proxy
                     proxy = _normalize_proxy_input(str(rr_ads.proxy))
                 patch_member(doc_path, member_id, patch_ads)
+                # AdsPower 会话同步成功也代表会员业务链路已恢复。
+                record_platform_business_success(doc_path.parent, kind="member")
                 uid = rr_ads.uid
                 cookie = rr_ads.cookie
                 ver = rr_ads.ver or ver
@@ -2241,8 +2567,13 @@ def process_member(
             patch.update(
                 {
                     "status": "online",
+                    "session_status": "online",
+                    "platform_status": platform_status,
                     "last_ok_at": now,
                     "last_error": "",
+                    "network_health": "healthy",
+                    "network_last_error": "",
+                    "network_cooldown_until": 0,
                     "request_fail_count": 0,
                     "request_cooldown_until": 0,
                     "relogin_fail_count": 0,
@@ -2250,6 +2581,7 @@ def process_member(
                 }
             )
             patch_member(doc_path, member_id, patch)
+            record_platform_business_success(doc_path.parent, kind="member")
             if prev_status != "online":
                 log_and_maybe_push(
                     config_path=Path("config.json"),
@@ -2272,6 +2604,20 @@ def process_member(
         err_lower = err.lower()
         is_double_login = err_lower.startswith("double_login")
         is_login_invalid = _is_login_invalid_keepalive_error(err, data_obj)
+        if recovering_platform and not (is_double_login or is_login_invalid):
+            patch_member(
+                doc_path,
+                member_id,
+                {
+                    "status": "maintenance",
+                    "platform_status": "recovering",
+                    "last_error": "平台维护结束，正在验证原会话",
+                    "manual_login_requested_at": 0,
+                    "request_cooldown_until": 0,
+                    "relogin_backoff_until": 0,
+                },
+            )
+            return
         if is_login_invalid:
             force_session_invalid_relogin = True
         if session_provider == "adspower" and (is_double_login or is_login_invalid):
@@ -2284,6 +2630,7 @@ def process_member(
 
         if is_request_failed:
             request_fail_count = _to_int(m.get("request_fail_count"), 0) + 1
+            network_error_class = _network_error_class(err)
             request_backoff_base = max(REQUEST_BACKOFF_BASE_SECONDS, min(60, max(5, int(ping_min_interval or 0))))
             if session_provider == "adspower":
                 request_backoff_base = min(request_backoff_base, 5)
@@ -2300,6 +2647,14 @@ def process_member(
                     "request_cooldown_until": now + request_cooldown if cooldown_enabled else 0,
                 }
             )
+            if network_error_class:
+                patch.update(
+                    {
+                        "network_health": "degraded",
+                        "network_last_error": network_error_class,
+                        "network_cooldown_until": 0,
+                    }
+                )
 
             last_ok_at = _to_float(m.get("last_ok_at"), 0.0)
             keep_online = is_transient_request and last_ok_at > 0 and (now - last_ok_at) <= float(ONLINE_GRACE_SECONDS)
@@ -2341,6 +2696,7 @@ def process_member(
 
         if is_transient_keepalive:
             transient_fail_count = _to_int(m.get("request_fail_count"), 0) + 1
+            network_error_class = _network_error_class(err)
             transient_backoff_base = max(REQUEST_BACKOFF_BASE_SECONDS, min(60, max(5, int(ping_min_interval or 0))))
             if session_provider == "adspower":
                 transient_backoff_base = min(transient_backoff_base, 5)
@@ -2357,6 +2713,14 @@ def process_member(
                     "request_cooldown_until": now + transient_cooldown if cooldown_enabled else 0,
                 }
             )
+            if network_error_class:
+                patch.update(
+                    {
+                        "network_health": "degraded",
+                        "network_last_error": network_error_class,
+                        "network_cooldown_until": 0,
+                    }
+                )
             last_ok_at = _to_float(m.get("last_ok_at"), 0.0)
             if last_ok_at > 0 and (now - last_ok_at) <= float(ONLINE_GRACE_SECONDS):
                 if cooldown_enabled and session_provider == "adspower":
@@ -2471,6 +2835,8 @@ def process_member(
                 "mid": rr_ads2.mid,
                 "ver": rr_ads2.ver or ver,
                 "status": "online",
+                "session_status": "online",
+                "platform_status": platform_status,
                 "last_ok_at": now_ts(),
                 "last_error": "",
                 "relogin_fail_count": 0,
@@ -2480,6 +2846,7 @@ def process_member(
                 "headful_online_since": 0,
                 "adspower_last_sync_at": now_ts(),
             }
+            patch_ads2.update(_relogin_session_patch(rr_ads2))
             if base_url_eff:
                 patch_ads2["base_url"] = base_url_eff
             if adspower_sync_proxy and proxy_eff:
@@ -2498,6 +2865,7 @@ def process_member(
             except Exception:
                 pass
             patch_member(doc_path, member_id, patch_ads2)
+            record_platform_business_success(doc_path.parent, kind="member")
             log_and_maybe_push(
                 config_path=Path("config.json"),
                 data_dir=doc_path.parent,
@@ -2598,6 +2966,8 @@ def process_member(
             "mid": rr.mid,
             "ver": rr.ver or ver,
             "status": "online",
+            "session_status": "online",
+            "platform_status": platform_status,
             "last_ok_at": now_ts(),
             "last_error": "",
             "relogin_fail_count": 0,
@@ -2607,6 +2977,9 @@ def process_member(
             "headful_online_since": now_ts() if (not headless_eff) else 0,
             "relogin_headless": bool(headless_eff),
         }
+        patch.update(_relogin_session_patch(rr))
+        if rr.base_url:
+            patch["base_url"] = rr.base_url
         # 重登成功后立即拉一次 get_member_data，尽快填充余额/额度
         try:
             res2 = member_ping_member_data(
@@ -2622,6 +2995,7 @@ def process_member(
         except Exception:
             pass
         patch_member(doc_path, member_id, patch)
+        record_platform_business_success(doc_path.parent, kind="member")
         log_and_maybe_push(
             config_path=Path("config.json"),
             data_dir=doc_path.parent,
@@ -2657,6 +3031,8 @@ def process_member(
                     "mid": rr2.mid,
                     "ver": rr2.ver or ver,
                     "status": "online",
+                    "session_status": "online",
+                    "platform_status": platform_status,
                     "last_ok_at": now_ts(),
                     "last_error": "",
                     "relogin_fail_count": 0,
@@ -2667,7 +3043,11 @@ def process_member(
                     # 后续继续用可视/无头由你自己在 arsenal.json 里控制；这里不强制改回去
                     "relogin_headless": False,
                 }
+                patch.update(_relogin_session_patch(rr2))
+                if rr2.base_url:
+                    patch["base_url"] = rr2.base_url
                 patch_member(doc_path, member_id, patch)
+                record_platform_business_success(doc_path.parent, kind="member")
                 log_and_maybe_push(
                     config_path=Path("config.json"),
                     data_dir=doc_path.parent,
@@ -2766,7 +3146,7 @@ def main() -> int:
 
     while True:
         doc = read_json_file(doc_path, {"members": []})
-        request_cooldown_enabled = _to_bool(doc.get("request_cooldown_enabled"), True)
+        request_cooldown_enabled = False
         members = []
         for raw_member in (doc.get("members") or []):
             if not isinstance(raw_member, dict):

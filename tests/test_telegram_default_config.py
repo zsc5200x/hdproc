@@ -9,6 +9,10 @@ class TestTelegramDefaultConfig(unittest.TestCase):
         cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
 
         self.assertIs(cfg.get("telegram_order_forward_enabled"), True)
+        self.assertIs(cfg.get("telegram_backend_order_push_enabled"), False)
+        self.assertIn("telegram_backend_order_bot_token", cfg)
+        self.assertIn("telegram_backend_order_chat_id", cfg)
+        self.assertNotIn("telegram_status_push_enabled", cfg)
         ui = cfg.get("telegram_ui") or {}
         text_ids = ui.get("order_text_custom_emoji_ids") or {}
         button_ids = ui.get("order_button_custom_emoji_ids") or {}

@@ -75,6 +75,18 @@
     const source = input || {};
     const model = source.model || {};
     const searchOnly = !!source.searchOnly;
+    if (model.readOnly) {
+      return {
+        league: text(model.league), orderKind: text(model.orderKind),
+        homeTeam: text(model.homeTeam), awayTeam: text(model.awayTeam), score: text(model.score),
+        sourceLabel: text(model.sourceLabel), statusLine: text(model.statusLine),
+        marketText: formatMarketText(model.selectionText, model.oddsText, model.marketText),
+        marketCaption: text(model.marketText), betAmountText: text(model.stakeStr),
+        followAmountText: "—", followStatusText: model.statusText === "接口未提供" ? "只读监控" : `只读 · ${text(model.statusText)}`, followTone: "idle",
+        settlementText: text(model.settlementText, "未提供"), settlementTone: "pending",
+        isSearchOnly: false, readOnly: true,
+      };
+    }
     const settlement = settlementStatus(source.settlement, searchOnly);
     const marketText = searchOnly
       ? "—"

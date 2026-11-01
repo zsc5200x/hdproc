@@ -153,9 +153,11 @@
     const map = new Map();
     for (const row of rows) {
       const label = keyFn(row) || '未分类';
-      const prev = map.get(label) || { label, count: 0, stake: 0 };
+      const prev = map.get(label) || { label, count: 0, stake: 0, stakeByCurrency: {} };
       prev.count += 1;
       prev.stake += getOrderStake(row);
+      const currency = normalizeText(row.currency) || (row.read_only ? '币种未提供' : 'CNY');
+      prev.stakeByCurrency[currency] = (prev.stakeByCurrency[currency] || 0) + getOrderStake(row);
       map.set(label, prev);
     }
     return [...map.values()].sort((a, b) => b.count - a.count || b.stake - a.stake || a.label.localeCompare(b.label, 'zh-CN'));
@@ -184,6 +186,11 @@
     const current = Object.assign({}, DEFAULT_ORDER_DASHBOARD_FILTERS, filters || {});
     const filtered = filterAndSortOrders(source, current, options || {});
     const totalStake = filtered.reduce((sum, row) => sum + getOrderStake(row), 0);
+    const stakeByCurrency = {};
+    for (const row of filtered) {
+      const currency = normalizeText(row.currency) || (row.read_only ? '币种未提供' : 'CNY');
+      stakeByCurrency[currency] = (stakeByCurrency[currency] || 0) + getOrderStake(row);
+    }
     return {
       filters: {
         leagues: uniqueSorted(source, (row) => row && row.league),
@@ -194,6 +201,7 @@
         liveOrders: filtered.filter((row) => getOrderType(row) === '滚球').length,
         earlyOrders: filtered.filter((row) => getOrderType(row) === '早盘').length,
         totalStake,
+        stakeByCurrency,
         averageStake: filtered.length ? totalStake / filtered.length : 0,
       },
       charts: {

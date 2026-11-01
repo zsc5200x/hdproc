@@ -6,6 +6,7 @@ import json
 import os
 import re
 import threading
+import tempfile
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -93,6 +94,12 @@ class SingleInstanceFileLock:
         except (OSError, IOError):
             pass
         handle.close()
+
+
+def _global_snapshot_lock_path() -> Path:
+    """Return the per-user lock shared by source and Tauri runtimes."""
+    uid = getattr(os, "getuid", lambda: 0)()
+    return Path(tempfile.gettempdir()) / f"hdzz-odds-snapshot-watch-{uid}.lock"
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -563,7 +570,13 @@ def market_demand(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     fields = intent_market_fields(intent)
     fields["mode"] = mode
     fields["order_id"] = str(order.get("orderId") or ((order.get("raw") or {}).get("TID") if isinstance(order.get("raw"), dict) else "") or "")
-    fields["fixture_locator"] = _order_fixture_locator(order)
+    fixture_locator = _order_fixture_locator(order)
+    # Corner orders carry the CN child board's provider team numbers, while
+    # get_game_list exposes the ordinary parent fixture's different numbers.
+    # Keep this explicit so parent resolution can trust exact names for corner
+    # orders without weakening number matching for ordinary football markets.
+    fixture_locator["is_corner"] = bool(intent.is_corner)
+    fields["fixture_locator"] = fixture_locator
     return fields
 
 
@@ -573,7 +586,7 @@ def _plain_order_text(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _order_fixture_locator(order: Dict[str, Any]) -> Dict[str, str]:
+def _order_fixture_locator(order: Dict[str, Any]) -> Dict[str, Any]:
     """Keep source fixture identity for child-board gid resolution.
 
     Corner full/half gids can exist only inside ``game_more`` and may be absent
@@ -1363,7 +1376,7 @@ class ActiveMarketScheduler:
         member_id: str,
         max_workers: int,
         requested_interval_ms: float = 400.0,
-        deadline_ms: float = 5000.0,
+        deadline_ms: float = 6000.0,
         public_timeout_s: float = 2.0,
         resolve_timeout_s: float = 2.0,
         snapshot_timeout_s: float = 2.5,
@@ -1372,7 +1385,7 @@ class ActiveMarketScheduler:
         self.data_dir = Path(data_dir)
         self.member_id = str(member_id or "")
         self.requested_interval_ms = max(50.0, float(requested_interval_ms or 400.0))
-        self.deadline_ms = max(100.0, float(deadline_ms or 5000.0))
+        self.deadline_ms = max(100.0, float(deadline_ms or 6000.0))
         self.public_timeout_s = max(1.0, float(public_timeout_s or 2.0))
         self.resolve_timeout_s = max(1.0, float(resolve_timeout_s or self.public_timeout_s))
         self.snapshot_timeout_s = max(1.0, float(snapshot_timeout_s or self.public_timeout_s))
@@ -1628,7 +1641,7 @@ def main() -> int:
     parser.add_argument("--member-id", default="")
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--target-interval-ms", type=float, default=400.0)
-    parser.add_argument("--market-deadline-ms", type=float, default=5000.0)
+    parser.add_argument("--market-deadline-ms", type=float, default=6000.0)
     parser.add_argument("--public-timeout-s", type=float, default=2.0)
     parser.add_argument("--resolve-timeout-s", type=float, default=2.0)
     parser.add_argument("--snapshot-timeout-s", type=float, default=2.5)
@@ -1640,6 +1653,11 @@ def main() -> int:
     instance_lock = SingleInstanceFileLock(data_dir / ".odds_snapshot_watch.lock")
     if not instance_lock.acquire():
         print("odds_snapshot_watch already running for this data directory", flush=True)
+        return 2
+    global_lock = SingleInstanceFileLock(_global_snapshot_lock_path())
+    if not global_lock.acquire():
+        instance_lock.release()
+        print("odds_snapshot_watch already running for this user", flush=True)
         return 2
     state_path = data_dir / "follow_state.json"
     print(
@@ -1684,6 +1702,7 @@ def main() -> int:
     finally:
         _MEMBER_QUOTE_SCHEDULER.close()
         scheduler.close()
+        global_lock.release()
         instance_lock.release()
 
 

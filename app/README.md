@@ -47,7 +47,7 @@ python webui_server.py --host 127.0.0.1 --port 9999 --orders-dir orders --webui-
 ## 弹药库 / 跟单设置（WebUI）
 
 - `弹药库`：管理会员端账号（用于后续跟单执行）。数据保存在 `data/arsenal.json`。
-- `跟单设置`：保存规则（固定金额/比例/封顶、选择信号来源与执行账号）。数据保存在 `data/follow_settings.json`。
+- `跟单设置`：保存规则（固定金额/比例、单场与盘口累计限额、选择信号来源与执行账号）。数据保存在 `data/follow_settings.json`。
 - 说明：只启动 WebUI 不会自动下注；需要额外启动 `follow_engine.py`（或用 `run_all.ps1`）才会执行跟单下注。
 
 ## 会员端自动登录（弹药库自动补齐 uid/cookie）

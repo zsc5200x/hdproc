@@ -87,6 +87,115 @@ test('member execution center replaces the legacy queue page structure', () => {
   assert.doesNotMatch(styles, /animation:\s*(ring|route)/);
 });
 
+test('member cards use content-driven rows and readable metrics', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'queue.html'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'modern-queue.css'), 'utf8');
+
+  assert.match(page, /modern-queue\.css\?v=20260827-performance-panel-8/);
+  assert.match(styles, /\.memberExecutionPanel \.memberPool\s*\{[\s\S]*?grid-auto-rows:\s*max-content/);
+  assert.match(styles, /\.memberExecutionPanel \.memberCard\s*\{[\s\S]*?min-height:\s*136px[\s\S]*?height:\s*max-content/);
+  assert.match(styles, /\.memberExecutionPanel \.memberStats span\s*\{[\s\S]*?font-size:\s*9px/);
+  assert.match(styles, /\.memberExecutionPanel \.memberStats strong\s*\{[\s\S]*?font:\s*600 11px\/1\.3/);
+});
+
+test('order cards omit team role labels and preserve the clock icon shape', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'queue.html'), 'utf8');
+  const queueJs = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'queue.js'), 'utf8');
+  const redesignStyles = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'redesign-queue.css'), 'utf8');
+  const modernStyles = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'modern-queue.css'), 'utf8');
+
+  assert.match(page, /queue\.js\?v=20260827-performance-panel-8/);
+  assert.doesNotMatch(queueJs, /<span>主队<\/span>|<span>客队<\/span>/);
+  assert.match(queueJs, /class="orderTitleDivider"/);
+  assert.doesNotMatch(redesignStyles, /\.orderCardTitle i\s*\{/);
+  assert.match(redesignStyles, /\.orderCardTime i\s*\{[\s\S]*?flex:\s*0 0 1em[\s\S]*?background:\s*transparent/);
+  assert.doesNotMatch(modernStyles, /\.orderCardTitle i\s*\{/);
+  assert.match(modernStyles, /\.orderCardTime i\s*\{[\s\S]*?flex:\s*0 0 1em[\s\S]*?background:\s*transparent/);
+});
+
+test('order teams stay visually grouped around the versus marker', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'queue.html'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'redesign-queue.css'), 'utf8');
+
+  assert.match(page, /redesign-queue\.css\?v=20260827-performance-panel-8/);
+  assert.match(styles, /\.orderMatchPanel\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) 30px minmax\(0, 1fr\)[\s\S]*?gap:\s*10px/);
+  assert.match(styles, /\.orderTeam\.homeTeam\s*\{\s*text-align:\s*right/);
+  assert.match(styles, /\.orderTeam\.awayTeam\s*\{\s*text-align:\s*left/);
+  assert.match(styles, /\.orderMatchPanel\.singleMatch \.orderTeam\s*\{\s*text-align:\s*center/);
+});
+
+test('order header centers the league above the versus marker', () => {
+  const queueJs = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'queue.js'), 'utf8');
+  const redesignStyles = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'redesign-queue.css'), 'utf8');
+  const modernStyles = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'modern-queue.css'), 'utf8');
+
+  assert.match(queueJs, /class="orderLeague" title="\$\{escapeHtml\(league\)\}"/);
+  assert.match(redesignStyles, /\.orderCardTop\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 32%\) minmax\(0, 1fr\)/);
+  assert.match(redesignStyles, /\.orderLeague\s*\{[\s\S]*?grid-column:\s*2[\s\S]*?justify-self:\s*center[\s\S]*?text-overflow:\s*ellipsis/);
+  assert.match(redesignStyles, /\.orderSummaryCard \.orderStatusBadge\s*\{[\s\S]*?grid-column:\s*3[\s\S]*?justify-self:\s*end/);
+  assert.match(modernStyles, /\.orderLeague\s*\{[\s\S]*?font-size:\s*11px[\s\S]*?font-weight:\s*600/);
+});
+
+test('performance panel replaces health status with live follow parameters', () => {
+  const context = loadQueueContext();
+  const page = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'queue.html'), 'utf8');
+  const queueJs = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'queue.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'app', 'webui', 'chashui', 'modern-queue.css'), 'utf8');
+  const view = context.buildFollowParameterView({
+    mode: 'ratio',
+    ratio_percent: 100,
+    split_count: 2,
+    split_delay_seconds: 0,
+    match_limit_amount: 0,
+    market_limit_amount: 0,
+    follow_min_odds: null,
+    follow_max_odds: null,
+    only_live: false,
+    reverse_rules: { all: false, total: false, handicap: false },
+    execution_mode: 'snapshot_direct',
+  });
+
+  assert.doesNotMatch(page, /healthStrip|kpiHealthState|kpiSnapshotVersion/);
+  assert.match(page, /id="currentParamsTitle">当前跟单参数/);
+  assert.match(page, /id="paramFollowAmount"/);
+  assert.match(page, /<dt>只跟滚球<\/dt><dd id="paramOnlyLive"/);
+  assert.match(page, /<dt>反打规则<\/dt><dd id="paramReverseMode"/);
+  assert.match(queueJs, /loadFollowSettings\(\);[\s\S]*?STATUS_REFRESH_MS/);
+  assert.match(styles, /\.currentParamsGrid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(page, /class="panelHeading performanceHeading"/);
+  assert.match(page, /class="memberKpi online"/);
+  assert.match(page, /class="taskKpi success"/);
+  assert.match(styles, /\.performancePanel \.performanceMetrics\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(styles, /\.performancePanel \.memberKpiGrid strong\s*\{[\s\S]*?font:\s*650 21px\/1/);
+  assert.match(styles, /\.currentParamsGrid dt\s*\{[\s\S]*?font-size:\s*10px/);
+  assert.equal(view.followAmount, '比例 100%');
+  assert.equal(view.splitCount, '2 单');
+  assert.equal(view.splitDelay, '无延迟');
+  assert.equal(view.matchLimit, '不限');
+  assert.equal(view.marketLimit, '不限');
+  assert.equal(view.oddsRange, '不限');
+  assert.equal(view.onlyLive, '关闭');
+  assert.equal(view.reverseMode, '关闭');
+  assert.equal(view.executionMode, 'Snapshot 直连');
+
+  assert.equal(context.buildFollowParameterView({
+    only_live: true,
+    reverse_rules: { all: true, total: true, handicap: true },
+  }).onlyLive, '已开启');
+  assert.equal(context.buildFollowParameterView({
+    reverse_rules: { all: true, total: true, handicap: true },
+  }).reverseMode, '全局反打');
+  assert.equal(context.buildFollowParameterView({
+    reverse_rules: { all: false, total: true, handicap: false },
+  }).reverseMode, '大小球');
+  assert.equal(context.buildFollowParameterView({
+    reverse_rules: { all: false, total: false, handicap: true },
+  }).reverseMode, '让球');
+  assert.equal(context.buildFollowParameterView({
+    reverse_rules: { all: false, total: true, handicap: true },
+  }).reverseMode, '大小球 + 让球');
+});
+
 test('labels legacy precheck history without exposing a removed execution stage', () => {
   const context = loadQueueContext();
 
@@ -246,7 +355,7 @@ test('aggregates mixed split statuses as a partial failure', () => {
   assert.equal(groups[0].tasks[1].amount, 80);
 });
 
-test('derives member execution state from task ownership and cooldown', () => {
+test('derives member execution state from task ownership without cooldown', () => {
   const context = loadQueueContext();
   const tasks = [
     { status: 'running', memberId: 'member-a' },
@@ -256,7 +365,7 @@ test('derives member execution state from task ownership and cooldown', () => {
   assert.equal(context.deriveMemberExecutionState({ id: 'member-a', status: 'online' }, tasks, 100), 'running');
   assert.equal(
     context.deriveMemberExecutionState({ id: 'member-c', status: 'online', request_cooldown_until: 130 }, tasks, 100),
-    'cooldown'
+    'idle'
   );
   assert.equal(context.deriveMemberExecutionState({ id: 'member-d', status: 'offline' }, tasks, 100), 'offline');
   assert.equal(context.deriveMemberExecutionState({ id: 'member-e', status: 'online' }, tasks, 100), 'idle');

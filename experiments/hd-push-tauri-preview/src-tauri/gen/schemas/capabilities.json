@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capability for the main window","local":true,"windows":["main"],"permissions":["core:default"]}}
+{"default":{"identifier":"default","description":"Default capability for the main window","remote":{"urls":["http://127.0.0.1:9999/*"]},"local":true,"windows":["main"],"permissions":["core:default","core:window:allow-start-dragging"]}}

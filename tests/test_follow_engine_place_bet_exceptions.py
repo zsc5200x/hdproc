@@ -1,3 +1,4 @@
+import json
 import tempfile
 import sys
 import time
@@ -67,6 +68,10 @@ class TestSnapshotRevisionRetry(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
+            (data_dir / "arsenal.json").write_text(
+                json.dumps({"members": [self._member("member-a"), self._member("member-b")]}),
+                encoding="utf-8",
+            )
             cache = data_dir / "odds_snapshot_cache.json"
             first_snapshot = self._snapshot("0.85")
             first = store_snapshot(cache, first_snapshot, gid="snapshot-master-1", mode="live")
@@ -80,7 +85,9 @@ class TestSnapshotRevisionRetry(unittest.TestCase):
             )
             with patch.object(engine, "MemberExecutor", return_value=FakeExecutor()), patch.object(
                 engine, "_get_member_session", return_value=object()
-            ), patch.object(engine, "_invalidate_member_session"):
+            ), patch.object(engine, "_invalidate_member_session"), patch.object(
+                engine, "member_warmup_menu"
+            ):
                 result_a = engine.place_bet(
                     data_dir=data_dir, settings={"snapshot_max_age_ms": 5000},
                     member=self._member("member-a"), order=self._order(), stake=100,

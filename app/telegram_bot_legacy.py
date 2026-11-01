@@ -1151,7 +1151,7 @@ def follow_keyboard() -> Dict[str, Any]:
     return {
         "keyboard": [
             [{"text": "固定金额"}, {"text": "比例跟单"}],
-            [{"text": "封顶金额"}, {"text": "启用/停用"}, {"text": "查看当前配置"}],
+            [{"text": "启用/停用"}, {"text": "查看当前配置"}],
             [{"text": BTN_BACK}],
         ],
         "resize_keyboard": True,
@@ -1163,13 +1163,20 @@ def follow_keyboard() -> Dict[str, Any]:
 def ensure_follow_settings(path: Path) -> Dict[str, Any]:
     if path.exists():
         obj = read_json(path)
-        return obj if isinstance(obj, dict) else {}
+        if isinstance(obj, dict):
+            obj = dict(obj)
+            obj.pop("max_amount", None)
+            obj.setdefault("match_limit_amount", 0)
+            obj.setdefault("market_limit_amount", 0)
+            return obj
+        return {}
     default = {
         "enabled": False,
         "mode": "fixed",
         "fixed_amount": 50,
         "ratio_percent": 100,
-        "max_amount": 0,
+        "match_limit_amount": 0,
+        "market_limit_amount": 0,
         "targets": [],
         "members": [],
         "updated_at": "",
@@ -1181,7 +1188,9 @@ def ensure_follow_settings(path: Path) -> Dict[str, Any]:
 def write_follow_settings(path: Path, updates: Dict[str, Any]) -> Dict[str, Any]:
     cfg = ensure_follow_settings(path)
     cfg = dict(cfg)
+    cfg.pop("max_amount", None)
     cfg.update({k: v for k, v in updates.items()})
+    cfg.pop("max_amount", None)
     cfg["updated_at"] = now_iso()
     atomic_write_json(path, cfg)
     return cfg
@@ -1233,7 +1242,8 @@ def follow_settings_summary(cfg: Dict[str, Any]) -> str:
     mode = str(cfg.get("mode") or "fixed")
     fixed_amount = cfg.get("fixed_amount")
     ratio_percent = cfg.get("ratio_percent")
-    max_amount = cfg.get("max_amount")
+    match_limit_amount = cfg.get("match_limit_amount", 0)
+    market_limit_amount = cfg.get("market_limit_amount", 0)
     mode_zh = "固定金额" if mode == "fixed" else ("比例跟单" if mode == "ratio" else mode)
     return (
         "<b>⚙️ 跟单配置</b>\n"
@@ -1243,7 +1253,8 @@ def follow_settings_summary(cfg: Dict[str, Any]) -> str:
         "执行：弹药库会员随机（余额足够优先）\n"
         f"固定金额：{fixed_amount}\n"
         f"比例：{ratio_percent}%\n"
-        f"封顶：{max_amount}（0=不封顶）\n"
+        f"单场限额：{match_limit_amount}（0=不限）\n"
+        f"盘口限额：{market_limit_amount}（0=不限）\n"
         f"日期：{today_str()}"
     )
 
@@ -1260,7 +1271,7 @@ def is_follow_config_command(text: str) -> bool:
 
 
 def is_follow_button(text: str) -> bool:
-    return str(text or "").strip() in {"固定金额", "比例跟单", "封顶金额", "启用/停用", "查看当前配置"}
+    return str(text or "").strip() in {"固定金额", "比例跟单", "启用/停用", "查看当前配置"}
 
 
 def backend_keyboard() -> Dict[str, Any]:
@@ -1786,7 +1797,8 @@ def main() -> int:
                         "说明：点击下方按钮进行设置。\n"
                         "固定金额：每单固定下注金额\n"
                         "比例跟单：输入百分比（如 95/120/300），也支持 3倍/3x；兼容旧输入 1-10=10%-100%\n"
-                        "封顶金额：跟单金额上限（0=不封顶）\n"
+                        "单场限额：同一比赛全部玩法累计上限（0=不限）\n"
+                        "盘口限额：同一比赛同一玩法累计上限（0=不限）\n"
                         "启用/停用：一键开关跟单\n"
                     )
                     msg_text = intro + "\n" + follow_settings_summary(cfg)
@@ -1891,18 +1903,6 @@ def main() -> int:
                             timeout_s=10,
                         )
                         continue
-                    if t == "封顶金额":
-                        pending[pending_key] = {"action": "set_cap", "ts": int(time.time())}
-                        tg_send_message(
-                            bot_token=bot_token,
-                            chat_id=chat_id,
-                            html_text="请输入封顶金额（0=不封顶，例如 200 或 0）：",
-                            reply_markup=follow_keyboard(),
-                            proxy=proxy,
-                            timeout_s=10,
-                        )
-                        continue
-
                 # 后台账号按钮（ReplyKeyboard：按钮会作为普通文本发过来）
                 t2 = str(text).strip()
                 if t2 in {"添加登3", "当前后台数", "查看后台列表", "删除后台账号"}:
@@ -2056,27 +2056,6 @@ def main() -> int:
                             bot_token=bot_token,
                             chat_id=chat_id,
                             html_text=f"✅ 比例跟单已保存：{percent2}%\n" + follow_settings_summary(cfg2),
-                            reply_markup=follow_keyboard(),
-                            proxy=proxy,
-                            timeout_s=10,
-                        )
-                        continue
-
-                    if action == "set_cap":
-                        try:
-                            cap = float(raw)
-                        except Exception:
-                            bad_input("请输入数字，例如 200 或 0")
-                            continue
-                        if cap < 0:
-                            bad_input("封顶金额不能小于 0")
-                            continue
-                        cfg2 = write_follow_settings(settings_path, {"max_amount": float(cap)})
-                        pending.pop(pending_key, None)
-                        tg_send_message(
-                            bot_token=bot_token,
-                            chat_id=chat_id,
-                            html_text="✅ 封顶金额已保存。\n" + follow_settings_summary(cfg2),
                             reply_markup=follow_keyboard(),
                             proxy=proxy,
                             timeout_s=10,

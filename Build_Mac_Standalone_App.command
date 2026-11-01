@@ -16,9 +16,9 @@ mkdir -p "${OUT_DIR}"
 "${PYTHON_BIN}" "${ROOT}/app/tools/build_mac_standalone_app.py" \
   --source-root "${ROOT}" \
   --output-dir "${OUT_DIR}" \
-  --bundle-name "AG Matrix Standalone"
+  --bundle-name "HD跟单系统v1.0"
 
-echo "[INFO] 构建完成：${OUT_DIR}/AG Matrix Standalone.app"
+echo "[INFO] 构建完成：${OUT_DIR}/HD跟单系统v1.0.app"
 echo "[INFO] 这是独立版，朋友电脑不需要额外安装 Python。"
 
 if [[ -t 0 ]]; then read -r -p "按回车关闭..." _; fi

@@ -2092,11 +2092,6 @@ body.queuePage {
 .performanceMetrics > div { display: flex; align-items: center; justify-content: space-between; min-height: 30px; border-bottom: 1px solid rgba(145, 161, 181, .08); }
 .performanceMetrics span { color: var(--ec-muted); font-size: 10px; }
 .performanceMetrics strong { font: 500 11px var(--ec-mono); }
-.healthStrip { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 13px; padding-top: 11px; border-top: 1px solid rgba(145, 161, 181, .1); color: var(--ec-faint); font-size: 9px; }
-.healthStrip > div { display: flex; align-items: center; gap: 6px; }
-.healthStrip strong { color: var(--ec-green); font: 600 10px var(--ec-mono); }
-.healthStrip small { color: var(--ec-muted); font-size: 9px; }
-.healthDot { width: 7px; height: 7px; border-radius: 50%; background: var(--ec-green); box-shadow: 0 0 9px rgba(45, 212, 191, .6); }
 .failurePanel { min-height: 214px; }
 .failureOverview { grid-template-columns: 96px 1fr; gap: 15px; padding-top: 14px; }
 .failureDonut { width: 86px; height: 86px; background: conic-gradient(var(--ec-red) 0 38%, var(--ec-orange) 38% 67%, var(--ec-violet) 67% 84%, var(--ec-cyan) 84% 100%); box-shadow: none; }

@@ -72,6 +72,10 @@ class TelegramSignalClientTest(unittest.TestCase):
             save_api_credentials(self.secrets_path, api_id="abc", api_hash="x" * 32)
         with self.assertRaisesRegex(TelegramSignalClientError, "invalid_api_hash"):
             save_api_credentials(self.secrets_path, api_id="12345678", api_hash="short")
+        with self.assertRaisesRegex(TelegramSignalClientError, "invalid_api_id"):
+            save_api_credentials(self.secrets_path, api_id="", api_hash="a" * 32)
+        with self.assertRaisesRegex(TelegramSignalClientError, "invalid_api_hash"):
+            save_api_credentials(self.secrets_path, api_id="12345678", api_hash="")
 
     def test_send_code_saves_pending_session_without_exposing_secrets(self) -> None:
         from hdzz.core.telegram_signal.client import send_login_code
@@ -91,6 +95,29 @@ class TelegramSignalClientTest(unittest.TestCase):
         self.assertNotIn("phone_code_hash", result)
         self.assertEqual(pending["phone_code_hash"], "code-hash-1")
         self.assertEqual(pending["session"], "pending-session")
+
+    def test_send_code_uses_built_in_credentials_when_secret_file_has_none(self) -> None:
+        from hdzz.core.telegram_signal.client import send_login_code
+        from hdzz.core.telegram_signal.credentials import DEFAULT_TELEGRAM_API_HASH, DEFAULT_TELEGRAM_API_ID
+
+        captured = {}
+        fake = FakeClient()
+        result = send_login_code(
+            self.secrets_path,
+            self.pending_path,
+            phone="+8613812345678",
+            client_factory=lambda session, api_id, api_hash: captured.update(
+                {"session": session, "api_id": api_id, "api_hash": api_hash}
+            ) or fake,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(captured, {
+            "session": "",
+            "api_id": DEFAULT_TELEGRAM_API_ID,
+            "api_hash": DEFAULT_TELEGRAM_API_HASH,
+        })
+        self.assertFalse(self.secrets_path.exists())
 
     def test_verify_code_saves_authorized_session_and_clears_pending(self) -> None:
         from hdzz.core.telegram_signal.client import send_login_code, verify_login_code

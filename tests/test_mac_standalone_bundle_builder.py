@@ -1,3 +1,4 @@
+import ast
 import json
 import sys
 import tempfile
@@ -13,6 +14,29 @@ if str(TOOLS_DIR) not in sys.path:
 
 
 class TestMacStandaloneBundleBuilder(unittest.TestCase):
+    def test_actual_pyinstaller_spec_includes_every_standalone_worker(self) -> None:
+        def assignment_value(path: Path, name: str):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in tree.body:
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+                    return node.value
+            self.fail(f"{path} missing assignment: {name}")
+
+        worker_node = assignment_value(ROOT / "app" / "mac_standalone_entry.py", "WORKER_MODULES")
+        worker_modules = set(ast.literal_eval(worker_node).values())
+
+        hiddenimports_node = assignment_value(TOOLS_DIR / "hdzz_mac_standalone.spec", "hiddenimports")
+        packed_modules = {
+            node.value
+            for node in ast.walk(hiddenimports_node)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+
+        self.assertEqual(worker_modules - packed_modules, set())
+
     def test_prepare_telegram_credentials_seed_strips_account_session(self) -> None:
         import build_mac_standalone_app as builder
 
@@ -118,6 +142,50 @@ class TestMacStandaloneBundleBuilder(unittest.TestCase):
             )
 
             self.assertEqual(detected, matching.resolve())
+
+    def test_stage_playwright_cache_keeps_only_required_revision_and_runtime_roots(self) -> None:
+        from build_mac_standalone_app import stage_macos_playwright_browsers, validate_macos_playwright_staging
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "full-cache"
+            target = root / "staging"
+            self._write_macos_chromium_marker(source, revision="1217")
+            self._write_macos_chromium_marker(source, revision="1234")
+            headless = source / "chromium_headless_shell-1217" / "chrome-headless-shell"
+            headless.parent.mkdir(parents=True, exist_ok=True)
+            headless.write_text("headless", encoding="utf-8")
+            (source / "ffmpeg-1011" / "ffmpeg").parent.mkdir(parents=True, exist_ok=True)
+            (source / "ffmpeg-1011" / "ffmpeg").write_text("ffmpeg", encoding="utf-8")
+            profile = source / "mcp-chrome-secret" / "Default"
+            profile.mkdir(parents=True, exist_ok=True)
+            (profile / "Cookies").write_text("profile", encoding="utf-8")
+
+            staged = stage_macos_playwright_browsers(source, target, expected_revision="1217")
+            stats = validate_macos_playwright_staging(staged, expected_revision="1217")
+
+            self.assertEqual(stats["revision"], "1217")
+            self.assertTrue((staged / "chromium-1217").is_dir())
+            self.assertTrue((staged / "chromium_headless_shell-1217").is_dir())
+            self.assertTrue((staged / "ffmpeg-1011").is_dir())
+            self.assertFalse((staged / "chromium-1234").exists())
+            self.assertFalse((staged / "mcp-chrome-secret").exists())
+
+    def test_validate_playwright_staging_rejects_multiple_revisions_and_profiles(self) -> None:
+        from build_mac_standalone_app import validate_macos_playwright_staging
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._write_macos_chromium_marker(root, revision="1217")
+            self._write_macos_chromium_marker(root, revision="1234")
+            with self.assertRaises(ValueError):
+                validate_macos_playwright_staging(root)
+
+            single = root / "single"
+            self._write_macos_chromium_marker(single, revision="1217")
+            (single / "mcp-chrome-profile" / "Default").mkdir(parents=True, exist_ok=True)
+            with self.assertRaises(ValueError):
+                validate_macos_playwright_staging(single, expected_revision="1217")
 
     def test_build_spec_inputs_includes_required_resources_and_workers(self) -> None:
         from build_mac_standalone_app import build_spec_inputs

@@ -19,17 +19,20 @@ import {
   Settings2,
   ShieldCheck,
   Target,
+  Upload,
   Users,
   Wifi,
   Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { ActivityChart } from "./components/ActivityChart";
 import { MetricCard } from "./components/MetricCard";
 import { OrderDrawer } from "./components/OrderDrawer";
 import { OrderTable } from "./components/OrderTable";
 import { Sidebar, type PageId } from "./components/Sidebar";
-import { getDashboardSnapshot, setPushEngine } from "./data/dashboard";
+import { getDashboardSnapshot, isTauriRuntime, setPushEngine } from "./data/dashboard";
 import type { DashboardSnapshot, OrderStatus, PushOrder } from "./types";
 
 const pageTitles: Record<PageId, { eyebrow: string; title: string; subtitle: string }> = {
@@ -150,8 +153,63 @@ export function App() {
   const [running, setRunning] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [lastRefresh, setLastRefresh] = useState("刚刚更新");
+  const [backendError, setBackendError] = useState<string | null>(null);
+  const [backendStage, setBackendStage] = useState("starting");
+  const [backendConfigured, setBackendConfigured] = useState<boolean | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
-  useEffect(() => { getDashboardSnapshot().then(setSnapshot); }, []);
+  useEffect(() => {
+    // The Tauri shell redirects to the real Python WebUI. Never render the
+    // preview snapshot as a desktop fallback while that connection is pending.
+    if (isTauriRuntime()) {
+      let active = true;
+      let cancelError: (() => void) | undefined;
+      let cancelStage: (() => void) | undefined;
+      void listen<string>("backend-error", (event) => {
+        if (active) setBackendError(event.payload || "后台服务启动失败");
+      }).then((unlisten) => {
+        cancelError = unlisten;
+      });
+      void listen<{ stage?: string; message?: string }>("backend-stage", (event) => {
+        if (!active) return;
+        const stage = event.payload?.stage || "ready";
+        setBackendStage(stage);
+        if (typeof (event.payload as { configured?: boolean } | undefined)?.configured === "boolean") {
+          setBackendConfigured(Boolean((event.payload as { configured: boolean }).configured));
+        }
+        if (stage === "error") setBackendError(event.payload?.message || "后台服务启动失败");
+      }).then((unlisten) => {
+        cancelStage = unlisten;
+      });
+      void invoke<{ running: boolean; configured: boolean; stage: string; message: string }>("backend_status")
+        .then((status) => {
+          if (!active) return;
+          setBackendConfigured(status.configured);
+          setBackendStage(status.stage || "starting");
+          if (!status.running && status.message) setBackendError(status.message);
+        })
+        .catch(() => undefined);
+      // The Rust setup thread can finish before the webview has registered its
+      // listeners. An idempotent invoke closes that race and performs the
+      // final navigation once the frontend is ready.
+      void invoke<{ configured?: boolean }>("start_backend")
+        .then(() => {
+          if (active) window.location.replace("http://127.0.0.1:9999/");
+        })
+        .catch((error) => {
+          if (active) {
+            setBackendError(String(error));
+            setBackendStage("error");
+          }
+        });
+      return () => {
+        active = false;
+        cancelError?.();
+        cancelStage?.();
+      };
+    }
+    getDashboardSnapshot().then(setSnapshot);
+  }, []);
 
   const visibleOrders = useMemo(() => {
     if (!snapshot) return [];
@@ -169,7 +227,40 @@ export function App() {
     setLastRefresh("刚刚更新");
   };
 
-  if (!snapshot) return <main className="loading-screen"><span className="loading-mark"><Zap size={20} /></span><strong>正在连接推送终端</strong></main>;
+  const retryBackend = async () => {
+    setRetrying(true);
+    setBackendError(null);
+    setBackendStage("starting");
+    try {
+      await invoke("start_backend");
+    } catch (error) {
+      setBackendError(String(error));
+      setBackendStage("error");
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const importConfigFromFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setRetrying(true);
+    setBackendError(null);
+    try {
+      const content = await file.text();
+      await invoke("import_config_content", { content });
+      setBackendConfigured(true);
+      await invoke("start_backend");
+    } catch (error) {
+      setBackendError(String(error));
+      setBackendStage("error");
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  if (!snapshot) return <main className="loading-screen" aria-live="polite"><span className="loading-mark"><Zap size={20} /></span><strong>{backendError ? "后台服务没有正常启动" : isTauriRuntime() ? ({ starting: "正在启动后台服务", resolving: "正在初始化运行环境", waiting: "正在等待 WebUI", ready: "启动完成" } as Record<string, string>)[backendStage] || "正在启动后台服务" : "正在连接推送终端"}</strong><small>{backendError || (isTauriRuntime() && backendConfigured === false ? "后台已启动，但尚未配置监听目标。导入现有 config.json 后即可继续。" : isTauriRuntime() ? "业务数据和配置保存在本机用户目录" : "正在加载预览数据")}</small>{isTauriRuntime() && backendConfigured === false && !backendError && <label className="primary-button loading-retry"><Upload size={15} />导入 config.json<input type="file" accept="application/json,.json" onChange={importConfigFromFile} hidden /></label>}{backendError && isTauriRuntime() && <button type="button" className="primary-button loading-retry" onClick={retryBackend} disabled={retrying}><RefreshCw size={15} />{retrying ? "正在重试" : "重试启动"}</button>}</main>;
 
   const page = pageTitles[activePage];
   return (

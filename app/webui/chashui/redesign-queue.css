@@ -96,7 +96,6 @@ html, body.queuePage { height: 100%; overflow: hidden; }
 .taskKpiGrid strong { font-size: 12px; margin-top: 2px; }
 .performanceBlock { margin-top: 8px; }
 .performanceMetrics > div { min-height: 22px; }
-.healthStrip { margin-top: 6px; padding-top: 6px; }
 .failurePanel { min-height: 0; padding: 10px; }
 .failureOverview { padding-top: 8px; gap: 10px; }
 .failureDonut { width: 64px; height: 64px; }
@@ -234,9 +233,6 @@ body.queuePage { background: var(--ec-bg); }
 .performanceMetrics > div { min-height: 25px; }
 .performanceMetrics span { font-size: 9px; }
 .performanceMetrics strong { font-size: 10px; }
-.healthStrip { margin-top: 6px; padding-top: 6px; font-size: 8px; }
-.healthStrip strong { font-size: 9px; }
-.healthStrip small { font-size: 8px; }
 .failureOverview { grid-template-columns: 88px 1fr; gap: 10px; padding-top: 8px; }
 .failureDonut { width: 72px; height: 72px; }
 .failureDonut > div { width: 50px; height: 50px; }
@@ -431,7 +427,7 @@ body.queuePage { background: var(--ec-bg); }
   font: 700 13px var(--ec-mono);
   text-overflow: ellipsis;
 }
-.orderCardTitle i {
+.orderCardTitle > .orderTitleDivider {
   width: 1px;
   height: 18px;
   flex: 0 0 auto;
@@ -631,12 +627,27 @@ body.queuePage { background: var(--ec-bg); }
 .orderCardTop {
   min-height: 31px;
   padding: 4px 9px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 32%) minmax(0, 1fr);
   gap: 8px;
 }
 
 .orderCardTitle {
+  grid-column: 1;
   gap: 6px;
   flex: 1 1 auto;
+}
+
+.orderLeague {
+  min-width: 0;
+  max-width: 100%;
+  grid-column: 2;
+  align-self: center;
+  justify-self: center;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .orderCardTitle span:first-child {
@@ -647,7 +658,7 @@ body.queuePage { background: var(--ec-bg); }
   font-size: 12px;
 }
 
-.orderCardTitle i {
+.orderCardTitle > .orderTitleDivider {
   height: 14px;
 }
 
@@ -683,22 +694,31 @@ body.queuePage { background: var(--ec-bg); }
 }
 
 .orderCardTime i {
+  width: 1em;
+  height: 1em;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 1em;
   color: var(--ec-blue);
   font-size: 9px;
+  line-height: 1;
+  background: transparent;
 }
 
 .orderSummaryCard .orderStatusBadge {
   min-height: 23px;
   padding: 0 7px;
+  grid-column: 3;
+  align-self: center;
+  justify-self: end;
   font-size: 8px;
 }
 
 .orderMatchPanel {
   min-height: 39px;
   padding: 4px 8px;
-  grid-template-columns: minmax(0, minmax(120px, 36%)) 30px minmax(0, minmax(120px, 36%));
-  justify-content: center;
-  gap: 5px;
+  grid-template-columns: minmax(0, 1fr) 30px minmax(0, 1fr);
+  gap: 10px;
 }
 
 .orderMatchPanel.singleMatch {
@@ -706,6 +726,18 @@ body.queuePage { background: var(--ec-bg); }
 }
 
 .orderTeam {
+  text-align: center;
+}
+
+.orderTeam.homeTeam {
+  text-align: right;
+}
+
+.orderTeam.awayTeam {
+  text-align: left;
+}
+
+.orderMatchPanel.singleMatch .orderTeam {
   text-align: center;
 }
 

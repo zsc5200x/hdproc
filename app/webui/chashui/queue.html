@@ -13,7 +13,8 @@
   </noscript>
   <link rel="stylesheet" href="/chashui/style.css"/>
   <link rel="stylesheet" href="/chashui/queue.css"/>
-  <link rel="stylesheet" href="/chashui/redesign-queue.css?v=20260824-strategy-queue-14"/>
+  <link rel="stylesheet" href="/chashui/redesign-queue.css?v=20260827-performance-panel-8"/>
+  <link rel="stylesheet" href="/chashui/modern-queue.css?v=20260827-performance-panel-8"/>
 </head>
 <body class="queuePage executionCenterPage">
   <header class="commandBar" aria-label="策略队列摘要" hidden>
@@ -65,37 +66,51 @@
     <div class="workspaceGrid">
       <aside class="performanceColumn">
         <section class="controlPanel performancePanel" aria-labelledby="performanceTitle">
-          <div class="panelHeading"><h2 id="performanceTitle">实时性能看板</h2><span id="stPerformanceTime" class="mono">--:--:--</span></div>
-          <div class="memberKpiGrid">
-            <div><span>在线会员</span><strong id="kpiOnline">0</strong></div>
-            <div><span>空闲会员</span><strong id="kpiIdle">0</strong></div>
-            <div><span>执行中会员</span><strong id="kpiRunning">0</strong></div>
-            <div><span>掉线会员</span><strong id="kpiOffline">0</strong></div>
+          <div class="panelHeading performanceHeading">
+            <h2 id="performanceTitle"><i class="fa-solid fa-gauge-high" aria-hidden="true"></i><span>实时性能看板</span></h2>
+            <span class="performanceClock"><i class="fa-regular fa-clock" aria-hidden="true"></i><b id="stPerformanceTime" class="mono">--:--:--</b></span>
+          </div>
+          <div class="memberKpiGrid" aria-label="会员状态">
+            <div class="memberKpi online"><span><i class="fa-solid fa-users" aria-hidden="true"></i>在线会员</span><strong id="kpiOnline">0</strong></div>
+            <div class="memberKpi idle"><span><i class="fa-solid fa-circle-check" aria-hidden="true"></i>空闲会员</span><strong id="kpiIdle">0</strong></div>
+            <div class="memberKpi running"><span><i class="fa-solid fa-bolt" aria-hidden="true"></i>执行中会员</span><strong id="kpiRunning">0</strong></div>
+            <div class="memberKpi offline"><span><i class="fa-solid fa-link-slash" aria-hidden="true"></i>掉线会员</span><strong id="kpiOffline">0</strong></div>
           </div>
           <div class="taskKpiGrid" aria-label="任务指标">
-            <div><span>等待任务</span><strong id="kpiWaitingTasks">0</strong></div>
-            <div><span>执行任务</span><strong id="kpiRunningTasks">0</strong></div>
-            <div><span>今日成功率</span><strong id="kpiSuccessRate">0%</strong></div>
+            <div class="taskKpi waiting"><span>等待任务</span><strong id="kpiWaitingTasks">0</strong></div>
+            <div class="taskKpi running"><span>执行任务</span><strong id="kpiRunningTasks">0</strong></div>
+            <div class="taskKpi success"><span>今日成功率</span><strong id="kpiSuccessRate">0%</strong></div>
           </div>
-          <div class="performanceBlock">
-            <div class="metricSectionTitle"><span>执行性能</span><i></i></div>
+          <section class="performanceBlock" aria-labelledby="executionPerformanceTitle">
+            <div class="metricSectionTitle"><h3 id="executionPerformanceTitle">执行性能</h3><i aria-hidden="true"></i></div>
             <div class="performanceMetrics">
               <div><span>平均执行</span><strong id="kpiAvgAttempt">-</strong></div>
               <div><span>FT_bet P50</span><strong id="kpiAvgFtBet">-</strong></div>
               <div><span>订单累计</span><strong id="kpiAvgOrderElapsed">-</strong></div>
             </div>
-          </div>
-          <div class="healthStrip">
-            <div><span class="healthDot"></span><strong id="kpiHealthState">Healthy</strong><small>系统正常</small></div>
-            <span id="kpiSnapshotVersion" class="mono">S000000</span>
-            <span id="kpiHealth" class="visuallyHidden">0%</span>
-          </div>
+          </section>
+          <section class="currentParamsBlock" aria-labelledby="currentParamsTitle">
+            <div class="currentParamsHeading">
+              <h3 id="currentParamsTitle">当前跟单参数</h3><i aria-hidden="true"></i><small id="currentParamsUpdated">--:--:--</small>
+            </div>
+            <dl class="currentParamsGrid">
+              <div><dt>跟单金额</dt><dd id="paramFollowAmount">--</dd></div>
+              <div><dt>分单数量</dt><dd id="paramSplitCount">--</dd></div>
+              <div><dt>分单间隔</dt><dd id="paramSplitDelay">--</dd></div>
+              <div><dt>单场限额</dt><dd id="paramMatchLimit">--</dd></div>
+              <div><dt>盘口限额</dt><dd id="paramMarketLimit">--</dd></div>
+              <div><dt>水位范围</dt><dd id="paramOddsRange">--</dd></div>
+              <div><dt>只跟滚球</dt><dd id="paramOnlyLive">--</dd></div>
+              <div><dt>反打规则</dt><dd id="paramReverseMode">--</dd></div>
+              <div class="currentParamsWide"><dt>执行方式</dt><dd id="paramExecutionMode">--</dd></div>
+            </dl>
+          </section>
         </section>
         <section class="controlPanel failurePanel memberExecutionPanel" aria-labelledby="memberPoolTitle">
           <div class="panelHeading"><h2 id="memberPoolTitle">会员执行池</h2><span>实时状态</span></div>
           <div class="memberPoolLegend memberLegend" aria-label="会员状态图例">
             <span><i class="legendDot idle"></i>空闲</span><span><i class="legendDot running"></i>执行中</span>
-            <span><i class="legendDot cooldown"></i>冷却</span><span><i class="legendDot offline"></i>掉线</span>
+            <span><i class="legendDot offline"></i>掉线</span>
           </div>
           <div id="memberPool" class="memberPool" aria-label="会员执行列表"></div>
           <div class="failureOverview" hidden aria-hidden="true">
@@ -167,6 +182,6 @@
       <span id="stCounts" class="visuallyHidden">待入队：0 · 队列中：0</span>
     </div>
   </main>
-  <script src="/chashui/queue.js?v=20260824-strategy-queue-14"></script>
+  <script src="/chashui/queue.js?v=20260827-performance-panel-8"></script>
 </body>
 </html>

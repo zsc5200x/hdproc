@@ -100,7 +100,6 @@ FOLLOW_SETTINGS_DEFAULTS: Dict[str, Any] = {
     "mode": "fixed",
     "fixed_amount": 50,
     "ratio_percent": 100,
-    "max_amount": 0,
     "match_limit_amount": 0,
     "market_limit_amount": 0,
     "follow_min_odds": None,
@@ -111,12 +110,12 @@ FOLLOW_SETTINGS_DEFAULTS: Dict[str, Any] = {
     "members": [],
     "updated_at": "",
     "member_cooldown_1X014_seconds": 0,
-    # Snapshot Direct 是唯一生产执行路径。
+    # 生产路径需要在同一个 Fresh Session 中先执行 FT_order_view，
+    # 取得提交时平台认可的盘口结构/ioratio，再继续 FT_bet。
     "execution_mode": "snapshot_direct",
     "snapshot_direct_enabled": True,
     "snapshot_max_age_ms": 500,
-    # 默认关闭；仅用于下一笔手工诊断订单的最小上下文 A/B 实验。
-    "bet_context_mode": "disabled",
+    "bet_context_mode": "diagnostic_order_view",
     "unknown_result_reconcile_max_seconds": 120,
     "unknown_result_reconcile_max_attempts": 5,
     "market_reject_max_attempts": 3,
@@ -141,6 +140,8 @@ def ensure_follow_settings_defaults(doc: Dict[str, Any]) -> Dict[str, Any]:
         out = dict(doc)
         for k, v in FOLLOW_SETTINGS_DEFAULTS.items():
             out.setdefault(k, v)
+    # max_amount 已从产品和执行链路移除；旧文件中的遗留值不再回传给客户端。
+    out.pop("max_amount", None)
 
     # Keep the tri-state migration behavior documented above.  A boolean is
     # the only value emitted by the current UI, while None preserves legacy
@@ -158,11 +159,9 @@ def ensure_follow_settings_defaults(doc: Dict[str, Any]) -> Dict[str, Any]:
     out["market_limit_amount"] = _sanitize_nonnegative_amount(out.get("market_limit_amount"))
     out["execution_mode"] = "snapshot_direct"
     out["snapshot_direct_enabled"] = True
-    if str(out.get("bet_context_mode") or "disabled").strip().lower() not in {
-        "disabled",
-        "diagnostic_order_view",
-    }:
-        out["bet_context_mode"] = "disabled"
+    # 旧版 WebUI 可能提交 disabled/legacy 字段；生产执行路径固定使用
+    # FT_order_view 上下文确认，避免再次退回 source_order_direct。
+    out["bet_context_mode"] = "diagnostic_order_view"
     try:
         out["snapshot_max_age_ms"] = max(50, min(10000, int(out.get("snapshot_max_age_ms") or 500)))
     except Exception:
@@ -227,6 +226,7 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
         out: Dict[str, Any] = dict(FOLLOW_SETTINGS_DEFAULTS)
     else:
         out = dict(existing)
+    out.pop("max_amount", None)
 
     if not isinstance(incoming, dict):
         return ensure_follow_settings_defaults(out)
@@ -254,11 +254,6 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
             out["ratio_percent"] = float(incoming.get("ratio_percent") or 0)
         except Exception:
             out["ratio_percent"] = 0.0
-    if "max_amount" in incoming:
-        try:
-            out["max_amount"] = float(incoming.get("max_amount") or 0)
-        except Exception:
-            out["max_amount"] = 0.0
     if "match_limit_amount" in incoming:
         out["match_limit_amount"] = _sanitize_nonnegative_amount(incoming.get("match_limit_amount"))
     if "market_limit_amount" in incoming:
@@ -280,7 +275,7 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
         except Exception:
             out["split_delay_seconds"] = 0.0
 
-    # 旧客户端即使提交 Legacy/Shadow 字段，也不能改变唯一执行路径。
+    # 旧客户端即使提交 Legacy/Shadow 字段，也不能改变已验证的生产路径。
     out["execution_mode"] = "snapshot_direct"
     out["snapshot_direct_enabled"] = True
     if "snapshot_max_age_ms" in incoming:
@@ -288,9 +283,7 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
             out["snapshot_max_age_ms"] = max(50, min(10000, int(incoming.get("snapshot_max_age_ms") or 0)))
         except Exception:
             out["snapshot_max_age_ms"] = int(FOLLOW_SETTINGS_DEFAULTS.get("snapshot_max_age_ms") or 500)
-    if "bet_context_mode" in incoming:
-        mode = str(incoming.get("bet_context_mode") or "disabled").strip().lower()
-        out["bet_context_mode"] = mode if mode in {"disabled", "diagnostic_order_view"} else "disabled"
+    out["bet_context_mode"] = "diagnostic_order_view"
     if "unknown_result_reconcile_max_seconds" in incoming:
         try:
             out["unknown_result_reconcile_max_seconds"] = max(1, min(3600, int(incoming.get("unknown_result_reconcile_max_seconds") or 0)))

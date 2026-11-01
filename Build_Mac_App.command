@@ -16,9 +16,9 @@ mkdir -p "${OUT_DIR}"
 "${PYTHON_BIN}" "${ROOT}/app/tools/build_mac_app_bundle.py" \
   --source-root "${ROOT}" \
   --output-dir "${OUT_DIR}" \
-  --bundle-name "AG Matrix"
+  --bundle-name "HD跟单系统v1.0"
 
-echo "[INFO] 构建完成：${OUT_DIR}/AG Matrix.app"
+echo "[INFO] 构建完成：${OUT_DIR}/HD跟单系统v1.0.app"
 echo "[INFO] 你可以把它拖到 Applications，然后像普通应用一样双击打开。"
 
 if [[ -t 0 ]]; then read -r -p "按回车关闭..." _; fi

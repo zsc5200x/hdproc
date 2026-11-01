@@ -1,3 +1,3 @@
 fn main() {
-    hd_push_terminal_preview_lib::run();
+    hd_follow_shell_lib::run();
 }

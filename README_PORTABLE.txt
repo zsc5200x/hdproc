@@ -11,15 +11,15 @@ macOS:
 
 macOS app bundle:
 - Double-click Build_Mac_App.command
-- Output: _dist/AG Matrix.app
-- Drag AG Matrix.app into Applications, then double-click it like a normal app
+- Output: _dist/HD跟单系统v1.0.app
+- Drag HD跟单系统v1.0.app into Applications, then double-click it like a normal app
 
 macOS standalone app bundle:
 - Double-click Build_Mac_Standalone_App.command
-- Output: _dist/AG Matrix Standalone.app
+- Output: _dist/HD跟单系统v1.0.app
 - Friend's Mac does not need Python installed
 - Launches the current WebUI inside the app's own desktop window (no external browser)
-- First launch copies runtime files to ~/Library/Application Support/AG Matrix Standalone/
+- First launch copies runtime files to ~/Library/Application Support/HD跟单系统v1.0/
 - If app/config.json exists during build, it is bundled into the standalone app as the initial config
 
 macOS package build:

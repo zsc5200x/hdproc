@@ -86,6 +86,12 @@
     const balance = numberValue(current.balance != null ? current.balance : (current.maxcredit || current.nowcredit || current.cash));
     const autoRelogin = canAutoRelogin(current);
 
+    if (status === 'maintenance') {
+      return { tone: 'maintenance', text: '平台维护暂停', balance, threshold: 0, canJoin: false };
+    }
+    if (status === 'recovering') {
+      return { tone: 'recovering', text: '恢复验证中', balance, threshold: 0, canJoin: false };
+    }
     if (status === 'relogin') {
       return { tone: 'recovering', text: '自动恢复中', balance, threshold: 0, canJoin: false };
     }
@@ -106,16 +112,20 @@
     if (raw === 'online') return { statusText: '在线', statusTone: 'online' };
     if (raw === 'offline') return { statusText: '离线', statusTone: 'offline' };
     if (raw === 'relogin') return { statusText: '重登中', statusTone: 'warning' };
+    if (raw === 'maintenance') return { statusText: '平台维护', statusTone: 'maintenance' };
+    if (raw === 'recovering') return { statusText: '恢复验证中', statusTone: 'warning' };
     return { statusText: '未知', statusTone: 'muted' };
   }
 
   function computeArsenalMemberStats(members, options) {
     const list = Array.isArray(members) ? members.filter(Boolean) : [];
     const online = list.filter((member) => normalizedStatus(member.status) === 'online').length;
+    const maintenance = list.filter((member) => normalizedStatus(member.status) === 'maintenance').length;
     const stats = {
       total: list.length,
       online,
-      offline: Math.max(0, list.length - online),
+      offline: Math.max(0, list.length - online - maintenance),
+      maintenance,
       ready: 0,
       lowBalance: 0,
       recovering: 0,
@@ -159,7 +169,9 @@
     const mappingTarget = text(opts.mappingTarget, '');
     const eligibility = computePoolEligibility(current, opts);
     const autoRelogin = canAutoRelogin(current);
-    const autoReloginText = status.statusTone === 'warning'
+    const autoReloginText = status.statusTone === 'maintenance'
+      ? '维护后自动验证'
+      : status.statusTone === 'warning'
       ? '重登中'
       : autoRelogin
         ? '自动重登'
@@ -173,6 +185,8 @@
       balanceStateText = '当前余额不足，暂不进入候选';
     } else if (eligibility.tone === 'recovering') {
       balanceStateText = '恢复后自动回到候选池';
+    } else if (eligibility.tone === 'maintenance') {
+      balanceStateText = '平台恢复后自动验证原会话';
     } else if (eligibility.tone === 'manual') {
       balanceStateText = '需要人工处理后恢复';
     }
@@ -204,6 +218,8 @@
       lastError: lastError || '',
       requestFailCount: Number(current.request_fail_count || 0) || 0,
       reloginFailCount: Number(current.relogin_fail_count || 0) || 0,
+      maintenanceStartAt: numberValue(current.maintenance_start_at),
+      maintenanceUntil: numberValue(current.maintenance_until),
     };
   }
 

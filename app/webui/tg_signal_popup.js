@@ -4,12 +4,15 @@
   const state = {
     status: null,
     chats: [],
+    chatsLoaded: false,
     events: [],
     dryRun: true,
+    modeDirty: false,
     sessionValid: null,
     bound: false,
     refreshTimer: 0,
   };
+  const LOG_REFRESH_INTERVAL_MS = 1000;
   const byId = (id) => document.getElementById(id);
 
   const messages = {
@@ -19,6 +22,45 @@
     telegram_session_expired: "Telegram 会话已失效，请重新登录",
     invalid_phone: "手机号格式不正确，请包含国家区号",
     invalid_login_code: "验证码格式不正确",
+  };
+
+  const eventStatusLabels = {
+    injected: "已进入跟单",
+    dry_run: "干跑匹配成功",
+    duplicate_order: "重复订单",
+    duplicate_message: "重复消息",
+    rejected_parse: "无法解析",
+    rejected_match: "比赛未匹配",
+    worker_error: "监听异常",
+    ignored_disabled: "监听已关闭",
+    ignored_source: "非监听来源",
+    matched: "匹配成功",
+    accepted: "已接收",
+    rejected: "已拒绝",
+    error: "处理异常",
+  };
+
+  const eventReasonLabels = {
+    unsupported_signal: "非注单消息或格式不支持",
+    invalid_line: "盘口格式不正确",
+    missing_match: "缺少比赛信息",
+    missing_bet_line: "缺少盘口信息",
+    unsupported_market: "暂不支持该玩法",
+    missing_order_id: "缺少有效订单号",
+    missing_time: "缺少有效订单时间",
+    missing_league: "缺少联赛信息",
+    missing_bet_type: "缺少玩法信息",
+    missing_content: "缺少注单内容",
+    missing_amount: "缺少有效金额",
+    ambiguous_number_match: "比赛编号匹配到多场",
+    number_pair_not_found: "未找到对应比赛编号",
+    ambiguous_name_match: "球队名称匹配到多场",
+    name_match_not_found: "未找到对应比赛",
+    missing_gid: "比赛缺少 GID",
+    telegram_protocol_sync_error: "Telegram 同步异常，监听器已自动重连",
+    telegram_login_required: "Telegram 尚未登录",
+    telegram_session_expired: "Telegram 登录已过期",
+    source_chats_missing: "尚未选择监听来源",
   };
 
   function explain(error) {
@@ -87,12 +129,18 @@
     const hasSources = selectedChatIds().length > 0 || savedIds.length > 0;
     return !!data.credentials_configured
       && !!data.session_configured
-      && state.sessionValid === true
+      && state.sessionValid !== false
       && hasSources;
   }
 
-  function updateMode(dryRun) {
+  function isSessionFailure(error) {
+    const reason = String(error && error.message ? error.message : error || "").trim();
+    return reason === "telegram_login_required" || reason === "telegram_session_expired";
+  }
+
+  function updateMode(dryRun, { markDirty = false } = {}) {
     state.dryRun = !!dryRun;
+    if (markDirty) state.modeDirty = true;
     byId("tg-signal-dry-run")?.setAttribute("aria-pressed", String(state.dryRun));
     byId("tg-signal-automatic")?.setAttribute("aria-pressed", String(!state.dryRun));
     setHint(
@@ -107,30 +155,42 @@
 
   function renderRuntimeStatus() {
     const data = state.status || {};
+    const alive = data.worker_alive == null ? !!data.worker_running : !!data.worker_alive;
     const running = !!data.worker_running;
+    const unhealthy = alive && !running;
     const mode = state.dryRun ? "干跑检查" : "自动跟单";
-    setStatus("tg-signal-worker-status", running ? `监听中 · ${mode}` : `已关闭 · ${mode}`, running ? "ok" : "off");
+    setStatus(
+      "tg-signal-worker-status",
+      running ? `监听中 · ${mode}` : unhealthy ? `连接异常 · ${mode}` : `已关闭 · ${mode}`,
+      running ? "ok" : unhealthy ? "error" : "off"
+    );
     const live = byId("tg-signal-live-label");
     if (live) {
       live.classList.toggle("running", running);
-      live.innerHTML = `<i></i>${running ? `监听中 · PID ${data.worker_pid || "-"}` : "未监听"}`;
+      live.innerHTML = `<i></i>${running ? `监听中 · PID ${data.worker_pid || "-"}` : unhealthy ? `连接异常 · PID ${data.worker_pid || "-"}` : "未监听"}`;
     }
     const start = byId("tg-signal-start");
     const stop = byId("tg-signal-stop");
+    const dryRunMode = byId("tg-signal-dry-run");
+    const automaticMode = byId("tg-signal-automatic");
     const ready = canStartListening();
-    if (start) start.disabled = running || !ready;
-    if (stop) stop.disabled = !running;
+    if (start) start.disabled = alive || !ready;
+    if (stop) stop.disabled = !alive;
+    if (dryRunMode) dryRunMode.disabled = alive;
+    if (automaticMode) automaticMode.disabled = alive;
     const overall = byId("sc-tg-overall-status");
     if (overall) {
-      overall.textContent = running ? "运行中" : (ready ? "已就绪" : "待配置");
-      overall.className = running || ready ? "badge badge-success" : "badge badge-dim";
+      overall.textContent = running ? "运行中" : unhealthy ? "连接异常" : (ready ? "已就绪" : "待配置");
+      overall.className = running ? "badge badge-success" : "badge badge-dim";
     }
-    if (!running && !ready) {
+    if (!alive && !ready) {
       const missing = [];
       if (!data.credentials_configured) missing.push("API 凭据");
-      if (!data.session_configured || state.sessionValid !== true) missing.push("有效会话");
+      if (!data.session_configured || state.sessionValid === false) missing.push("有效会话");
       if (!selectedChatIds().length && !(data.settings?.source_chat_ids || []).length) missing.push("来源群");
       setHint("tg-signal-action-hint", `启动前请完成：${missing.join("、")}。`, "");
+    } else if (unhealthy) {
+      setHint("tg-signal-action-hint", `监听进程仍在，但 Telegram 连接不健康：${data.worker_error || "等待自动恢复"}`, "error");
     }
   }
 
@@ -139,7 +199,7 @@
     const settings = data.settings || {};
     const connected = !!data.session_configured;
     const selected = (settings.source_chat_ids || []).map(String);
-    state.dryRun = settings.dry_run !== false;
+    if (!state.modeDirty) state.dryRun = settings.dry_run !== false;
 
     setStatus(
       "tg-signal-credential-status",
@@ -215,6 +275,41 @@
     return date.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
 
+  function formatDuration(value) {
+    const milliseconds = Number(value);
+    if (!Number.isFinite(milliseconds) || milliseconds < 0) return "";
+    return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(2)}s` : `${milliseconds.toFixed(milliseconds < 10 ? 1 : 0)}ms`;
+  }
+
+  function eventStatusLabel(status) {
+    const key = String(status || "").trim().toLowerCase();
+    return eventStatusLabels[key] || (key ? "其他状态" : "-");
+  }
+
+  function eventReasonLabel(reason) {
+    const key = String(reason || "").trim();
+    return eventReasonLabels[key] || key;
+  }
+
+  function eventDescription(item) {
+    const parts = [eventReasonLabel(item.reason) || item.order_id || "-"];
+    const processing = formatDuration(item.processing_ms);
+    const parse = formatDuration(item.parse_ms);
+    const games = formatDuration(item.games_load_ms);
+    const refresh = formatDuration(item.games_refresh_ms);
+    if (processing) parts.push(`总耗时 ${processing}`);
+    if (parse) parts.push(`解析 ${parse}`);
+    if (games) parts.push(`比赛 ${games}`);
+    if (refresh) parts.push(`强刷 ${refresh}`);
+    const sources = {
+      snapshot_cache: "本地盘口缓存",
+      recent_order: "最近订单",
+      webui_member_cache: "会员比赛缓存",
+    };
+    if (sources[item.match_source]) parts.push(sources[item.match_source]);
+    return parts.join(" · ");
+  }
+
   function renderEvents() {
     const body = byId("tg-signal-event-rows");
     if (!body) return;
@@ -235,10 +330,10 @@
       const values = [
         formatTime(item.ts),
         item.chat_title || item.chat_id || "-",
-        item.status || "-",
+        eventStatusLabel(item.status),
         [[item.league, item.match].filter(Boolean).join(" · "), item.line].filter(Boolean).join(" / ") || "-",
         item.amount || "-",
-        item.reason || item.order_id || "-",
+        eventDescription(item),
       ];
       values.forEach((value, index) => {
         const cell = document.createElement("td");
@@ -247,6 +342,7 @@
           const status = String(item.status || "").toLowerCase().replace(/[^a-z_]/g, "");
           badge.className = `tg-signal-event-status ${status}`.trim();
           badge.textContent = value;
+          if (item.status) badge.title = `内部状态：${item.status}`;
           cell.append(badge);
         } else {
           cell.textContent = value;
@@ -268,13 +364,15 @@
     try {
       const result = await api("/api/telegram-signal/chats");
       state.chats = result.chats || [];
+      state.chatsLoaded = true;
       state.sessionValid = true;
       renderStatus();
       renderChats();
       return result;
     } catch (error) {
       state.chats = [];
-      state.sessionValid = false;
+      state.chatsLoaded = false;
+      state.sessionValid = isSessionFailure(error) ? false : null;
       renderStatus();
       renderChats();
       throw error;
@@ -288,14 +386,20 @@
   }
 
   async function saveSettings() {
-    const ids = selectedChatIds();
-    const sourceChats = state.chats.filter((chat) => ids.includes(String(chat.id)));
+    const savedSettings = state.status?.settings || {};
+    const ids = state.chatsLoaded
+      ? selectedChatIds()
+      : (savedSettings.source_chat_ids || []).map(String);
+    const sourceChats = state.chatsLoaded
+      ? state.chats.filter((chat) => ids.includes(String(chat.id)))
+      : (savedSettings.source_chats || []);
     const result = await api("/api/telegram-signal/settings", {
       method: "POST",
       body: JSON.stringify({ dry_run: state.dryRun, source_chat_ids: ids, source_chats: sourceChats }),
     });
     state.status = state.status || {};
     state.status.settings = result.settings;
+    state.modeDirty = false;
     renderStatus();
     renderChats();
     return result;
@@ -312,6 +416,7 @@
         }
       } else {
         state.chats = [];
+        state.chatsLoaded = false;
         renderChats();
       }
     } catch (error) {
@@ -325,8 +430,8 @@
 
     byId("tg-signal-refresh")?.addEventListener("click", loadTelegramSignalPopup);
     byId("tg-signal-group-search")?.addEventListener("input", renderChats);
-    byId("tg-signal-dry-run")?.addEventListener("click", () => updateMode(true));
-    byId("tg-signal-automatic")?.addEventListener("click", () => updateMode(false));
+    byId("tg-signal-dry-run")?.addEventListener("click", () => updateMode(true, { markDirty: true }));
+    byId("tg-signal-automatic")?.addEventListener("click", () => updateMode(false, { markDirty: true }));
     byId("tg-signal-reload-groups")?.addEventListener("click", () => loadChats().catch((error) => notify(explain(error), "error")));
     byId("tg-signal-save-groups")?.addEventListener("click", () => {
       saveSettings().then(() => notify("TG 来源群已保存", "success")).catch((error) => notify(explain(error), "error"));
@@ -377,6 +482,7 @@
       try {
         await api("/api/telegram-signal/logout", { method: "POST", body: "{}" });
         state.chats = [];
+        state.chatsLoaded = false;
         state.sessionValid = null;
         await loadStatus();
         renderChats();
@@ -421,7 +527,7 @@
       const systemCenterOpen = document.body?.dataset.view === "system-center";
       const standaloneOpen = document.body?.dataset.view === "tg-signal";
       if (systemCenterOpen || standaloneOpen) Promise.all([loadStatus(), loadLogs()]).catch(() => {});
-    }, 5000);
+    }, LOG_REFRESH_INTERVAL_MS);
   }
 
   window.loadTelegramSignalPopup = loadTelegramSignalPopup;

@@ -1,0 +1,54 @@
+{
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
+  "telegram_order_forward_enabled": true,
+  "telegram_allow_chat": "",
+  "telegram_proxy": "",
+  "telegram_ui": {
+    "order_button_custom_emoji_ids": {
+      "res": "5936176756246452306",
+      "log": "5861874741148653288",
+      "pnl": "5936235940895792238",
+      "amt": "5224257782013769471"
+    },
+    "order_divider_custom_emoji_ids": [
+      "5391112257826467406",
+      "5391074908790860063",
+      "5390871726772987721",
+      "5390965687772525012",
+      "5393367042642424178",
+      "5391165051564469669",
+      "5395659850803852003",
+      "5339336414188285500",
+      "5285308684837072423",
+      "5321007327719992618"
+    ],
+    "order_text_custom_emoji_ids": {
+      "title": "5935873621749668287",
+      "title_suffix": "5936235940895792238",
+      "league": "5861874741148653288",
+      "match": "5933996313019423929",
+      "status": "5936176756246452306",
+      "play": "",
+      "stake": "5224257782013769471",
+      "follow_stake": "5298682684715840924",
+      "follow_success": "5298731965170597296",
+      "follow_success_suffix": "5933605531125029360",
+      "source": "",
+      "order_id": "6034918793115868355",
+      "time": "5929427322514971930"
+    }
+  },
+  "telegram_backend_order_push_enabled": false,
+  "telegram_backend_order_bot_token": "",
+  "telegram_backend_order_chat_id": "",
+  "telegram_backend_order_proxy": "",
+  "signal_webhook_enabled": false,
+  "signal_webhook_url": "",
+  "signal_webhook_token": "",
+  "signal_pull_enabled": false,
+  "signal_pull_url": "",
+  "signal_pull_token": "",
+  "proxy": "",
+  "targets": []
+}

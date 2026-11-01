@@ -25,6 +25,19 @@ def _mk_job(*, err: str = "") -> RetryJob:
 
 
 class TestFollowRetryPolicy(unittest.TestCase):
+    def test_context_structure_change_waits_without_submitting(self) -> None:
+        from hdzz.core.follower.engine import is_retryable_follow_result
+
+        for status in ("BET_CONTEXT_MISMATCH", "MARKET_CHANGED_DURING_CONTEXT"):
+            result = {
+                "ok": False,
+                "snapshot_direct_status": status,
+                "snapshot_direct_result_status": "WAITING_MARKET",
+                "snapshot_direct_submission": False,
+                "real_submission": "none",
+            }
+            self.assertTrue(is_retryable_follow_result(result), status)
+
     def test_optional_telemetry_float_accepts_a_fallback(self) -> None:
         from hdzz.core.follower.engine import _to_float
 
@@ -56,6 +69,116 @@ class TestFollowRetryPolicy(unittest.TestCase):
             ),
             15.0,
         )
+
+    def test_unknown_result_bypasses_generic_attempt_and_time_caps(self) -> None:
+        job = _mk_job(err="UNKNOWN_RESULT")
+        job.attempts = 99
+        scheduler = RetryScheduler({job.key: job})
+
+        attempts, seconds = scheduler.get_effective_limits(
+            job,
+            retry_max_attempts=1,
+            retry_max_seconds=1.0,
+            wait_line_not_found_max=30.0,
+        )
+
+        self.assertEqual((attempts, seconds), (0, 0.0))
+
+    def test_dispatch_snapshot_refresh_rejects_member_that_enters_cooldown(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from hdzz.core.follower import engine
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            members = [
+                {
+                    "id": "member-a",
+                    "label": "a",
+                    "status": "online",
+                    "maxcredit": 1000,
+                    "base_url": "https://a.example",
+                    "username": "a",
+                    "password": "a",
+                    "ver": "v",
+                    "uid": "u",
+                    "cookie": "c=1",
+                    "session_ready": True,
+                    "session_stable": True,
+                },
+                {
+                    "id": "member-b",
+                    "label": "b",
+                    "status": "online",
+                    "maxcredit": 1000,
+                    "base_url": "https://b.example",
+                    "username": "b",
+                    "password": "b",
+                    "ver": "v",
+                    "uid": "u",
+                    "cookie": "c=2",
+                    "session_ready": True,
+                    "session_stable": True,
+                },
+            ]
+            arsenal = data_dir / "arsenal.json"
+            arsenal.write_text(json.dumps({"members": members}), encoding="utf-8")
+
+            candidate_snapshot = engine._load_current_members(data_dir)
+            self.assertEqual(candidate_snapshot[0]["id"], "member-a")
+
+            # Simulate the member watcher writing cooldown after candidate
+            # selection but before dispatch.
+            engine.patch_member(
+                arsenal,
+                "member-a",
+                {"network_health": "cooldown", "network_cooldown_until": engine.now_ts() + 30},
+            )
+            latest_snapshot = engine._load_current_members(data_dir)
+            selected = engine.pick_random_member_for_stake(
+                latest_snapshot,
+                50.0,
+                avoid_ids={"member-a"},
+                target="",
+                mappings={},
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["id"], "member-b")
+            self.assertFalse(engine._member_has_transient_network_issue(latest_snapshot[0]))
+
+    def test_all_cooldown_members_enter_wait_pool(self) -> None:
+        from hdzz.core.follower import engine
+
+        now = engine.now_ts()
+        members = [
+            {
+                "id": "a",
+                "status": "online",
+                "maxcredit": 1000,
+                "base_url": "https://a.example",
+                "ver": "v", "uid": "u", "cookie": "c=1",
+                "network_cooldown_until": now + 30,
+            },
+            {
+                "id": "b",
+                "status": "online",
+                "maxcredit": 1000,
+                "base_url": "https://b.example",
+                "ver": "v", "uid": "u", "cookie": "c=2",
+                "request_cooldown_until": now + 30,
+            },
+        ]
+
+        selected = engine.pick_random_member_for_stake(
+            members,
+            50.0,
+            target="",
+            mappings={},
+        )
+        self.assertIsNotNone(selected)
 
     def test_diagnostic_unknown_result_stays_reconcile_only_retryable(self) -> None:
         from hdzz.core.follower.engine import is_retryable_follow_result

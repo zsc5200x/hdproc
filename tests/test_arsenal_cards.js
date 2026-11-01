@@ -87,12 +87,30 @@ test('computes pool stats by candidate and recoverability', () => {
     total: 4,
     online: 2,
     offline: 2,
+    maintenance: 0,
     ready: 1,
     lowBalance: 1,
     recovering: 1,
     manual: 1,
     totalBalance: 29000,
   });
+});
+
+test('models maintenance separately from offline and disables pool eligibility', () => {
+  const members = [
+    { id: 'm1', status: 'maintenance', maxcredit: '12000', auto_relogin: true },
+    { id: 'm2', status: 'offline', maxcredit: '5000', auto_relogin: true },
+  ];
+  const model = buildArsenalCardModel(members[0], {});
+  const stats = computeArsenalMemberStats(members);
+
+  assert.equal(model.statusText, '平台维护');
+  assert.equal(model.statusTone, 'maintenance');
+  assert.equal(model.eligibilityTone, 'maintenance');
+  assert.equal(model.canJoinRandomPool, false);
+  assert.equal(model.autoReloginText, '维护后自动验证');
+  assert.equal(stats.maintenance, 1);
+  assert.equal(stats.offline, 1);
 });
 
 test('computes eligibility using balance and recoverability rules', () => {

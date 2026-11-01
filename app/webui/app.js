@@ -8,7 +8,10 @@ const state = {
   railFailureFilter: "",
   availableTargets: [],
   accounts: [],
+  ps3838Accounts: [],
   statuses: {},
+  ps3838Statuses: {},
+  platform: {},
   members: [],
   followSettings: null,
   signalPullConfig: {},
@@ -349,6 +352,7 @@ function findAccountByTargetName(name) {
 }
 
 function backendAccountOfOrder(o) {
+  if (isReadOnlyMonitorOrder(o)) return o.backendName || o.target || "-";
   const a = findAccountByTargetName(o && o.target ? String(o.target) : "");
   const label = accountLabel(a);
   return label && label !== "-" ? label : (o && o.account ? String(o.account) : "-");
@@ -497,6 +501,13 @@ function formatDashboardAxisMoney(value) {
   return `¥${n}`;
 }
 
+function formatDashboardCurrencyTotals(totals, fallback) {
+  const entries = Object.entries(totals || {});
+  if (!entries.length) return formatOrderDashboardMoney(fallback || 0);
+  return entries.map(([currency, value]) => currency === "CNY"
+    ? formatOrderDashboardMoney(value) : formatMonitorMoney(value, currency)).join(" / ");
+}
+
 function buildOrderDashboardModel() {
   if (orderDashboardTools && typeof orderDashboardTools.buildOrderDashboardModel === "function") {
     return orderDashboardTools.buildOrderDashboardModel(baseFilterOrders(), state.orderDashboard.filters);
@@ -540,13 +551,17 @@ function renderHorizontalBars(container, rows, options = {}) {
     container.innerHTML = `<div class="od-empty-mini">暂无数据</div>`;
     return;
   }
-  const max = Math.max(...items.map((item) => Number(options.valueKey === "stake" ? item.stake : item.count) || 0), 1);
+  const currencies = [...new Set(items.flatMap((item) => Object.keys(item.stakeByCurrency || {})))];
+  const byStake = options.valueKey === "stake" && currencies.length <= 1;
+  const currency = currencies[0] || "CNY";
+  const moneyLabel = (value) => currency === "CNY" ? formatDashboardAxisMoney(value) : formatMonitorMoney(value, currency);
+  const max = Math.max(...items.map((item) => Number(byStake ? item.stake : item.count) || 0), 1);
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
     const value = max * ratio;
-    return `<span>${options.valueKey === "stake" ? escapeHtml(formatDashboardAxisMoney(value)) : escapeHtml(String(Math.round(value)))}</span>`;
+    return `<span>${byStake ? escapeHtml(moneyLabel(value)) : escapeHtml(String(Math.round(value)))}</span>`;
   }).join("");
   const rowsHtml = items.slice(0, options.limit || 6).map((item) => {
-    const value = Number(options.valueKey === "stake" ? item.stake : item.count) || 0;
+    const value = Number(byStake ? item.stake : item.count) || 0;
     const label = String(item.label || "未分类");
     const filterAttr = options.filterKey ? ` data-od-chart-filter="${options.filterKey}" data-value="${escapeHtml(label)}"` : "";
     const colorClass = options.valueKey === "stake" ? "green" : "blue";
@@ -556,11 +571,11 @@ function renderHorizontalBars(container, rows, options = {}) {
         <span class="od-axis-track">
           <span class="od-axis-fill ${colorClass}" style="width:${pct(value, max)}%"></span>
         </span>
-        <span class="od-axis-value">${options.valueKey === "stake" ? escapeHtml(formatOrderDashboardMoney(value)) : escapeHtml(String(value))}</span>
+        <span class="od-axis-value">${byStake ? escapeHtml(moneyLabel(value)) : escapeHtml(`${value} 单`)}</span>
         <span class="od-axis-tooltip">
           <strong>${escapeHtml(label)}</strong><br>
           订单数：${escapeHtml(String(item.count || 0))}<br>
-          金额：${escapeHtml(formatOrderDashboardMoney(item.stake || 0))}
+          金额：${escapeHtml(formatDashboardCurrencyTotals(item.stakeByCurrency, item.stake))}
         </span>
       </button>
     `;
@@ -891,7 +906,7 @@ function renderOrderDashboard(model = buildOrderDashboardModel()) {
   if ($("od-stat-total")) $("od-stat-total").textContent = String(model.stats.totalOrders || 0);
   if ($("od-stat-live")) $("od-stat-live").textContent = String(model.stats.liveOrders || 0);
   if ($("od-stat-early")) $("od-stat-early").textContent = String(model.stats.earlyOrders || 0);
-  if ($("od-stat-stake")) $("od-stat-stake").textContent = formatOrderDashboardMoney(model.stats.totalStake || 0);
+  if ($("od-stat-stake")) $("od-stat-stake").textContent = formatDashboardCurrencyTotals(model.stats.stakeByCurrency, model.stats.totalStake);
   if ($("od-filter-count")) $("od-filter-count").textContent = `${model.stats.totalOrders || 0} 单`;
 
   const charts = $("od-insights");
@@ -980,7 +995,8 @@ function renderAccountSelect() {
     .join("");
   sel.innerHTML = `<option value="">全部目标</option>` +
     signalOptions +
-    state.accounts.map((a) => `<option value="${escapeHtml(String(a.name || ""))}">${escapeHtml(accountLabel(a))}</option>`).join("");
+    state.accounts.map((a) => `<option value="${escapeHtml(String(a.name || ""))}">${escapeHtml(accountLabel(a))}</option>`).join("") +
+    state.ps3838Accounts.map((a) => `<option value="${escapeHtml(String(a.name || ""))}">平博 · ${escapeHtml(accountLabel(a))}</option>`).join("");
   sel.value = current;
 }
 
@@ -991,7 +1007,7 @@ function renderAccountsSidebar() {
 
   const signalItems = getSignalSourceSidebarItems();
 
-  if (state.accounts.length === 0 && signalItems.length === 0) {
+  if (state.accounts.length === 0 && state.ps3838Accounts.length === 0 && signalItems.length === 0) {
     wrap.innerHTML = `<div style="padding:10px 8px; font-size:11px; color:var(--text-3); text-align:center">暂无监控节点</div>`;
     return;
   }
@@ -1111,6 +1127,50 @@ function renderAccountsSidebar() {
     div.querySelector("[data-action='delete']").addEventListener("click", async (ev) => {
       ev.stopPropagation();
       await confirmDeleteAccount(String(a.name || ""), accountLabel(a));
+    });
+    wrap.appendChild(div);
+  }
+
+  for (const a of state.ps3838Accounts) {
+    if (!a.name) continue;
+    const div = document.createElement("div");
+    const isActive = String(a.name) === String(state.selectedTarget || "");
+    const st = state.ps3838Statuses[String(a.name)] || {};
+    const stClass = st.status ? String(st.status) : "offline";
+    const statusMessage = String(st.status_message || "").trim();
+    const statusTitle = statusMessage || (stClass === "online" ? "在线" : stClass === "relogin" ? "正在登录" : "离线");
+    const loginWaiting = !!st.relogin_in_progress;
+    const dotClass = stClass === "online" ? "st-online" : stClass === "relogin" ? "st-relogin" : "st-offline";
+    div.className = ["account-item", "ps3838-account-item", isActive ? "active" : "", stClass === "relogin" ? "is-relogin" : "", stClass !== "online" ? "needs-login" : ""].filter(Boolean).join(" ");
+    div.innerHTML = `
+      <div class="account-info" style="flex:1; min-width:0">
+        <div class="account-status-dot ${dotClass}" title="${escapeHtml(statusTitle)}"></div>
+        <div class="account-copy">
+          <div class="account-name" title="${escapeHtml(accountLabel(a))}">${escapeHtml(accountLabel(a))}</div>
+          <div class="account-status-meta" title="${escapeHtml(statusTitle)}">平博 · ${escapeHtml(statusTitle)}</div>
+        </div>
+      </div>
+      <div class="acct-actions" style="opacity:0; transition:0.15s">
+        <button class="acct-btn" data-action="login" title="${loginWaiting ? "请在已打开的窗口完成登录/2FA" : "重新登录"}" ${loginWaiting ? "disabled" : ""}>↻</button>
+        <button class="acct-btn danger" data-action="delete" title="删除">×</button>
+      </div>`;
+    div.addEventListener("mouseenter", () => div.querySelector(".acct-actions").style.opacity = 1);
+    div.addEventListener("mouseleave", () => { if (!div.classList.contains("active")) div.querySelector(".acct-actions").style.opacity = 0; });
+    div.addEventListener("click", () => {
+      Array.from(wrap.children).forEach(c => c.classList.remove("active"));
+      div.classList.add("active");
+      div.querySelector(".acct-actions").style.opacity = 1;
+      state.selectedTarget = String(a.name || "");
+      const sel = $("account"); if (sel) sel.value = state.selectedTarget;
+      refreshView();
+    });
+    div.querySelector("[data-action='login']").addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      await reloginAccount(String(a.name || ""), accountLabel(a), undefined, "ps3838");
+    });
+    div.querySelector("[data-action='delete']").addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      await confirmDeleteAccount(String(a.name || ""), accountLabel(a), "ps3838");
     });
     wrap.appendChild(div);
   }
@@ -1244,7 +1304,73 @@ function parseOrderMatchInfo(order) {
   };
 }
 
+function isReadOnlyMonitorOrder(order) {
+  return !!(order && (order.read_only === true || order.provider === "ps3838"));
+}
+
+function formatMonitorMoney(value, currency) {
+  if (value == null || value === "") return "未提供";
+  const amount = Number(value);
+  const text = Number.isFinite(amount) ? amount.toLocaleString("zh-CN", { maximumFractionDigits: 8 }) : String(value);
+  return `${text}${currency ? ` ${currency}` : ""}`;
+}
+
+function buildReadOnlyOrderCardModel(order) {
+  const o = order || {};
+  const choices = Array.isArray(o.choices) ? o.choices : [];
+  const choice = choices[0] || {};
+  const teams = String(o.sides || "").split(/\s*-vs-\s*|\s+vs?\s+/i);
+  const homeTeam = teams[0] || "主队未提供";
+  const awayTeam = teams.slice(1).join(" v ") || "客队未提供";
+  const betLabel = o.marketLabel || choice.btName || o.betType || "玩法未提供";
+  const selection = choice.selectionName || ({ HOME: homeTeam, AWAY: awayTeam, DRAW: "和局" })[choice.selection] || choice.selection || "";
+  const line = [selection, choice.handicap].filter((v) => v != null && v !== "").join(" ") || o.line || "未提供";
+  const orderKind = o.orderType || (choice.inplay === true ? "滚球" : choice.inplay === false ? "早盘" : "未提供");
+  return {
+    readOnly: true,
+    orderId: o.orderId,
+    displayId: o.display_id,
+    account: o.account || "未提供",
+    sourceName: `平博 · ${backendAccountOfOrder(o)}`,
+    sourceLabel: `平博 · 票号 ${o.orderId}`,
+    league: o.league || "联赛未提供",
+    homeTeam, awayTeam,
+    score: o.score == null || o.score === "" ? "—" : String(o.score).replace(/\s*[-:]\s*/g, " : "),
+    orderKind, betLabel,
+    marketText: choices.length > 1 ? `${o.betType || "多项投注"} · ${choices.length} 项` : [orderKind, betLabel, String(choice.periodName || "").trim()].filter(Boolean).join(" · "),
+    selectionText: `${line}${o.odds != null ? ` @ ${o.odds}` : ""}`,
+    oddsText: o.odds == null ? "未提供" : String(o.odds),
+    stakeStr: formatMonitorMoney(o.stake, o.currency),
+    statusText: o.status || "接口未提供",
+    statusLine: o.event === "update" ? "订单已更新" : "已采集",
+    settlementText: o.result != null && o.result !== "" ? String(o.result) : "未提供",
+    timeStr: fmtOrderTime(o),
+    isLiveOrder: choice.inplay === true,
+    isEnded: false,
+  };
+}
+
+function renderReadOnlyOrderDetails(model, order) {
+  const fields = [
+    ["票号", model.orderId], ["客户", model.account], ["来源", model.sourceName],
+    ["代理商", order.agent || "未提供"], ["投注金额", model.stakeStr],
+    ["风险金额", formatMonitorMoney(order.toRisk, order.currency)],
+    ["可赢金额", formatMonitorMoney(order.toWin, order.currency)],
+    ["输赢", formatMonitorMoney(order.win, order.currency)],
+    ["订单状态", model.statusText], ["结果", model.settlementText],
+    ["已投注（后台时间）", order.placed || "未提供"],
+    ["最近采集", model.timeStr], ["接口更新时间", order.updatedAt || "未提供"],
+  ];
+  return `<header class="order-detail-hero">
+    <span class="order-detail-eyebrow">平博 · 只读监控</span>
+    <h3>${escapeHtml(model.league)}</h3>
+    <div class="order-detail-match"><span>${escapeHtml(model.homeTeam)}</span><strong>${escapeHtml(model.score)}</strong><span>${escapeHtml(model.awayTeam)}</span></div>
+    <p>${escapeHtml(model.marketText)} · ${escapeHtml(model.selectionText)}</p>
+  </header><section class="order-detail-grid">${fields.map(([label, value]) => `<article class="order-detail-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`).join("")}</section>`;
+}
+
 function buildOrderCardModel(order) {
+  if (isReadOnlyMonitorOrder(order)) return buildReadOnlyOrderCardModel(order);
   const o = order || {};
   const raw = o.raw || {};
   const liveMatch = o._live_match && typeof o._live_match === "object" ? o._live_match : null;
@@ -2379,7 +2505,7 @@ function renderRealtimeOrderListRow(rowData, options = {}) {
   const row = document.createElement("div");
   row.className = `hg-order-list-row${options.ended ? " is-ended" : ""}${rowData.isSearchOnly ? " is-search-row" : ""}`;
   row.innerHTML = `
-    <div class="hg-list-cell hg-cell-league" title="${escapeHtml(rowData.league)}"><strong>${escapeHtml(rowData.league)}</strong></div>
+    <div class="hg-list-cell hg-cell-league" title="${escapeHtml([rowData.league, rowData.sourceLabel].filter(Boolean).join(' · '))}"><strong>${escapeHtml(rowData.league)}</strong>${rowData.sourceLabel ? `<small>${escapeHtml(rowData.sourceLabel)}</small>` : ""}</div>
     <div class="hg-list-cell hg-cell-kind"><span class="hg-order-kind ${rowData.orderKind === "滚球" ? "live" : "early"}">${escapeHtml(rowData.orderKind)}</span></div>
     <div class="hg-list-cell hg-cell-match">
       <span class="hg-list-team" title="${escapeHtml(rowData.homeTeam)}">${escapeHtml(rowData.homeTeam)}</span>
@@ -2393,9 +2519,11 @@ function renderRealtimeOrderListRow(rowData, options = {}) {
     <div class="hg-list-cell hg-cell-follow tone-${escapeHtml(rowData.followTone || "idle")}">${escapeHtml(rowData.followStatusText)}</div>
     <div class="hg-list-cell hg-cell-settlement settlement-${escapeHtml(rowData.settlementTone)}">${escapeHtml(rowData.settlementText)}</div>
     <div class="hg-list-cell hg-cell-action">
+      ${rowData.readOnly ? `<button class="hg-details-trigger" type="button" data-detail-group="投注信息"><i class="fa-solid fa-receipt"></i><span>订单详情</span></button>` : `
       <button class="hg-details-trigger" type="button" data-detail-group="盘口信息"><i class="fa-solid fa-chart-line"></i><span>盘口信息</span></button>
       <button class="hg-details-trigger" type="button" data-detail-group="投注信息"><i class="fa-solid fa-receipt"></i><span>投注信息</span></button>
       <button class="hg-details-trigger" type="button" data-detail-group="比赛事件"><i class="fa-solid fa-futbol"></i><span>比赛事件</span></button>
+      `}
     </div>
   `;
   return row;
@@ -2528,7 +2656,7 @@ function renderTable(orders) {
   for (const match of searchMatches) {
     const model = normalizeHgSearchGame(match, match || {});
     const linkedOrder = model.matchedOrderId
-      ? state.orders.find((order) => String(order && (order.orderId || order.order_id) || "").trim() === model.matchedOrderId)
+      ? state.orders.find((order) => !isReadOnlyMonitorOrder(order) && String(order && (order.orderId || order.order_id) || "").trim() === model.matchedOrderId)
       : null;
     const linkedModel = linkedOrder ? buildOrderCardModel(linkedOrder) : null;
     const displayModel = linkedModel ? Object.assign({}, linkedModel, {
@@ -2561,14 +2689,14 @@ function renderTable(orders) {
   for (const o of orders) {
     const model = buildOrderCardModel(o);
     const oid = String(model.orderId || o.orderId || o.order_id || "").trim();
-    if (linkedOrderIds.has(oid)) continue;
+    if (!model.readOnly && linkedOrderIds.has(oid)) continue;
     const rowData = buildRealtimeOrderListRow({
       model,
-      followSummary: getFollowSummary(oid),
-      followStake: getFollowStake(oid),
-      settlement: getSettlement(oid),
+      followSummary: model.readOnly ? null : getFollowSummary(oid),
+      followStake: model.readOnly ? null : getFollowStake(oid),
+      settlement: model.readOnly ? null : getSettlement(oid),
     });
-    const row = renderRealtimeOrderListRow(rowData, { ended: model.isEnded, clockKey: model.orderId });
+    const row = renderRealtimeOrderListRow(rowData, { ended: model.isEnded, clockKey: model.readOnly ? "" : model.orderId });
     row.querySelectorAll("[data-detail-group]").forEach((btn) => {
       btn.addEventListener("click", () => {
         openModal(o, btn.getAttribute("data-detail-group") || "注单详情");
@@ -2595,7 +2723,7 @@ function renderKpis(orders) {
   }
   renderTradingNodeKpi();
 
-  const a = state.selectedTarget ? findAccountByTargetName(state.selectedTarget) : null;
+  const a = state.selectedTarget ? (findAccountByTargetName(state.selectedTarget) || state.ps3838Accounts.find((a) => a.name === state.selectedTarget)) : null;
   if ($("kpi-today-sub")) {
     $("kpi-today-sub").textContent = state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET
       ? "信号源: 远端交易节点"
@@ -2634,6 +2762,13 @@ function openModal(order, group = "注单详情") {
   stopHgMatchOddsRefresh();
   stopHgMatchEventRefresh();
   const model = buildOrderCardModel(order);
+  if (model.readOnly) {
+    if ($("modal-title")) $("modal-title").textContent = "平博订单详情 · 只读监控";
+    if ($("order-detail-content")) $("order-detail-content").innerHTML = renderReadOnlyOrderDetails(model, order);
+    if ($("modal-pre")) $("modal-pre").textContent = JSON.stringify(order, null, 2);
+    showOrderDetailModal();
+    return;
+  }
   const title = $("modal-title");
   if (title) {
     const icon = group === "盘口信息" ? "fa-list-ul" : group === "投注信息" ? "fa-sack-dollar" : group === "比赛事件" ? "fa-futbol" : "fa-file-invoice-dollar";
@@ -2749,6 +2884,7 @@ function openAddModal() {
         mode: "account",
         account: { base_url: "", username: "", password: "", login_tab: 3, relogin_min_interval_seconds: 5, security_code: "", monitor_members: [], monitor_downlines: [] },
         signal: { enabled: true, url: "", token: "", live_only: true, limit: 200, interval_seconds: 1 },
+        ps3838: { base_url: "https://www.ps38ag.com", username: "", password: "", interval_seconds: 15, telegram_chat_id: "" },
       };
   renderAddNodeModal();
   const m = $("modal-add"); if (m) m.classList.add("show");
@@ -2768,6 +2904,7 @@ function bindAddNodeModalControls() {
   bindOnce($("modal-add-close-btn"), "click", closeAddModal);
   bindOnce($("add-submit"), "click", submitAddAccount);
   bindOnce($("add-mode-account"), "click", () => setAddMode("account"));
+  bindOnce($("add-mode-ps3838"), "click", () => setAddMode("ps3838"));
   bindOnce($("add-mode-signal"), "click", () => setAddMode("signal"));
   bindOnce($("add-login-tab-2"), "click", () => setAddLoginTab(2));
   bindOnce($("add-login-tab-3"), "click", () => setAddLoginTab(3));
@@ -2890,10 +3027,10 @@ function requestAccountDeleteConfirmation(label) {
   });
 }
 
-async function confirmDeleteAccount(name, label) {
+async function confirmDeleteAccount(name, label, provider = "ag") {
   if (!name || !(await requestAccountDeleteConfirmation(label))) return false;
   try {
-    return await deleteAccount(name, label);
+    return await deleteAccount(name, label, provider);
   } finally {
     finishAccountDeleteConfirmation();
   }
@@ -2948,7 +3085,7 @@ function parseListField(value) {
 
 function setAddMode(mode) {
   if (!addNodeFormState) return;
-  addNodeFormState.mode = mode === "signal" ? "signal" : "account";
+  addNodeFormState.mode = mode === "signal" || mode === "ps3838" ? mode : "account";
   renderAddNodeModal();
 }
 
@@ -2964,11 +3101,15 @@ window.setAddLoginTab = setAddLoginTab;
 function renderAddNodeModal() {
   if (!addNodeFormState) return;
   const isSignal = addNodeFormState.mode === "signal";
-  $("add-mode-account")?.classList.toggle("active", !isSignal);
+  const isPs3838 = addNodeFormState.mode === "ps3838";
+  $("add-mode-account")?.classList.toggle("active", !isSignal && !isPs3838);
+  $("add-mode-ps3838")?.classList.toggle("active", isPs3838);
   $("add-mode-signal")?.classList.toggle("active", isSignal);
-  $("add-mode-account")?.setAttribute("aria-pressed", String(!isSignal));
+  $("add-mode-account")?.setAttribute("aria-pressed", String(!isSignal && !isPs3838));
+  $("add-mode-ps3838")?.setAttribute("aria-pressed", String(isPs3838));
   $("add-mode-signal")?.setAttribute("aria-pressed", String(isSignal));
-  if ($("add-account-fields")) $("add-account-fields").hidden = isSignal;
+  if ($("add-account-fields")) $("add-account-fields").hidden = isSignal || isPs3838;
+  if ($("add-ps3838-fields")) $("add-ps3838-fields").hidden = !isPs3838;
   if ($("add-signal-fields")) $("add-signal-fields").hidden = !isSignal;
 
   const loginTab = Number(addNodeFormState.account?.login_tab || 3);
@@ -2990,6 +3131,12 @@ function renderAddNodeModal() {
   if ($("add-monitor-members")) $("add-monitor-members").value = (addNodeFormState.account?.monitor_members || []).join("\n");
   if ($("add-monitor-downlines")) $("add-monitor-downlines").value = (addNodeFormState.account?.monitor_downlines || []).join("\n");
 
+  if ($("add-ps3838-base-url")) $("add-ps3838-base-url").value = String(addNodeFormState.ps3838?.base_url || "https://www.ps38ag.com");
+  if ($("add-ps3838-username")) $("add-ps3838-username").value = String(addNodeFormState.ps3838?.username || "");
+  if ($("add-ps3838-password")) $("add-ps3838-password").value = String(addNodeFormState.ps3838?.password || "");
+  if ($("add-ps3838-interval")) $("add-ps3838-interval").value = String(addNodeFormState.ps3838?.interval_seconds ?? 15);
+  if ($("add-ps3838-chat-id")) $("add-ps3838-chat-id").value = String(addNodeFormState.ps3838?.telegram_chat_id || "");
+
   if ($("add-signal-url")) $("add-signal-url").value = String(addNodeFormState.signal?.url || "");
   if ($("add-signal-token")) $("add-signal-token").value = String(addNodeFormState.signal?.token || "");
   if ($("add-signal-limit")) $("add-signal-limit").value = String(addNodeFormState.signal?.limit ?? 200);
@@ -2997,9 +3144,9 @@ function renderAddNodeModal() {
   if ($("add-signal-live-only")) $("add-signal-live-only").checked = addNodeFormState.signal?.live_only !== false;
 
   const submitLabel = $("add-submit-label");
-  if (submitLabel) submitLabel.textContent = isSignal ? "保存信号源" : "立即接入";
+  if (submitLabel) submitLabel.textContent = isSignal ? "保存信号源" : isPs3838 ? "登录并开始监控" : "立即接入";
   const submitIcon = $("add-submit")?.querySelector("i");
-  if (submitIcon) submitIcon.className = `fa-solid ${isSignal ? "fa-floppy-disk" : "fa-plug"}`;
+  if (submitIcon) submitIcon.className = `fa-solid ${isSignal ? "fa-floppy-disk" : isPs3838 ? "fa-futbol" : "fa-plug"}`;
   if ($("add-hint")) {
     $("add-hint").textContent = "";
     $("add-hint").className = "form-hint";
@@ -3045,6 +3192,7 @@ async function fetchJson(url, init, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS) {
 async function loadAccounts() {
   const data = await fetchJson("/api/accounts");
   state.accounts = (data.accounts || []).filter((a) => a && (a.name || a.username));
+  state.ps3838Accounts = (data.ps3838_accounts || []).filter((a) => a && (a.name || a.username));
   renderAccountsSidebar();
   renderAccountSelect();
   renderTradingNodeKpi();
@@ -3056,6 +3204,8 @@ async function loadStatuses() {
     const data = await fetchJson("/api/status");
     updateFollowEngineState(data);
     state.statuses = data.statuses || {};
+    state.ps3838Statuses = data.ps3838_statuses || {};
+    state.platform = data.platform || state.platform || {};
     state.systemStatus = {
       serverTime: String(data.server_time || ""),
       uptime: Number(data.uptime || 0),
@@ -3063,6 +3213,7 @@ async function loadStatuses() {
       running: !!data.running,
       snapshotWatchRunning: !!data.snapshot_watch_running,
       coreRunning: !!data.core_running,
+      platform: data.platform || {},
       updatedAt: Date.now(),
     };
     if ($("server-time")) $("server-time").textContent = new Date().toLocaleTimeString();
@@ -3083,22 +3234,25 @@ async function loadStatuses() {
   } catch {
     state.systemCenter.syncTone = "error";
   }
+  renderAccountsSidebar();
   renderFollowEngineControls();
   renderSystemCenterStatusBar();
   if (state.view === "arsenal") renderPoolManagement();
 }
 
-async function reloginAccount(name, label, successMessage) {
+async function reloginAccount(name, label, successMessage, provider = "ag") {
   if (!name) return;
   try {
-    const data = await fetchJson("/api/accounts/relogin", {
+    const endpoint = provider === "ps3838" ? "/api/ps3838/relogin" : "/api/accounts/relogin";
+    const data = await fetchJson(endpoint, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     });
     if (!data.ok) throw new Error(data.message || "relogin_failed");
     await loadStatuses();
     renderAccountsSidebar();
-    const st = state.statuses[String(name || "")] || {};
+    const statusMap = provider === "ps3838" ? state.ps3838Statuses : state.statuses;
+    const st = statusMap[String(name || "")] || {};
     const message = String(st.status_message || data.message || successMessage || `已发起重新登录: ${label}`).trim();
     toast(message, "info", 6500);
   } catch (e) {
@@ -3106,20 +3260,23 @@ async function reloginAccount(name, label, successMessage) {
   }
 }
 
-async function deleteAccount(name, label) {
+async function deleteAccount(name, label, provider = "ag") {
   if (!name) return false;
   try {
-    const data = await fetchJson("/api/accounts/delete", {
+    const endpoint = provider === "ps3838" ? "/api/ps3838/delete" : "/api/accounts/delete";
+    const data = await fetchJson(endpoint, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     });
     if (!data.ok) throw new Error(data.message || "delete_failed");
     state.accounts = state.accounts.filter((account) => String(account?.name || "") !== String(name));
+    state.ps3838Accounts = state.ps3838Accounts.filter((account) => String(account?.name || "") !== String(name));
     if (state.selectedTarget === String(name)) state.selectedTarget = "";
     if (state.poolSelection.kind === "monitor" && state.poolSelection.id === String(name)) {
       state.poolSelection = { kind: "", id: "" };
     }
     delete state.statuses[String(name)];
+    delete state.ps3838Statuses[String(name)];
     renderAccountsSidebar();
     renderAccountSelect();
     renderTradingNodeKpi();
@@ -3177,10 +3334,14 @@ async function loadTelegramConfig() {
   if ($("tg-token-hint")) $("tg-token-hint").textContent = data.token_mask || (configured ? "Token 已设置" : "");
   if ($("tg-chat"))  $("tg-chat").value  = String(data.chat_id || "");
   if ($("tg-proxy")) $("tg-proxy").value = String(data.proxy || "");
-  const pushEl = $("tg-status-push"); if (pushEl) pushEl.checked = !!data.status_push_enabled;
-  const sHint  = $("tg-status-token-hint"); if (sHint) sHint.textContent = data.status_token_mask || "";
-  if ($("tg-status-chat"))  $("tg-status-chat").value  = String(data.status_chat_id || "");
-  if ($("tg-status-proxy")) $("tg-status-proxy").value = String(data.status_proxy || "");
+  const orderForwardEl = $("tg-order-forward");
+  if (orderForwardEl) orderForwardEl.checked = data.order_forward_enabled !== false;
+  const backendPushEl = $("tg-backend-order-push");
+  if (backendPushEl) backendPushEl.checked = !!data.backend_order_push_enabled;
+  const backendTokenHint = $("tg-backend-order-token-hint");
+  if (backendTokenHint) backendTokenHint.textContent = data.backend_order_token_mask || "";
+  if ($("tg-backend-order-chat")) $("tg-backend-order-chat").value = String(data.backend_order_chat_id || "");
+  if ($("tg-backend-order-proxy")) $("tg-backend-order-proxy").value = String(data.backend_order_proxy || "");
   renderSystemCenterTelegramSummary();
 }
 
@@ -3188,9 +3349,11 @@ async function saveTelegramConfig() {
   const token = ($("tg-token")?.value || "").trim();
   const chatId = ($("tg-chat")?.value  || "").trim();
   const proxy  = ($("tg-proxy")?.value || "").trim();
-  const statusPushEnabled = !!$("tg-status-push")?.checked;
-  const statusChatId = ($("tg-status-chat")?.value || "").trim();
-  const statusProxy = ($("tg-status-proxy")?.value || "").trim();
+  const orderForwardEnabled = $("tg-order-forward") ? !!$("tg-order-forward").checked : true;
+  const backendOrderPushEnabled = !!$("tg-backend-order-push")?.checked;
+  const backendOrderBotToken = ($("tg-backend-order-token")?.value || "").trim();
+  const backendOrderChatId = ($("tg-backend-order-chat")?.value || "").trim();
+  const backendOrderProxy = ($("tg-backend-order-proxy")?.value || "").trim();
   const hint = $("tg-hint");
   if (hint) { hint.textContent = "正在保存..."; hint.className = "form-hint"; }
   try {
@@ -3200,13 +3363,16 @@ async function saveTelegramConfig() {
         bot_token: token,
         chat_id: chatId,
         proxy,
-        status_push_enabled: statusPushEnabled,
-        status_chat_id: statusChatId,
-        status_proxy: statusProxy,
+        order_forward_enabled: orderForwardEnabled,
+        backend_order_push_enabled: backendOrderPushEnabled,
+        backend_order_bot_token: backendOrderBotToken,
+        backend_order_chat_id: backendOrderChatId,
+        backend_order_proxy: backendOrderProxy,
       }),
     });
     if (!data.ok) throw new Error(data.message || "保存失败");
     if ($("tg-token")) $("tg-token").value = "";
+    if ($("tg-backend-order-token")) $("tg-backend-order-token").value = "";
     await loadTelegramConfig();
     if (hint) { hint.textContent = "保存成功"; hint.className = "form-hint success"; }
     toast("消息通知配置已保存", "success");
@@ -3232,11 +3398,11 @@ async function clearTelegramConfig() {
       body: JSON.stringify({ "clear_config": true }),
     });
     if (!data.ok) throw new Error(data.message || "清除失败");
-    ["tg-token", "tg-chat", "tg-proxy", "tg-status-chat", "tg-status-proxy"].forEach((id) => {
+    ["tg-token", "tg-chat", "tg-proxy", "tg-backend-order-token", "tg-backend-order-chat", "tg-backend-order-proxy"].forEach((id) => {
       const el = $(id);
       if (el) el.value = "";
     });
-    const pushEl = $("tg-status-push");
+    const pushEl = $("tg-backend-order-push");
     if (pushEl) pushEl.checked = false;
     await loadTelegramConfig();
     if (hint) { hint.textContent = "当前配置已清除，请填写新的机器人信息"; hint.className = "form-hint success"; }
@@ -3276,6 +3442,33 @@ async function testTelegram() {
   }
 }
 
+async function testBackendOrderTelegram() {
+  const hint = $("tg-hint");
+  if (hint) { hint.textContent = "正在发送后台订单测试..."; hint.className = "form-hint"; }
+  try {
+    const payload = {};
+    const token = ($("tg-backend-order-token")?.value || "").trim();
+    const chatId = ($("tg-backend-order-chat")?.value || "").trim();
+    const proxy = ($("tg-backend-order-proxy")?.value || "").trim();
+    if (token) payload.bot_token = token;
+    if (chatId) payload.chat_id = chatId;
+    if (proxy) payload.proxy = proxy;
+    const data = await fetchJson("/api/telegram-backend-order-test", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!data.ok) throw new Error(data.message || "发送失败");
+    if (hint) { hint.textContent = "后台订单测试已发送"; hint.className = "form-hint success"; }
+    toast("后台订单推送测试成功", "success");
+    recordSystemCenterActivity("后台订单推送测试成功", "success");
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e);
+    if (hint) { hint.textContent = `错误: ${msg}`; hint.className = "form-hint error"; }
+    toast(`发送失败: ${msg}`, "error");
+    recordSystemCenterActivity(`后台订单测试失败：${msg}`, "error");
+  }
+}
+
 // ── Arsenal ────────────────────────────────────────────────────
 function computeArsenalStats(members) {
   const helper = window.HDArsenalCards && window.HDArsenalCards.computeArsenalMemberStats;
@@ -3285,6 +3478,7 @@ function computeArsenalStats(members) {
   return {
     total: list.length,
     online,
+    maintenance: list.filter((m) => String(m.status || "").trim().toLowerCase() === "maintenance").length,
     ready: 0,
     recovering: 0,
     manual: 0,
@@ -3309,12 +3503,16 @@ function renderArsenalStats() {
   if (totalBalance) totalBalance.textContent = String(stats.totalBalance || 0);
   if ($("member-summary-online")) $("member-summary-online").textContent = String(stats.online || 0);
   if ($("pool-member-online-meta")) $("pool-member-online-meta").textContent = `${stats.online || 0} / ${stats.total || 0} 个会员`;
+  if ($("pool-member-online-meta") && stats.maintenance) {
+    $("pool-member-online-meta").textContent = `${stats.online || 0} 在线 / ${stats.maintenance} 维护中`;
+  }
   if (badge) badge.textContent = String(stats.total);
 }
 
 async function loadArsenal() {
   const data = await fetchJson("/api/arsenal");
   state.members = (data.members || []).filter((m) => m && m.id);
+  state.platform = data.platform || state.platform || {};
   renderArsenalStats();
   await loadMappings();
 }
@@ -3448,7 +3646,7 @@ function renderLegacyArsenalCards() {
       </div>
 
       <div class="arsenal-card-actions">
-        <button class="btn btn-primary btn-sm" data-action="login">
+        <button class="btn btn-primary btn-sm" data-action="login" ${card.statusTone === "maintenance" ? "disabled title=\"平台维护期间暂停重登\"" : ""}>
           <i class="fa-solid fa-right-to-bracket"></i> 重登
         </button>
         <button class="btn btn-ghost btn-sm" data-action="check">
@@ -3476,6 +3674,7 @@ function renderLegacyArsenalCards() {
 
 function memberHealthScore(member, card) {
   const status = String(member && member.status || "").trim().toLowerCase();
+  if (status === "maintenance") return null;
   const failures = Number(card && card.requestFailCount || 0) + Number(card && card.reloginFailCount || 0);
   if (status === "online") return Math.max(40, 100 - Math.min(45, failures * 12) - (card && card.lastError ? 20 : 0));
   if (status === "relogin") return Math.max(25, 58 - Math.min(25, failures * 8));
@@ -3534,6 +3733,7 @@ function renderArsenalTable() {
 
   for (const row of rows) {
     const { member, card, health } = row;
+    const maintenance = String(member.status || "").trim().toLowerCase() === "maintenance";
     const statusTone = String(card.statusTone || "muted").replace(/[^a-z0-9_-]/gi, "");
     const tr = document.createElement("tr");
     tr.className = `member-pool-row status-${statusTone || "muted"}`;
@@ -3554,8 +3754,8 @@ function renderArsenalTable() {
       </td>
       <td><span class="member-balance">¥ ${escapeHtml(card.balanceText || "0")}</span></td>
       <td>
-        <div class="member-health" title="由在线状态、失败计数和最近错误实时派生">
-          <span><i style="width:${health}%"></i></span><b>${health}%</b>
+        <div class="member-health${maintenance ? " is-paused" : ""}" title="${maintenance ? "平台维护期间暂停健康度计算" : "由在线状态、失败计数和最近错误实时派生"}">
+          <span><i style="width:${maintenance ? 0 : health}%"></i></span><b>${maintenance ? "暂停" : `${health}%`}</b>
         </div>
       </td>
       <td>
@@ -3567,7 +3767,7 @@ function renderArsenalTable() {
       <td><time class="member-last-active" datetime="${row.lastActive ? new Date(row.lastActive * 1000).toISOString() : ""}">${escapeHtml(row.lastActive ? fmtTime(row.lastActive) : "暂无记录")}</time></td>
       <td>
         <div class="member-row-actions">
-          <button type="button" data-action="login" title="重登 ${escapeHtml(card.label)}" aria-label="重登 ${escapeHtml(card.label)}"><i class="fa-solid fa-right-to-bracket" aria-hidden="true"></i></button>
+          <button type="button" data-action="login" title="${maintenance ? "平台维护期间暂停重登" : `重登 ${escapeHtml(card.label)}`}" aria-label="重登 ${escapeHtml(card.label)}" ${maintenance ? "disabled" : ""}><i class="fa-solid fa-right-to-bracket" aria-hidden="true"></i></button>
           <button type="button" data-action="check" title="检测 ${escapeHtml(card.label)}" aria-label="检测 ${escapeHtml(card.label)}"><i class="fa-solid fa-plug" aria-hidden="true"></i></button>
           <button class="danger" type="button" data-action="delete" title="删除 ${escapeHtml(card.label)}" aria-label="删除 ${escapeHtml(card.label)}"><i class="fa-solid fa-trash" aria-hidden="true"></i></button>
         </div>
@@ -3675,6 +3875,32 @@ function formatMonitorTimestamp(value, emptyText = "还没扫到") {
   return Number.isFinite(ts) && ts > 0 ? fmtTime(ts) : emptyText;
 }
 
+function platformMaintenanceModel() {
+  const platform = state.platform && typeof state.platform === "object" ? state.platform : {};
+  const status = String(platform.status || "").trim().toLowerCase();
+  const active = status === "maintenance";
+  const recovering = status === "recovering";
+  const startAt = Number(platform.maintenance_start_at || 0);
+  const until = Number(platform.maintenance_until || 0);
+  const formatFull = (ts) => ts > 0
+    ? new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : "未提供";
+  const windowText = startAt || until ? `${formatFull(startAt)} ～ ${formatFull(until)}` : "平台未提供维护时间";
+  const nextProbeAt = Number(platform.next_probe_at || 0);
+  const nextProbeText = nextProbeAt > 0 ? formatFull(nextProbeAt) : "自动持续检测";
+  return {
+    ...platform,
+    active,
+    recovering,
+    startAt,
+    until,
+    windowText,
+    nextProbeAt,
+    nextProbeText,
+    message: String(platform.maintenance_message || (active ? "平台系统维护" : recovering ? "正在验证原有会话" : "")),
+  };
+}
+
 function monitorAccountLoginTab(account) {
   const tab = Number(account && (account.relogin_login_tab || account.login_tab || 3));
   return tab === 2 ? 2 : 3;
@@ -3704,6 +3930,9 @@ function classifyMonitorIssue(status, enabled = true) {
   const raw = [code, message].filter(Boolean).join(": ");
   if (!raw) return "";
   const lower = raw.toLowerCase();
+  if (String(st.status || "").toLowerCase() === "maintenance" || code === "PLATFORM_MAINTENANCE") {
+    return message || "平台系统维护";
+  }
   if (!code && ["在线", "正常", "运行中", "扫描中", "online", "ok", "running", "healthy"].includes(lower)) return "";
   if (code === "0X001" || raw.includes("流量较高") || raw.includes("系统繁忙") || lower.includes("busy")) {
     return `系统繁忙：${message || code}`;
@@ -3722,12 +3951,18 @@ function buildBackendMonitorSource(account) {
   const status = state.statuses[id] || {};
   const enabled = account.enabled !== false;
   const rawStatus = String(status.status || "").trim().toLowerCase();
+  const platformStatus = String(status.platform_status || "").trim().toLowerCase();
+  const recovering = rawStatus === "recovering" || platformStatus === "recovering";
+  const maintenance = rawStatus === "maintenance" || platformStatus === "maintenance";
   const reloginBusy = !!status.relogin_in_progress || rawStatus === "relogin";
   const needsManual = !!status.needs_manual_login;
   let statusText = "离线";
   let statusTone = "offline";
   if (!enabled) {
     statusText = "已暂停";
+  } else if (maintenance || recovering) {
+    statusText = recovering ? "恢复验证中" : "平台维护";
+    statusTone = recovering ? "warning" : "maintenance";
   } else if (needsManual) {
     statusText = "需人工登录";
   } else if (reloginBusy) {
@@ -3749,6 +3984,7 @@ function buildBackendMonitorSource(account) {
   const proxyText = String(account.proxy || "").trim() || "未配置代理";
   return {
     kind: "backend",
+    provider: "ag",
     id,
     label: accountLabel(account),
     title: accountLabel(account),
@@ -3759,9 +3995,10 @@ function buildBackendMonitorSource(account) {
     statusTone,
     enabled,
     normal: enabled && statusTone === "online",
-    primaryLabel: "最后扫单时间",
-    primaryValue: formatMonitorTimestamp(lastPollAt),
-    primaryMeta: lastOkAt ? `最后成功：${formatMonitorTimestamp(lastOkAt)}` : "还没有成功扫到订单接口",
+    maintenance: maintenance || recovering,
+    primaryLabel: maintenance || recovering ? (recovering ? "恢复状态" : "维护状态") : "最后扫单时间",
+    primaryValue: maintenance || recovering ? (recovering ? "正在验证原会话" : "已暂停扫单") : formatMonitorTimestamp(lastPollAt),
+    primaryMeta: maintenance || recovering ? platformMaintenanceModel().windowText : (lastOkAt ? `最后成功：${formatMonitorTimestamp(lastOkAt)}` : "还没有成功扫到订单接口"),
     rows: [
       { icon: "fa-right-to-bracket", label: "登录通道", value: `登入${tab}` },
       { icon: "fa-list-check", label: "监控范围", value: scanScope },
@@ -3771,6 +4008,52 @@ function buildBackendMonitorSource(account) {
     ],
     rawAccount: account,
   };
+}
+
+function buildPs3838MonitorSource(account) {
+  const id = String(account && account.name || "").trim();
+  if (!id) return null;
+  const status = state.ps3838Statuses[id] || {};
+  const enabled = account.enabled !== false;
+  const waiting = enabled && !!status.relogin_in_progress;
+  const online = enabled && String(status.status || "").toLowerCase() === "online";
+  const statusText = !enabled ? "已暂停" : waiting ? "等待登录 / 2FA" : online ? "在线扫单" : "未登录";
+  const statusTone = online ? "online" : waiting ? "warning" : "offline";
+  const lastPollAt = Number(status.last_poll_at || 0);
+  const issueText = online || waiting ? "" : classifyMonitorIssue(status, enabled);
+  return {
+    kind: "backend",
+    provider: "ps3838",
+    channel: "ps3838",
+    id,
+    label: accountLabel(account),
+    title: accountLabel(account),
+    typeText: "平博 / PS3838 · 只读订单监控",
+    icon: "fa-futbol",
+    enabled,
+    normal: online,
+    maintenance: false,
+    loginWaiting: waiting,
+    statusText,
+    statusTone,
+    primaryLabel: "最后扫单时间",
+    primaryValue: formatMonitorTimestamp(lastPollAt),
+    primaryMeta: online
+      ? `当前 ${Number(status.order_count || 0)} 笔 · 新单 ${Number(status.new_count || 0)} / 更新 ${Number(status.update_count || 0)}`
+      : String(status.status_message || "等待完成登录 / 2FA"),
+    rows: [
+      { icon: "fa-right-to-bracket", label: "登录通道", value: "PS3838 · 账号密码 + 2FA" },
+      { icon: "fa-list-check", label: "监控范围", value: `只读订单 · 每 ${Number(account.interval_seconds || 15)} 秒扫描` },
+      { icon: "fa-network-wired", label: "代理", value: String(account.proxy || "").trim() || "未配置代理", mono: true },
+      { icon: "fa-circle-info", label: "运行状态", value: String(status.status_message || statusText) },
+      { icon: "fa-triangle-exclamation", label: "失败原因", value: issueText || "最近无异常", warning: !!issueText },
+    ],
+    rawAccount: account,
+  };
+}
+
+function monitorSourceStatus(source) {
+  return (source.provider === "ps3838" ? state.ps3838Statuses : state.statuses)[source.id] || {};
 }
 
 function buildSignalMonitorSource(item) {
@@ -3821,6 +4104,10 @@ function buildMonitorPoolSources() {
     const source = buildBackendMonitorSource(account);
     if (source) sources.push(source);
   }
+  for (const account of Array.isArray(state.ps3838Accounts) ? state.ps3838Accounts : []) {
+    const source = buildPs3838MonitorSource(account);
+    if (source) sources.push(source);
+  }
   const signalItems = getSignalSourceSidebarItems();
   if (signalItems.length) {
     for (const item of signalItems) {
@@ -3839,11 +4126,12 @@ function renderLegacyMonitorPoolStats(sources) {
   const backendCount = list.filter((s) => s.kind === "backend").length;
   const signalCount = list.filter((s) => s.kind === "signal").length;
   const normalCount = list.filter((s) => s.normal).length;
+  const maintenanceCount = list.filter((s) => s.maintenance).length;
   const enabledBackendCount = list.filter((s) => s.kind === "backend" && s.enabled).length;
   const values = {
     "monitor-pool-count": list.length,
     "monitor-pool-normal-count": normalCount,
-    "monitor-pool-error-count": Math.max(0, list.length - normalCount),
+    "monitor-pool-error-count": Math.max(0, list.length - normalCount - maintenanceCount),
     "monitor-pool-backend-count": backendCount,
     "monitor-pool-signal-count": signalCount,
     "monitor-pool-concurrency": `${enabledBackendCount} / ${backendCount}`,
@@ -3904,7 +4192,7 @@ function renderLegacyMonitorSourceCard(source) {
         <i class="fa-solid ${source.enabled ? "fa-pause" : "fa-play"}"></i> ${source.enabled ? "暂停" : "启用"}
       </button>
       ${source.kind === "backend" ? `
-      <button class="btn btn-primary btn-sm" data-action="login">
+      <button class="btn btn-primary btn-sm" data-action="login" ${source.maintenance ? "disabled title=\"平台维护期间暂停重登\"" : ""}>
         <i class="fa-solid fa-right-to-bracket"></i> 重登
       </button>` : ""}
       <button class="btn btn-danger btn-sm icon-only" data-action="delete" title="删除监控来源">
@@ -3922,11 +4210,11 @@ function renderLegacyMonitorSourceCard(source) {
   article.querySelector("[data-action='toggle']")?.addEventListener("click", async (ev) => {
     ev.stopPropagation();
     if (source.kind === "signal") await updateSignalPullEnabled(!source.enabled);
-    else await updateAccountEnabled(source.id, source.label, !source.enabled);
+    else await updateAccountEnabled(source.id, source.label, !source.enabled, source.provider);
   });
   article.querySelector("[data-action='login']")?.addEventListener("click", async (ev) => {
     ev.stopPropagation();
-    await reloginAccount(source.id, source.label);
+    await reloginAccount(source.id, source.label, undefined, source.provider);
     renderMonitorPool();
   });
   article.querySelector("[data-action='delete']")?.addEventListener("click", async (ev) => {
@@ -3936,7 +4224,7 @@ function renderLegacyMonitorSourceCard(source) {
       renderMonitorPool();
       return;
     }
-    if (await confirmDeleteAccount(source.id, source.label)) {
+    if (await confirmDeleteAccount(source.id, source.label, source.provider)) {
       renderMonitorPool();
     }
   });
@@ -4083,7 +4371,8 @@ function renderMonitorPoolStats(sources) {
   const backendCount = list.filter((source) => source.kind === "backend").length;
   const signalCount = list.filter((source) => source.kind === "signal").length;
   const normalCount = list.filter((source) => source.normal).length;
-  const errorCount = Math.max(0, list.length - normalCount);
+  const maintenanceCount = list.filter((source) => source.maintenance).length;
+  const errorCount = Math.max(0, list.length - normalCount - maintenanceCount);
   const enabledBackendCount = list.filter((source) => source.kind === "backend" && source.enabled).length;
   const values = {
     "monitor-pool-count": list.length,
@@ -4113,10 +4402,10 @@ function filterMonitorPoolSources(sources) {
   return (Array.isArray(sources) ? sources : []).filter((source) => {
     if (dashboard.source && dashboard.source !== "all" && source.kind !== dashboard.source) return false;
     if (dashboard.status === "online" && !source.normal) return false;
-    if (dashboard.status === "error" && (source.normal || !source.enabled)) return false;
+    if (dashboard.status === "error" && (source.normal || source.maintenance || !source.enabled)) return false;
     if (dashboard.status === "paused" && source.enabled) return false;
     if (dashboard.channel && dashboard.channel !== "all") {
-      const channel = source.kind === "signal" ? "signal" : String(monitorAccountLoginTab(source.rawAccount));
+      const channel = source.channel || (source.kind === "signal" ? "signal" : String(monitorAccountLoginTab(source.rawAccount)));
       if (channel !== String(dashboard.channel)) return false;
     }
     if (query) {
@@ -4165,7 +4454,7 @@ function renderMonitorSourceCard(source) {
     <footer class="pool-monitor-actions">
       <button type="button" data-action="refresh" title="刷新状态" aria-label="刷新 ${escapeHtml(source.label)} 状态"><i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i></button>
       <button type="button" data-action="toggle" title="${source.enabled ? "暂停" : "启用"}" aria-label="${source.enabled ? "暂停" : "启用"} ${escapeHtml(source.label)}"><i class="fa-solid ${source.enabled ? "fa-pause" : "fa-play"}" aria-hidden="true"></i></button>
-      ${source.kind === "backend" ? `<button class="primary" type="button" data-action="login" title="重新登录" aria-label="重新登录 ${escapeHtml(source.label)}"><i class="fa-solid fa-rotate" aria-hidden="true"></i><span>重登</span></button>` : ""}
+      ${source.kind === "backend" ? `<button class="primary" type="button" data-action="login" title="${source.loginWaiting ? "请在已打开的窗口完成登录 / 2FA" : source.maintenance ? "平台维护期间暂停重登" : "重新登录"}" aria-label="重新登录 ${escapeHtml(source.label)}" ${source.maintenance || source.loginWaiting ? "disabled" : ""}><i class="fa-solid fa-rotate" aria-hidden="true"></i><span>重登</span></button>` : ""}
       <button class="danger" type="button" data-action="delete" title="删除监控来源" aria-label="删除 ${escapeHtml(source.label)}"><i class="fa-solid fa-trash" aria-hidden="true"></i></button>
     </footer>`;
 
@@ -4196,18 +4485,18 @@ function renderMonitorSourceCard(source) {
   article.querySelector("[data-action='toggle']")?.addEventListener("click", async (event) => {
     event.stopPropagation();
     if (source.kind === "signal") await updateSignalPullEnabled(!source.enabled);
-    else await updateAccountEnabled(source.id, source.label, !source.enabled);
+    else await updateAccountEnabled(source.id, source.label, !source.enabled, source.provider);
   });
   article.querySelector("[data-action='login']")?.addEventListener("click", async (event) => {
     event.stopPropagation();
-    await reloginAccount(source.id, source.label);
+    await reloginAccount(source.id, source.label, undefined, source.provider);
     renderPoolManagement();
   });
   article.querySelector("[data-action='delete']")?.addEventListener("click", async (event) => {
     event.stopPropagation();
     if (source.kind === "signal") {
       await deleteSignalSource(source.rawItem);
-    } else if (await confirmDeleteAccount(source.id, source.label)) {
+    } else if (await confirmDeleteAccount(source.id, source.label, source.provider)) {
       renderPoolManagement();
     }
   });
@@ -4292,12 +4581,14 @@ function renderPoolOverview(monitorSources = null) {
   const sources = Array.isArray(monitorSources) ? monitorSources : buildMonitorPoolSources();
   const members = Array.isArray(state.members) ? state.members.filter(Boolean) : [];
   const memberStats = computeArsenalStats(members);
-  const total = sources.length;
-  const normal = sources.filter((source) => source.normal).length;
+  const platform = platformMaintenanceModel();
+  const healthSources = sources.filter((source) => !source.maintenance);
+  const total = healthSources.length;
+  const normal = healthSources.filter((source) => source.normal).length;
   const health = total > 0 ? poolPercent(normal, total) : 0;
   const status = $("pool-overview-status");
-  const tone = !total ? "muted" : health >= 80 ? "success" : health >= 50 ? "warning" : "danger";
-  const statusText = !total ? "暂无来源" : health === 100 ? "扫描正常" : health >= 50 ? "部分异常" : "扫描异常";
+  const tone = platform.active || platform.recovering ? "warning" : !total ? "muted" : health >= 80 ? "success" : health >= 50 ? "warning" : "danger";
+  const statusText = platform.active ? "平台维护中" : platform.recovering ? "恢复验证中" : !total ? "暂无来源" : health === 100 ? "扫描正常" : health >= 50 ? "部分异常" : "扫描异常";
   if (status) {
     status.dataset.tone = tone;
     const label = status.querySelector("b");
@@ -4307,12 +4598,16 @@ function renderPoolOverview(monitorSources = null) {
   const ring = $("pool-health-ring");
   const miniRing = $("pool-mini-health");
   [ring, miniRing].filter(Boolean).forEach((element) => element.style.setProperty("--health", String(health)));
-  if ($("pool-health-value")) $("pool-health-value").textContent = total ? `${health}%` : "--";
-  if ($("pool-mini-health-value")) $("pool-mini-health-value").textContent = total ? `${health}%` : "--";
-  const healthLabel = !total ? "暂无数据" : health >= 80 ? "运行健康" : health >= 50 ? "需要关注" : "存在异常";
+  if ($("pool-health-value")) $("pool-health-value").textContent = platform.active || platform.recovering ? "--" : total ? `${health}%` : "--";
+  if ($("pool-mini-health-value")) $("pool-mini-health-value").textContent = platform.active || platform.recovering ? "--" : total ? `${health}%` : "--";
+  const healthLabel = platform.active ? "维护暂停" : platform.recovering ? "正在恢复" : !total ? "暂无数据" : health >= 80 ? "运行健康" : health >= 50 ? "需要关注" : "存在异常";
   if ($("pool-health-label")) $("pool-health-label").textContent = healthLabel;
   if ($("pool-mini-health-label")) $("pool-mini-health-label").textContent = healthLabel;
-  if ($("pool-health-meta")) $("pool-health-meta").textContent = total ? `${normal} 个正常 / ${total} 个总计` : "等待真实监控来源接入";
+  if ($("pool-health-meta")) $("pool-health-meta").textContent = platform.active
+    ? `后台监控与会员号池已暂停 · 预计恢复 ${platform.until ? formatMonitorTimestamp(platform.until) : "待平台通知"}`
+    : platform.recovering
+      ? "维护已结束，正在验证后台和会员原会话"
+      : total ? `${normal} 个正常 / ${total} 个总计` : "等待真实监控来源接入";
   if ($("pool-scan-time")) {
     const timeText = state.systemStatus && state.systemStatus.serverTime ? state.systemStatus.serverTime.split(" ").pop() : "等待同步";
     $("pool-scan-time").textContent = timeText;
@@ -4324,15 +4619,15 @@ function renderPoolOverview(monitorSources = null) {
   const focusMember = state.poolSelection.kind === "member"
     ? members.find((member) => String(member.id || "") === String(state.poolSelection.id || ""))
     : null;
-  const latestPoll = Math.max(0, ...sources.map((source) => Number(source.rawAccount && state.statuses[source.id] && state.statuses[source.id].last_poll_at || 0)));
-  const latestOk = Math.max(0, ...sources.map((source) => Number(source.rawAccount && state.statuses[source.id] && state.statuses[source.id].last_ok_at || 0)));
+  const latestPoll = Math.max(0, ...sources.map((source) => Number(monitorSourceStatus(source).last_poll_at || 0)));
+  const latestOk = Math.max(0, ...sources.map((source) => Number(monitorSourceStatus(source).last_ok_at || 0)));
   const focusLabel = focusSource ? focusSource.label : focusMember ? memberLabel(focusMember) : "未选择";
   const details = [
     ["当前聚焦", focusLabel],
     ["最后扫描时间", latestPoll ? fmtTime(latestPoll) : "暂无记录"],
     ["最后成功时间", latestOk ? fmtTime(latestOk) : "暂无记录"],
-    ["监控 / 在线", `${total} / ${normal}`],
-    ["会员 / 在线", `${memberStats.total || 0} / ${memberStats.online || 0}`],
+    [platform.active || platform.recovering ? "维护时间" : "监控 / 在线", platform.active || platform.recovering ? platform.windowText : `${total} / ${normal}`],
+    ["会员 / 在线", platform.active || platform.recovering ? `${memberStats.maintenance || 0} 维护中 / ${memberStats.total || 0} 总计` : `${memberStats.total || 0} / ${memberStats.online || 0}`],
     ["运行时长", poolUptimeText(state.systemStatus && state.systemStatus.uptime)],
   ];
   const detailsHost = $("pool-overview-details");
@@ -4340,9 +4635,9 @@ function renderPoolOverview(monitorSources = null) {
 
   const events = [];
   sources.forEach((source) => {
-    const sourceStatus = state.statuses[source.id] || {};
+    const sourceStatus = monitorSourceStatus(source);
     const ts = Number(sourceStatus.last_poll_at || sourceStatus.last_ok_at || 0);
-    if (ts) events.push({ ts, label: source.normal ? `${source.label} 扫描成功` : `${source.label} 状态异常`, tone: source.normal ? "success" : "danger" });
+    if (ts) events.push({ ts, label: source.maintenance ? `${source.label} 平台维护暂停` : source.normal ? `${source.label} 扫描成功` : `${source.label} 状态异常`, tone: source.maintenance ? "warning" : source.normal ? "success" : "danger" });
   });
   members.forEach((member) => {
     const ts = Number(member.last_check_at || member.last_ok_at || 0);
@@ -4357,13 +4652,25 @@ function renderPoolOverview(monitorSources = null) {
   }
 
   const alerts = [];
+  if (platform.active || platform.recovering) {
+    const backendCount = sources.filter((source) => source.kind === "backend").length;
+    const memberCount = members.length;
+    alerts.push({
+      kind: "platform",
+      id: "platform-maintenance",
+      label: platform.active ? "平台系统维护" : "平台恢复验证中",
+      message: `影响：后台监控 ${backendCount} 个、会员账号 ${memberCount} 个；维护时间：${platform.windowText}；恢复后自动验证原会话`,
+      tone: "warning",
+    });
+  }
   sources.forEach((source) => {
-    if (source.normal) return;
+    if (source.normal || source.maintenance) return;
     const issue = monitorRowValue(source, ["失败原因", "运行状态"], source.statusText || "监控异常");
     alerts.push({ kind: "monitor", id: source.id, label: source.label, message: issue, tone: source.enabled ? "danger" : "warning" });
   });
   members.forEach((member) => {
     const statusValue = String(member.status || "").toLowerCase();
+    if (statusValue === "maintenance") return;
     if (statusValue === "online" && !String(member.last_error || "").trim()) return;
     alerts.push({ kind: "member", id: member.id, label: memberLabel(member), message: String(member.last_error || (statusValue === "relogin" ? "会员正在自动恢复" : "会员当前离线")), tone: statusValue === "relogin" ? "warning" : "danger" });
   });
@@ -4375,6 +4682,7 @@ function renderPoolOverview(monitorSources = null) {
       : '<div class="pool-alert-empty"><i class="fa-solid fa-circle-check" aria-hidden="true"></i>当前没有异常告警</div>';
     alertHost.querySelectorAll("button[data-kind][data-id]").forEach((button) => {
       button.addEventListener("click", () => {
+        if (button.dataset.kind === "platform") return;
         state.poolSelection = { kind: button.dataset.kind, id: button.dataset.id };
         renderPoolOverview(sources);
         setPoolView(button.dataset.kind === "member" ? "members" : "monitors");
@@ -4386,10 +4694,11 @@ function renderPoolOverview(monitorSources = null) {
   renderPoolSourceDistribution(sources);
 }
 
-async function updateAccountEnabled(name, label, enabled) {
+async function updateAccountEnabled(name, label, enabled, provider = "ag") {
   if (!name) return;
   try {
-    const data = await fetchJson("/api/accounts/update", {
+    const endpoint = provider === "ps3838" ? "/api/ps3838/update" : "/api/accounts/update";
+    const data = await fetchJson(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, patch: { enabled: !!enabled } }),
@@ -4706,7 +5015,6 @@ function bindFollowFormDirtyTracking() {
     "follow-mode",
     "follow-fixed",
     "follow-ratio",
-    "follow-max",
     "follow-match-limit",
     "follow-market-limit",
     "follow-min-odds",
@@ -4780,7 +5088,6 @@ function renderFollowForm(options = {}) {
     setFollowModeValue(s.mode);
     if ($("follow-fixed"))       $("follow-fixed").value       = String(s.fixed_amount ?? 0);
     if ($("follow-ratio"))       $("follow-ratio").value       = String(s.ratio_percent ?? 0);
-    if ($("follow-max"))         $("follow-max").value         = String(s.max_amount ?? 0);
     if ($("follow-match-limit")) $("follow-match-limit").value = String(s.match_limit_amount ?? 0);
     if ($("follow-market-limit")) $("follow-market-limit").value = String(s.market_limit_amount ?? 0);
     if ($("follow-split-count")) $("follow-split-count").value = String(s.split_count ?? 1);
@@ -5156,7 +5463,6 @@ function getFollowFormData() {
   const mode        = getFollowModeValue();
   const fixedAmount = parseFloat(($("follow-fixed")?.value || "0").trim()) || 0;
   const ratioPercent= parseFloat(($("follow-ratio")?.value || "0").trim()) || 0;
-  const maxAmount   = parseFloat(($("follow-max")?.value   || "0").trim()) || 0;
   const matchLimitAmount = parseFloat(($("follow-match-limit")?.value || "0").trim()) || 0;
   const marketLimitAmount = parseFloat(($("follow-market-limit")?.value || "0").trim()) || 0;
   const minOddsRaw  = ($("follow-min-odds")?.value || "").trim();
@@ -5224,7 +5530,7 @@ function getFollowFormData() {
 
   return {
     enabled, only_live: onlyLive, mode, fixed_amount: fixedAmount, ratio_percent: ratioPercent,
-    max_amount: maxAmount, match_limit_amount: matchLimitAmount, market_limit_amount: marketLimitAmount,
+    match_limit_amount: matchLimitAmount, market_limit_amount: marketLimitAmount,
     split_count: splitCount, split_delay_seconds: splitDelay,
     follow_min_odds, follow_max_odds,
     reverse_rules, market_rules, targets,
@@ -5295,7 +5601,7 @@ async function loadReportData() {
   ]);
 
   if (ordersRes.status === "fulfilled") {
-    reportState.orders = (ordersRes.value.orders || []);
+    reportState.orders = (ordersRes.value.orders || []).filter((o) => !isReadOnlyMonitorOrder(o));
   }
   if (followRes.status === "fulfilled") {
     const rows = followRes.value.results || [];
@@ -5777,6 +6083,12 @@ async function submitAddAccount() {
   addNodeFormState.account.monitor_members = parseListField($("add-monitor-members")?.value || "");
   addNodeFormState.account.monitor_downlines = parseListField($("add-monitor-downlines")?.value || "");
 
+  addNodeFormState.ps3838.base_url = $("add-ps3838-base-url")?.value.trim() || "https://www.ps38ag.com";
+  addNodeFormState.ps3838.username = $("add-ps3838-username")?.value.trim() || "";
+  addNodeFormState.ps3838.password = $("add-ps3838-password")?.value || "";
+  addNodeFormState.ps3838.interval_seconds = parseInt($("add-ps3838-interval")?.value || "15", 10) || 15;
+  addNodeFormState.ps3838.telegram_chat_id = $("add-ps3838-chat-id")?.value.trim() || "";
+
   addNodeFormState.signal.url = $("add-signal-url")?.value.trim() || "";
   addNodeFormState.signal.token = $("add-signal-token")?.value.trim() || "";
   addNodeFormState.signal.limit = parseInt($("add-signal-limit")?.value || "200", 10) || 200;
@@ -5784,7 +6096,8 @@ async function submitAddAccount() {
   addNodeFormState.signal.live_only = !!$("add-signal-live-only")?.checked;
 
   const isSignalMode = addNodeFormState.mode === "signal";
-  const idleLabel = isSignalMode ? "保存信号源" : "立即接入";
+  const isPs3838Mode = addNodeFormState.mode === "ps3838";
+  const idleLabel = isSignalMode ? "保存信号源" : isPs3838Mode ? "登录并开始监控" : "立即接入";
   const btn = $("add-submit");
   const submitLabel = $("add-submit-label");
   const submitIcon = btn?.querySelector("i");
@@ -5809,6 +6122,11 @@ async function submitAddAccount() {
         addNodeFormState.account.username,
         `已发起浏览器登录：${addNodeFormState.account.username || targetName}`,
       );
+    } else if (req.endpoint === "/api/ps3838/add") {
+      await loadAccounts();
+      // add 接口已发起登录，不能再发一次 relogin 打断原窗口里的 2FA。
+      await loadStatuses();
+      toast(data.message || "请在浏览器完成登录/2FA，窗口不会自动关闭", "info", 6500);
     } else {
       await loadSignalPullConfig();
       toast("远端交易信号配置已保存", "success");
@@ -5821,14 +6139,16 @@ async function submitAddAccount() {
       btn.setAttribute("aria-busy", "false");
     }
     if (submitLabel) submitLabel.textContent = idleLabel;
-    if (submitIcon) submitIcon.className = `fa-solid ${isSignalMode ? "fa-floppy-disk" : "fa-plug"}`;
+    if (submitIcon) submitIcon.className = `fa-solid ${isSignalMode ? "fa-floppy-disk" : isPs3838Mode ? "fa-futbol" : "fa-plug"}`;
   }
 }
 
 // ── View refresh ───────────────────────────────────────────────
 function mergeFollowQueueOrdersForDisplay(orders, queueItems) {
   if (orderRealtimeTools && typeof orderRealtimeTools.mergeFollowQueueOrders === "function") {
-    return orderRealtimeTools.mergeFollowQueueOrders(orders, queueItems);
+    const rows = Array.isArray(orders) ? orders : [];
+    const merged = orderRealtimeTools.mergeFollowQueueOrders(rows.filter((o) => !isReadOnlyMonitorOrder(o)), queueItems);
+    return merged.concat(rows.filter(isReadOnlyMonitorOrder)).sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
   }
   return Array.isArray(orders) ? orders : [];
 }
@@ -5940,10 +6260,13 @@ function applyOrderEventSnapshotsForDisplay(orders) {
   }
   const snapshots = Object.values(state.orderEventSnapshots || {});
   if (!snapshots.length) return Array.isArray(orders) ? orders : [];
-  return orderRealtimeTools.applyEventSnapshotsToOrders(orders, snapshots, {
+  const rows = Array.isArray(orders) ? orders : [];
+  const enriched = orderRealtimeTools.applyEventSnapshotsToOrders(rows.filter((o) => !isReadOnlyMonitorOrder(o)), snapshots, {
     memberId: state.matchSearch.memberId,
     memberLabel: state.matchSearch.memberLabel,
   });
+  let index = 0;
+  return rows.map((o) => isReadOnlyMonitorOrder(o) ? o : enriched[index++]);
 }
 
 async function enrichOrdersWithLiveMatches(orders) {
@@ -6026,11 +6349,16 @@ function renderSystemCenterTelegramSummary() {
   const configured = !!data.configured;
   const hasChat = !!String(data.chat_id || "").trim();
   const hasProxy = !!String(data.proxy || "").trim();
-  const pushEnabled = !!data.status_push_enabled;
+  const pushEnabled = !!data.backend_order_push_enabled;
+  const backendConfigured = !!data.backend_order_configured;
   setSystemCenterSummaryState("sc-notify-bot", configured ? "已认证" : "未配置", configured ? "ok" : "off");
   setSystemCenterSummaryState("sc-notify-chat", hasChat ? "已设置" : "未设置", hasChat ? "ok" : "off");
   setSystemCenterSummaryState("sc-notify-proxy", hasProxy ? "已配置" : "直连", hasProxy ? "ok" : "off");
-  setSystemCenterSummaryState("sc-notify-push", pushEnabled ? "已启用" : "已关闭", pushEnabled ? "ok" : "off");
+  setSystemCenterSummaryState(
+    "sc-notify-push",
+    pushEnabled ? (backendConfigured ? "已启用" : "缺少配置") : "已关闭",
+    pushEnabled && backendConfigured ? "ok" : (pushEnabled ? "error" : "off"),
+  );
 }
 
 function renderSystemCenterStatusBar() {
@@ -6096,19 +6424,21 @@ function openSystemCenter() {
 }
 
 function bindSystemCenter() {
-  $("tg-token-toggle")?.addEventListener("click", (event) => {
+  const bindSecretToggle = (buttonId, inputId, label) => $(buttonId)?.addEventListener("click", (event) => {
     const button = event.currentTarget;
-    const input = $("tg-token");
+    const input = $(inputId);
     if (!input) return;
     const reveal = input.type === "password";
     input.type = reveal ? "text" : "password";
     button.setAttribute("aria-pressed", reveal ? "true" : "false");
-    button.setAttribute("aria-label", reveal ? "隐藏 Bot Token" : "显示 Bot Token");
+    button.setAttribute("aria-label", `${reveal ? "隐藏" : "显示"}${label}`);
     const icon = button.querySelector("i");
     if (icon) icon.className = `fa-solid ${reveal ? "fa-eye-slash" : "fa-eye"}`;
   });
+  bindSecretToggle("tg-token-toggle", "tg-token", " Bot Token");
+  bindSecretToggle("tg-backend-order-token-toggle", "tg-backend-order-token", "后台订单 Bot Token");
   [
-    "tg-token", "tg-chat", "tg-proxy", "tg-status-push", "tg-status-chat", "tg-status-proxy",
+    "tg-token", "tg-chat", "tg-proxy", "tg-backend-order-push", "tg-backend-order-token", "tg-backend-order-chat", "tg-backend-order-proxy",
   ].forEach((id) => {
     const field = $(id);
     if (!field || field.dataset.systemSummaryBound === "true") return;
@@ -6391,6 +6721,7 @@ async function loadInitial(opts = {}) {
   // Telegram
   $("tg-save")?.addEventListener("click", saveTelegramConfig);
   $("tg-test")?.addEventListener("click", testTelegram);
+  $("tg-backend-order-test")?.addEventListener("click", testBackendOrderTelegram);
   $("tg-clear")?.addEventListener("click", clearTelegramConfig);
 
   // Signal pull

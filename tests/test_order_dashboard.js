@@ -81,8 +81,8 @@ test('builds dashboard stats and chart data from filtered orders', () => {
   assert.equal(model.stats.totalStake, 6800);
   assert.equal(model.filters.leagues.length, 2);
   assert.deepEqual(model.charts.playDistribution, [
-    { label: '大小球', count: 2, stake: 5800 },
-    { label: '让球', count: 1, stake: 1000 },
+    { label: '大小球', count: 2, stake: 5800, stakeByCurrency: { CNY: 5800 } },
+    { label: '让球', count: 1, stake: 1000, stakeByCurrency: { CNY: 1000 } },
   ]);
   assert.equal(model.charts.leagueDistribution[0].label, '日本J联赛');
   assert.equal(model.charts.amountDistribution.length, AMOUNT_BUCKETS.length);
@@ -92,4 +92,12 @@ test('formats dashboard money compactly', () => {
   assert.equal(formatDashboardMoney(0), '¥0');
   assert.equal(formatDashboardMoney(980), '¥980');
   assert.equal(formatDashboardMoney(12000), '¥12.0k');
+});
+
+test('keeps PS3838 THB separate from Crown CNY in dashboard totals', () => {
+  const model = buildOrderDashboardModel([
+    orders[0], { ...orders[1], read_only: true, currency: 'THB', stake: 150.25 },
+  ], { timeRange: 'history' });
+  assert.equal(model.stats.totalOrders, 2);
+  assert.deepEqual(model.stats.stakeByCurrency, { CNY: 5000, THB: 150.25 });
 });

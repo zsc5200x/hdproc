@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "HD推送终端预览",
-  "version": "0.1.0",
-  "identifier": "com.hdsports.push.preview.tauri",
+  "productName": "HD跟单系统",
+  "version": "1.0.0",
+  "identifier": "com.hdsports.hdfollow",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -10,10 +10,11 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
-        "title": "HD推送终端预览",
+        "title": "HD跟单系统",
         "width": 1440,
         "height": 900,
         "minWidth": 980,
@@ -31,6 +32,10 @@
     "active": true,
     "targets": ["app"],
     "icon": ["icons/icon.icns"],
+    "resources": {
+      "resources/backend/hdzz-backend": "backend/hdzz-backend",
+      "resources/runtime/**/*": "runtime/"
+    },
     "macOS": {
       "minimumSystemVersion": "12.0"
     }

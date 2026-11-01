@@ -19,7 +19,7 @@ class TestFollowEngineMemberPick(unittest.TestCase):
         from hdzz.core.follower import engine
 
         m = {"last_error": "", "request_cooldown_until": 120}
-        self.assertTrue(engine._member_has_transient_network_issue(m, now_s=100))
+        self.assertFalse(engine._member_has_transient_network_issue(m, now_s=100))
         self.assertFalse(engine._member_has_transient_network_issue(m, now_s=130))
 
     def test_member_transient_cooldown_can_be_disabled(self) -> None:
@@ -31,6 +31,22 @@ class TestFollowEngineMemberPick(unittest.TestCase):
             "request_cooldown_enabled": False,
         }
         self.assertFalse(engine._member_has_transient_network_issue(m, now_s=100))
+
+    def test_member_transient_detects_network_route_cooldown(self) -> None:
+        from hdzz.core.follower import engine
+
+        self.assertFalse(
+            engine._member_has_transient_network_issue(
+                {"network_health": "cooldown", "network_cooldown_until": 130},
+                now_s=100,
+            )
+        )
+        self.assertFalse(
+            engine._member_has_transient_network_issue(
+                {"network_health": "cooldown", "network_cooldown_until": 130},
+                now_s=131,
+            )
+        )
 
     def test_pick_member_randomly_selects_from_eligible_online_pool(self) -> None:
         from hdzz.core.follower import engine

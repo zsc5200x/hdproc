@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .credentials import resolve_telegram_credentials
 from .store import load_private_json, write_private_json
 
 
@@ -35,19 +36,22 @@ def _default_client_factory(session_value: str, api_id: int, api_hash: str) -> A
 
 
 def _credentials(secret: Dict[str, Any]) -> tuple:
-    api_id = _text(secret.get("api_id"))
-    api_hash = _text(secret.get("api_hash"))
-    if not re.fullmatch(r"\d{5,12}", api_id) or int(api_id) <= 0:
-        raise TelegramSignalClientError("invalid_api_id")
-    if not re.fullmatch(r"[A-Fa-f0-9]{32}", api_hash):
-        raise TelegramSignalClientError("invalid_api_hash")
-    return int(api_id), api_hash
+    try:
+        return resolve_telegram_credentials(secret)
+    except ValueError as exc:
+        raise TelegramSignalClientError(str(exc)) from exc
 
 
 def save_api_credentials(path: Path, *, api_id: Any, api_hash: Any) -> Dict[str, Any]:
     current = load_private_json(Path(path))
     api_id_text = _text(api_id)
     api_hash_text = _text(api_hash)
+    # This legacy writer still requires both fields explicitly.  Only reads
+    # from a new/empty secrets file fall back to the built-in credentials.
+    if not api_id_text:
+        raise TelegramSignalClientError("invalid_api_id")
+    if not api_hash_text:
+        raise TelegramSignalClientError("invalid_api_hash")
     _credentials({"api_id": api_id_text, "api_hash": api_hash_text})
     current["api_id"] = api_id_text
     current["api_hash"] = api_hash_text

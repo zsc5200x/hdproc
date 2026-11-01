@@ -59,6 +59,15 @@ class TelegramSignalStoreTest(unittest.TestCase):
             self.assertNotIn("session", status)
             self.assertNotIn("12345678", json.dumps(status))
 
+    def test_empty_secret_uses_built_in_credentials_without_exposing_them(self) -> None:
+        from hdzz.core.telegram_signal.store import sanitize_secret_status
+
+        status = sanitize_secret_status({})
+
+        self.assertTrue(status["credentials_configured"])
+        self.assertNotIn("api_id", status)
+        self.assertNotIn("api_hash", status)
+
     def test_remember_message_deduplicates_and_bounds_state(self) -> None:
         from hdzz.core.telegram_signal.store import remember_message
 
@@ -84,6 +93,28 @@ class TelegramSignalStoreTest(unittest.TestCase):
             rows = read_recent_events(path, limit=2)
 
             self.assertEqual([row["id"] for row in rows], [4, 3])
+
+    def test_event_log_sanitizes_telethon_protocol_payloads_on_write_and_read(self) -> None:
+        from hdzz.core.telegram_signal.store import append_event, read_recent_events
+
+        unsafe = (
+            "Could not find a matching Constructor ID for the TLObject. "
+            "Remaining bytes: b'private-message-content'"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            append_event(path, {"status": "worker_error", "reason": unsafe})
+            self.assertNotIn("private-message-content", path.read_text(encoding="utf-8"))
+
+            # Legacy rows written before sanitization are also safe at the API
+            # read boundary without rewriting the audit file.
+            path.write_text(
+                json.dumps({"status": "worker_error", "reason": unsafe}) + "\n",
+                encoding="utf-8",
+            )
+            rows = read_recent_events(path, limit=1)
+
+        self.assertEqual(rows[0]["reason"], "telegram_protocol_sync_error")
 
 
 if __name__ == "__main__":

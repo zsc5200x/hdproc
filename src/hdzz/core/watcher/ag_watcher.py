@@ -14,7 +14,7 @@ from time import time as now_ts
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -22,7 +22,7 @@ from requests.adapters import HTTPAdapter
 from requests.utils import get_environ_proxies
 from urllib3.util.retry import Retry
 
-from tg_status_log import load_tg_push_config, log_and_maybe_push
+from tg_status_log import log_and_maybe_push
 from playwright_proxy import build_playwright_proxy
 from portable_env import ensure_playwright_browsers_path
 from hdzz.core.watcher.order_filter import (
@@ -31,6 +31,14 @@ from hdzz.core.watcher.order_filter import (
     should_forward_order_for_target,
 )
 from hdzz.core.order_display import parse_bet_display
+from hdzz.common.platform_maintenance import (
+    PLATFORM_MAINTENANCE_CODE,
+    is_platform_maintenance,
+    maintenance_status_message,
+    read_platform_state,
+    record_platform_business_success,
+    refresh_backend_maintenance_state,
+)
 
 
 DEFAULT_HEADERS = {
@@ -486,6 +494,15 @@ def _msg_is_go_to_home(msg: Any) -> bool:
     return "gotohome" in str(msg or "").lower().replace(" ", "")
 
 
+def _response_value_is_go_to_home(data: Mapping[str, Any]) -> bool:
+    if not isinstance(data, Mapping):
+        return False
+    return any(
+        "gotohome" in str(data.get(key) or "").lower().replace(" ", "")
+        for key in ("code", "msg", "message", "error")
+    )
+
+
 def _is_wmc_permission_denied_response(data: Dict[str, Any]) -> bool:
     if not isinstance(data, dict):
         return False
@@ -533,6 +550,8 @@ def looks_like_logged_out(data: Dict[str, Any]) -> bool:
         return True
     # 兜底：根据文本判断
     msg_l = msg.lower()
+    if _response_value_is_go_to_home(data) and not _msg_is_go_to_home(msg_l):
+        return True
     if _msg_is_go_to_home(msg_l):
         return True
     for kw in (
@@ -862,6 +881,83 @@ def format_telegram_message(
     lines.append(_themed_line(_order_card_icon(ui_theme, 'source', ''), f"来源后台：{html.escape(str(target_name or '-'))}", spaced=False))
     lines.append(_themed_line(_order_card_icon(ui_theme, 'order_id', '🧠'), f"单号：{html.escape(order_id)}", spaced=False))
     lines.append(_themed_line(_order_card_icon(ui_theme, 'time', '🗓'), f"时间：{html.escape(dt or now_cn())}", spaced=False))
+    return "\n".join(lines)
+
+
+def format_backend_order_telegram_message(
+    order: Dict[str, Any],
+    ui_theme: Optional[Dict[str, Any]] = None,
+    source_name: str = "",
+) -> str:
+    """Format a one-shot source-order notification that is never edited by follow_engine."""
+    def fmt_amount(value: Any) -> str:
+        try:
+            amount = float(value)
+        except Exception:
+            return str(value or "未知")
+        if abs(amount - round(amount)) < 1e-9:
+            return str(int(round(amount)))
+        return f"{amount:.2f}".rstrip("0").rstrip(".")
+
+    league = str(order.get("league") or "未知")
+    sides = str(order.get("sides") or "未知")
+    bet_type = str(order.get("betType") or "")
+    if "滚球" in bet_type:
+        order_status = "滚球"
+    elif "早盘" in bet_type or not source_name:
+        order_status = "早盘"
+    else:
+        order_status = "未提供"
+    bet_display = parse_bet_display(order, order_status)
+    stake = html.escape(fmt_amount(order.get("stake") or "未知"))
+    if source_name and order.get("currency"):
+        stake += f" {html.escape(str(order['currency']))}"
+    lines = [
+        (
+            f"<b>{_order_card_icon(ui_theme, 'title', '🤣')}新注单提醒"
+            f"{_order_card_suffix(ui_theme, 'title', '🤣')}</b>"
+        )
+    ]
+    divider = _order_card_divider(ui_theme, fallback=_ORDER_DIVIDER_FALLBACKS)
+    if divider:
+        lines.append(divider)
+    lines.extend(
+        [
+            _themed_line(_order_card_icon(ui_theme, "league", "🤣"), html.escape(league), spaced=False),
+            _themed_line(_order_card_icon(ui_theme, "match", "🤣"), html.escape(sides), spaced=False),
+            "",
+            _themed_line(
+                _order_card_icon(ui_theme, "status", "📍"),
+                f"状态：{html.escape(order_status)}",
+                spaced=True,
+            ),
+            _themed_line(
+                _order_card_icon(ui_theme, "play", ""),
+                f"玩法：{html.escape(bet_display['bet_label'])}",
+                spaced=False,
+            ),
+            _themed_line(
+                _order_card_icon(ui_theme, "play", ""),
+                f"时段：{html.escape(bet_display['period'])}",
+                spaced=False,
+            ),
+            _themed_line(
+                _order_card_icon(ui_theme, "play", ""),
+                f"选择：{html.escape(bet_display['selection_text'])}",
+                spaced=False,
+            ),
+            "",
+            _themed_line(_order_card_icon(ui_theme, "stake", "💰"), f"{'原注金额' if source_name else '金额'}：{stake}", spaced=True),
+        ]
+    )
+    if source_name:
+        dt = f"{order.get('date') or ''} {order.get('time') or ''}".strip() or str(order.get("placed") or "")
+        lines.extend([
+            "",
+            _themed_line(_order_card_icon(ui_theme, "source", ""), f"来源后台：{html.escape(source_name)}", spaced=False),
+            _themed_line(_order_card_icon(ui_theme, "order_id", "🧠"), f"单号：{html.escape(str(order.get('orderId') or '未知'))}", spaced=False),
+            _themed_line(_order_card_icon(ui_theme, "time", "🗓"), f"时间：{html.escape(dt or now_cn())}", spaced=False),
+        ])
     return "\n".join(lines)
 
 
@@ -2450,6 +2546,10 @@ def poll_once(
     only_orders: bool,
     orders_dir: Path,
     interval_s: int,
+    backend_order_push_enabled: bool = False,
+    backend_order_bot_token: str = "",
+    backend_order_chat_id: str = "",
+    backend_order_proxy: str = "",
 ) -> None:
     state = load_state(state_dir, target.name)
     poll_mode = (target.poll_mode or "requests").lower()
@@ -2506,7 +2606,33 @@ def poll_once(
         target.cookie = str(state.get("cookie") or target.cookie)
 
     data_dir = config_path.parent / "data"
-    status_push_enabled, _, _, _ = load_tg_push_config(config_path)
+    # 平台维护是平台级状态，不把所有账号的 goHome/no_systemtime 误判成账号掉线。
+    # 探针只读取结构化维护接口，避免会员 service_main 页面内置的历史隐藏模板造成误报。
+    platform_state = refresh_backend_maintenance_state(
+        session=session,
+        base_url=target.base_url,
+        data_dir_or_path=data_dir,
+        cookie=target.cookie,
+        proxy=target.proxy,
+        timeout_s=min(8, timeout_s),
+    )
+    if is_platform_maintenance(platform_state):
+        state["last_status"] = "maintenance"
+        state["last_error_code"] = PLATFORM_MAINTENANCE_CODE
+        state["last_error_msg"] = maintenance_status_message(platform_state)
+        state["platform_status"] = "maintenance"
+        state["platform_maintenance_until"] = float(platform_state.get("maintenance_until") or 0.0)
+        state["platform_maintenance_start_at"] = float(platform_state.get("maintenance_start_at") or 0.0)
+        state["relogin_in_progress"] = 0
+        state["relogin_started_at"] = 0
+        # 维护期间不递增错误、不更新冷却、不启动重登。
+        save_state(state_dir, target.name, state)
+        if debug and not only_orders:
+            print(f"[{now_cn()}] [{target.name}] {maintenance_status_message(platform_state)}，暂停本轮请求", flush=True)
+        return
+    state["platform_status"] = str(platform_state.get("status") or "unknown")
+    state["platform_maintenance_until"] = float(platform_state.get("maintenance_until") or 0.0)
+    state["platform_maintenance_start_at"] = float(platform_state.get("maintenance_start_at") or 0.0)
     if target.cooldown_on_m_rep:
         cooldown_until = float(state.get("cooldown_until") or 0)
         if cooldown_until and now_ts() < cooldown_until:
@@ -2612,11 +2738,10 @@ def poll_once(
                             message=f"账号掉线，开始重新登录（code={code}）",
                             extra={"code": code, "base_url": target.base_url},
                         )
-                        if status_push_enabled:
-                            state["last_tg_relogin_start_at"] = now
-                            save_state(state_dir, target.name, state)
+                        state["last_tg_relogin_start_at"] = now
+                        save_state(state_dir, target.name, state)
                 except Exception as e:
-                    print(f"[{now_cn()}] [{target.name}] Telegram 重登开始通知失败: {e}", flush=True)
+                    print(f"[{now_cn()}] [{target.name}] 重登状态记录失败: {e}", flush=True)
                 started = start_background_relogin(
                     target,
                     state_dir=state_dir,
@@ -2686,11 +2811,10 @@ def poll_once(
                                     message="重新登录成功",
                                     extra={"base_url": target.base_url},
                                 )
-                                if status_push_enabled:
-                                    state["last_tg_relogin_ok_at"] = now_ok
-                                    save_state(state_dir, target.name, state)
+                                state["last_tg_relogin_ok_at"] = now_ok
+                                save_state(state_dir, target.name, state)
                         except Exception as e:
-                            print(f"[{now_cn()}] [{target.name}] Telegram 重登成功通知失败: {e}", flush=True)
+                            print(f"[{now_cn()}] [{target.name}] 重登成功状态记录失败: {e}", flush=True)
                         if debug and not only_orders:
                             print(
                                 f"[{now_cn()}] [{target.name}] 已重新登录并刷新 Cookie/uid/login_layer，准备继续轮询",
@@ -2723,11 +2847,10 @@ def poll_once(
                                 message=f"重新登录失败：{str(e)[:200]}",
                                 extra={"base_url": target.base_url},
                             )
-                            if status_push_enabled:
-                                state["last_tg_relogin_fail_at"] = now_fail
-                                save_state(state_dir, target.name, state)
+                            state["last_tg_relogin_fail_at"] = now_fail
+                            save_state(state_dir, target.name, state)
                     except Exception as e2:
-                        print(f"[{now_cn()}] [{target.name}] Telegram 重登失败通知失败: {e2}", flush=True)
+                        print(f"[{now_cn()}] [{target.name}] 重登失败状态记录失败: {e2}", flush=True)
                 finally:
                     state["relogin_in_progress"] = 0
                     save_state(state_dir, target.name, state)
@@ -2754,7 +2877,7 @@ def poll_once(
                             extra={"code": code, "base_url": target.base_url},
                         )
                     except Exception as e:
-                        print(f"[{now_cn()}] [{target.name}] Telegram 掉线通知失败: {e}", flush=True)
+                        print(f"[{now_cn()}] [{target.name}] 掉线状态记录失败: {e}", flush=True)
                 elif debug:
                     if not only_orders:
                         remain = max(0, int(max(5, int(target.offline_alert_seconds)) - (now2 - last)))
@@ -2798,6 +2921,7 @@ def poll_once(
     state["cooldown_until"] = 0
     # 若之前进入过重登流程或状态文件残留标记，一旦成功拉单就应清除黄灯
     state["relogin_in_progress"] = 0
+    record_platform_business_success(data_dir, kind="backend")
 
     # 首次初始化：只同步 maxid，不把返回列表当作新注单（避免启动/新增账号时把历史单刷出来）
     if not int(state.get("initialized") or 0):
@@ -2899,6 +3023,22 @@ def poll_once(
                     order["_tg_chat_id"] = chat_id
             except Exception as e:
                 print(f"[{now_cn()}] [{target.name}] Telegram 推送失败: {e}", flush=True)
+
+    # 独立的后台原单通道只发送一次简版原始订单，不保存 message_id，跟单引擎不会编辑这条消息。
+    if backend_order_push_enabled and backend_order_bot_token and backend_order_chat_id:
+        for order in reversed(new_orders):
+            try:
+                tg_send(
+                    backend_order_bot_token,
+                    backend_order_chat_id,
+                    format_backend_order_telegram_message(order, ui_theme=ui_theme),
+                    timeout_s=tg_timeout_s,
+                    proxy=backend_order_proxy,
+                    reply_markup=None,
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                print(f"[{now_cn()}] [{target.name}] 后台原单推送失败: {e}", flush=True)
 
     # 持久化订单：供 WebUI/回溯使用（包含 _tg_message_id/_tg_chat_id 以支持合并推送）
     if new_orders:
@@ -3032,6 +3172,10 @@ def main() -> int:
     default_chat_id = str(raw_cfg.get("telegram_chat_id") or os.getenv("TELEGRAM_CHAT_ID") or "")
     order_forward_enabled = bool(raw_cfg.get("telegram_order_forward_enabled", True))
     tg_proxy = str(raw_cfg.get("telegram_proxy") or os.getenv("TELEGRAM_PROXY") or "")
+    backend_order_push_enabled = bool(raw_cfg.get("telegram_backend_order_push_enabled", False))
+    backend_order_bot_token = str(raw_cfg.get("telegram_backend_order_bot_token") or "").strip()
+    backend_order_chat_id = str(raw_cfg.get("telegram_backend_order_chat_id") or "").strip()
+    backend_order_proxy = str(raw_cfg.get("telegram_backend_order_proxy") or "").strip()
     order_preview_image = str(raw_cfg.get("telegram_order_preview_image") or "").strip()
     tg_ui_theme = _load_tg_ui_theme(raw_cfg)
     if not order_preview_image:
@@ -3050,14 +3194,31 @@ def main() -> int:
     cfg_mtime = file_mtime(cfg_path)
     targets_by_name: Dict[str, Target] = {t.name: t for t in targets}
 
+    # 在任何启动重登之前先确认平台是否维护，防止维护期间弹出多个登录窗口。
+    maintenance_session = make_poll_session()
+    try:
+        first_target = targets[0]
+        refresh_backend_maintenance_state(
+            session=maintenance_session,
+            base_url=first_target.base_url,
+            data_dir_or_path=cfg_path.parent / "data",
+            cookie=first_target.cookie,
+            proxy=first_target.proxy,
+            timeout_s=min(8, max(1, int(args.timeout))),
+            min_probe_interval_s=1,
+        )
+    finally:
+        maintenance_session.close()
+
     # 启动时可选：先执行一次自动登录/刷新 Cookie（你即使有 Cookie，也想“启动就自动登录”时用）
-    maybe_relogin_on_start(
-        targets=targets,
-        force=bool(args.relogin_on_start),
-        state_dir=state_dir,
-        cfg_path=cfg_path,
-        debug=bool(args.debug),
-    )
+    if not is_platform_maintenance(read_platform_state(cfg_path.parent / "data")):
+        maybe_relogin_on_start(
+            targets=targets,
+            force=bool(args.relogin_on_start),
+            state_dir=state_dir,
+            cfg_path=cfg_path,
+            debug=bool(args.debug),
+        )
 
     if args.debug:
         print(f"[{now_cn()}] 启动：targets={len(targets)} interval={args.interval}s state_dir={state_dir}", flush=True)
@@ -3073,6 +3234,10 @@ def main() -> int:
                     default_chat_id = str(raw_cfg2.get("telegram_chat_id") or os.getenv("TELEGRAM_CHAT_ID") or "")
                     order_forward_enabled = bool(raw_cfg2.get("telegram_order_forward_enabled", True))
                     tg_proxy = str(raw_cfg2.get("telegram_proxy") or os.getenv("TELEGRAM_PROXY") or "")
+                    backend_order_push_enabled = bool(raw_cfg2.get("telegram_backend_order_push_enabled", False))
+                    backend_order_bot_token = str(raw_cfg2.get("telegram_backend_order_bot_token") or "").strip()
+                    backend_order_chat_id = str(raw_cfg2.get("telegram_backend_order_chat_id") or "").strip()
+                    backend_order_proxy = str(raw_cfg2.get("telegram_backend_order_proxy") or "").strip()
                     order_preview_image = str(raw_cfg2.get("telegram_order_preview_image") or "").strip()
                     tg_ui_theme = _load_tg_ui_theme(raw_cfg2)
                     if not order_preview_image:
@@ -3133,6 +3298,18 @@ def main() -> int:
                     try:
                         st0 = load_state(state_dir, target.name)
                         if int(st0.get("manual_relogin") or 0) == 1:
+                            if is_platform_maintenance(read_platform_state(cfg_path.parent / "data")):
+                                st0["manual_relogin"] = 0
+                                st0["manual_relogin_requested_at"] = 0
+                                st0["last_status"] = "maintenance"
+                                st0["last_error_code"] = PLATFORM_MAINTENANCE_CODE
+                                st0["last_error_msg"] = maintenance_status_message(
+                                    read_platform_state(cfg_path.parent / "data")
+                                )
+                                st0["relogin_in_progress"] = 0
+                                st0["relogin_started_at"] = 0
+                                save_state(state_dir, target.name, st0)
+                                return target.name, None
                             st0["manual_relogin"] = 0
                             st0["manual_relogin_requested_at"] = 0
                             # last_relogin_at 由 WebUI 置 0 用于绕过间隔，这里保持不改动
@@ -3165,6 +3342,10 @@ def main() -> int:
                         only_orders=args.only_orders,
                         orders_dir=orders_dir,
                         interval_s=args.interval,
+                        backend_order_push_enabled=backend_order_push_enabled,
+                        backend_order_bot_token=backend_order_bot_token,
+                        backend_order_chat_id=backend_order_chat_id,
+                        backend_order_proxy=backend_order_proxy,
                     )
                     return target.name, None
                 except Exception as e:

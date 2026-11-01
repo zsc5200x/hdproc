@@ -72,8 +72,22 @@ body::before, body::after { display: none; }
   display: grid; grid-template-columns: minmax(250px, 1fr) auto minmax(250px, 1fr);
   align-items: center; gap: 20px; padding: 0 28px;
   background: rgba(3, 14, 25, .96); border-bottom: 1px solid rgba(27, 89, 125, .8);
-  box-shadow: 0 8px 24px rgba(0,0,0,.2);
+  box-shadow: 0 8px 24px rgba(0,0,0,.2); isolation: isolate;
 }
+#topnav .tn-drag-region {
+  position: absolute; inset: 0; z-index: 0; cursor: grab;
+  -webkit-app-region: drag;
+}
+#topnav .tn-drag-region:active {
+  cursor: grabbing;
+}
+#topnav > .tn-brand,
+#topnav > .tn-nav,
+#topnav > .tn-right {
+  position: relative; z-index: 1; width: max-content;
+}
+#topnav > .tn-brand { justify-self: start; margin-left: 48px; }
+#topnav > .tn-right { justify-self: end; }
 #topnav::after {
   content: ""; position: absolute; left: 28px; right: 28px; bottom: -1px;
   height: 1px; background: linear-gradient(90deg, transparent, rgba(27, 208, 242, .72), transparent);

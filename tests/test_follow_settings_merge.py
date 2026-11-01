@@ -32,20 +32,36 @@ class TestFollowSettingsMerge(unittest.TestCase):
             "fixed_amount": 50,
             "ratio_percent": 150,
             "max_amount": 123,
+            "match_limit_amount": 800,
+            "market_limit_amount": 300,
             "queue_max_per_tick": 7,  # should be preserved
             "allow_quote_members": False,
         }
         incoming = {
             "enabled": False,
             "allow_quote_members": True,
-            # max_amount not present -> must not be cleared
+            "max_amount": 999,
         }
         out = merge_follow_settings(existing, incoming)
 
         self.assertEqual(out["enabled"], False)
         self.assertEqual(out["allow_quote_members"], False)
-        self.assertEqual(out["max_amount"], 123)
+        self.assertNotIn("max_amount", out)
+        self.assertEqual(out["match_limit_amount"], 800.0)
+        self.assertEqual(out["market_limit_amount"], 300.0)
         self.assertEqual(out["queue_max_per_tick"], 7)
+
+    def test_merge_sanitizes_cumulative_limits(self) -> None:
+        from hdzz.api.webui.follow_settings import merge_follow_settings
+
+        out = merge_follow_settings(
+            {},
+            {"match_limit_amount": "1200.5", "market_limit_amount": -1, "max_amount": 777},
+        )
+
+        self.assertEqual(out["match_limit_amount"], 1200.5)
+        self.assertEqual(out["market_limit_amount"], 0.0)
+        self.assertNotIn("max_amount", out)
 
     def test_merge_forces_allow_quote_members_off(self) -> None:
         from hdzz.api.webui.follow_settings import merge_follow_settings
@@ -123,10 +139,11 @@ class TestFollowSettingsMerge(unittest.TestCase):
         self.assertIn("follow_max_odds", out)
         self.assertEqual(out["match_limit_amount"], 0.0)
         self.assertEqual(out["market_limit_amount"], 0.0)
+        self.assertNotIn("max_amount", out)
         self.assertEqual(out["execution_mode"], "snapshot_direct")
         self.assertTrue(out["snapshot_direct_enabled"])
         self.assertEqual(out["snapshot_max_age_ms"], 500)
-        self.assertEqual(out["bet_context_mode"], "disabled")
+        self.assertEqual(out["bet_context_mode"], "diagnostic_order_view")
         self.assertNotIn("game_more_scan_all_gids", out)
         self.assertNotIn("order_view_confirm_before_bet", out)
         self.assertNotIn("order_view_confirm_timeout_s", out)
@@ -158,13 +175,15 @@ class TestFollowSettingsMerge(unittest.TestCase):
         self.assertNotIn("snapshot_missing_policy", out)
         self.assertNotIn("order_view_confirm_before_bet", out)
 
-    def test_bet_context_mode_accepts_only_diagnostic_value(self) -> None:
+    def test_bet_context_mode_always_uses_verified_context_path(self) -> None:
         from hdzz.api.webui.follow_settings import merge_follow_settings
 
         enabled = merge_follow_settings({}, {"bet_context_mode": "diagnostic_order_view"})
+        self.assertEqual(enabled["execution_mode"], "snapshot_direct")
         self.assertEqual(enabled["bet_context_mode"], "diagnostic_order_view")
-        disabled = merge_follow_settings({}, {"bet_context_mode": "legacy"})
-        self.assertEqual(disabled["bet_context_mode"], "disabled")
+        disabled = merge_follow_settings({}, {"bet_context_mode": "disabled"})
+        self.assertEqual(disabled["execution_mode"], "snapshot_direct")
+        self.assertEqual(disabled["bet_context_mode"], "diagnostic_order_view")
 
     def test_market_reject_retry_settings_preserve_explicit_zero_delay(self) -> None:
         from hdzz.api.webui.follow_settings import ensure_follow_settings_defaults, merge_follow_settings

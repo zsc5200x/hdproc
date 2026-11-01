@@ -2,6 +2,7 @@ import io
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -37,6 +38,7 @@ class TelegramSignalWebUiTest(unittest.TestCase):
         handler = object.__new__(server.Handler)
         handler.path = path
         handler._data_dir = self.data_dir
+        handler._arsenal_path = self.data_dir / "arsenal.json"
         handler._orders_dir = self.orders_dir
         handler._state_dir = self.root / "state"
         handler._config_path = self.root / "config.json"
@@ -101,6 +103,52 @@ class TelegramSignalWebUiTest(unittest.TestCase):
         self.assertEqual(saved["webui_url"], "http://127.0.0.1:2299")
         self.assertTrue(payload["ok"])
 
+    def test_status_marks_stale_listener_as_alive_but_not_healthy(self) -> None:
+        run_dir = self.root / ".run"
+        run_dir.mkdir()
+        (run_dir / "telegram_signal_health.json").write_text(
+            json.dumps(
+                {
+                    "pid": 4321,
+                    "state": "healthy",
+                    "heartbeat_at_ms": int(time.time() * 1000) - 20000,
+                }
+            ),
+            encoding="utf-8",
+        )
+        handler = self._handler("/api/telegram-signal/status")
+
+        with mock.patch.object(server, "telegram_signal_worker_running_flag", return_value=(True, 4321)):
+            server.Handler.do_GET(handler)
+
+        status, payload = handler.responses[-1]
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["worker_alive"])
+        self.assertFalse(payload["worker_running"])
+        self.assertFalse(payload["worker_healthy"])
+        self.assertEqual(payload["worker_state"], "stale")
+
+    def test_chats_returns_saved_sources_without_opening_second_client_while_listener_is_alive(self) -> None:
+        save_settings(
+            self.data_dir / "telegram_signal.json",
+            {
+                "source_chat_ids": ["-1001"],
+                "source_chats": [{"id": "-1001", "title": "来源群", "type": "group"}],
+            },
+        )
+        handler = self._handler("/api/telegram-signal/chats")
+
+        with mock.patch.object(server, "telegram_signal_worker_running_flag", return_value=(True, 4321)), mock.patch.object(
+            server, "list_source_dialogs"
+        ) as list_dialogs:
+            server.Handler.do_GET(handler)
+
+        status, payload = handler.responses[-1]
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["cached"])
+        self.assertEqual(payload["chats"][0]["title"], "来源群")
+        list_dialogs.assert_not_called()
+
     def test_start_requires_login_and_source_group(self) -> None:
         write_private_json(
             self.data_dir / "telegram_signal_secrets.json",
@@ -135,6 +183,24 @@ class TelegramSignalWebUiTest(unittest.TestCase):
         self.assertTrue(settings["enabled"])
         self.assertEqual(payload["status"], "started")
         run.assert_called_once_with(["start-telegram-signal"], timeout_s=20)
+
+    def test_games_route_returns_only_tg_fixture_payload(self) -> None:
+        handler = self._handler("/api/telegram-signal/games?mode=live")
+        fixture_payload = {
+            "ok": True,
+            "mode": "live",
+            "games": [{"gid": "9000001", "teamH": "主队", "teamC": "客队"}],
+        }
+
+        with mock.patch.object(server, "_telegram_signal_load_games", return_value=fixture_payload) as load:
+            server.Handler.do_GET(handler)
+
+        status, payload = handler.responses[-1]
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["games"][0]["gid"], "9000001")
+        self.assertNotIn("uid", json.dumps(payload))
+        self.assertNotIn("cookie", json.dumps(payload))
+        load.assert_called_once_with(self.data_dir / "arsenal.json", mode="live")
 
 
 if __name__ == "__main__":

@@ -40,6 +40,11 @@ from hdzz.core.follower.strategy import encode_total_line as _encode_total_line
 from hdzz.core.follower.strategy import format_handicap_line_value as _format_handicap_line_value
 from hdzz.core.follower.strategy import format_total_line_value as _format_total_line_value
 from hdzz.core.watcher.order_filter import normalize_member_names
+from hdzz.core.watcher.ps3838_watch import safe_name as ps3838_safe_name
+from hdzz.core.watcher.ag_watcher import (
+    _load_tg_ui_theme as _load_order_tg_ui_theme,
+    format_backend_order_telegram_message,
+)
 from hdzz.api.webui.follow_settings import FOLLOW_SETTINGS_DEFAULTS, ensure_follow_settings_defaults, merge_follow_settings
 from hdzz.api.webui.manual_signal import build_manual_signal_payload, send_manual_signal
 from hdzz.api.webui.signal_pull_config import ensure_signal_pull_config_defaults, merge_signal_pull_config, reset_signal_pull_config
@@ -56,6 +61,12 @@ from hdzz.core.member.adspower_api import (
     normalize_adspower_api_base,
 )
 from hdzz.core.member.keeper import normalize_member_base_url
+from hdzz.common.platform_maintenance import (
+    PLATFORM_MAINTENANCE_CODE,
+    is_platform_maintenance,
+    maintenance_status_message,
+    read_platform_state,
+)
 from hdzz.core.telegram_signal.client import (
     TelegramSignalClientError,
     clear_login_session,
@@ -202,6 +213,34 @@ def build_account_status_entry(target: Dict[str, Any], state: Dict[str, Any], *,
     last_relogin_error_code = str(st.get("last_relogin_error_code") or "").strip()
     last_relogin_error_msg = _compact_status_message(st.get("last_relogin_error_msg"))
     last_relogin_failed_at = _as_float(st.get("last_relogin_failed_at"))
+    platform_status = str(st.get("platform_status") or "").strip().lower()
+    platform_until = _as_float(st.get("platform_maintenance_until"))
+    platform_start = _as_float(st.get("platform_maintenance_start_at"))
+
+    if platform_status in {"maintenance", "recovering"}:
+        recovering = platform_status == "recovering"
+        message = str(
+            st.get("last_error_msg")
+            or ("平台维护结束，正在验证原有会话" if recovering else "平台系统维护")
+        )
+        return {
+            "status": "recovering" if recovering else "maintenance",
+            "last_ok_at": last_ok_at,
+            "last_poll_at": last_poll_at,
+            "last_error_code": PLATFORM_MAINTENANCE_CODE,
+            "last_error_msg": message,
+            "last_relogin_error_code": last_relogin_error_code,
+            "last_relogin_error_msg": last_relogin_error_msg,
+            "last_relogin_failed_at": last_relogin_failed_at,
+            "relogin_in_progress": False,
+            "relogin_started_at": 0.0,
+            "has_session": bool(str(st.get("cookie") or t.get("cookie") or "").strip() or str(st.get("uid") or t.get("uid") or "").strip()),
+            "needs_manual_login": False,
+            "status_message": message,
+            "platform_status": platform_status,
+            "maintenance_start_at": platform_start,
+            "maintenance_until": platform_until,
+        }
 
     status = "offline"
     if last_ok_at and (ts - last_ok_at) <= float(TARGET_ONLINE_TTL_S):
@@ -252,6 +291,9 @@ def build_account_status_entry(target: Dict[str, Any], state: Dict[str, Any], *,
         "has_session": bool(has_session),
         "needs_manual_login": bool(needs_manual_login),
         "status_message": status_message,
+        "platform_status": platform_status or "online",
+        "maintenance_start_at": platform_start,
+        "maintenance_until": platform_until,
     }
 
 
@@ -434,6 +476,50 @@ def _read_follow_engine_pid_info() -> Optional[Dict[str, Any]]:
         return None
 
 
+def _follow_engine_process_pids() -> List[int]:
+    """Find a live follow engine when its dedicated PID file is stale."""
+    current_dir = Path.cwd().resolve()
+    found: List[int] = []
+    try:
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid=,command="],
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).decode("utf-8", "ignore")
+    except Exception:
+        return found
+    for line in output.splitlines():
+        text = line.strip()
+        if not text or "follow_engine.py" not in text:
+            continue
+        match = re.match(r"^(\d+)\s+", text)
+        if not match:
+            continue
+        try:
+            pid = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if not is_pid_running(pid):
+            continue
+        try:
+            cwd_output = subprocess.check_output(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", "ignore")
+            process_cwd = next(
+                (item[1:].strip() for item in cwd_output.splitlines() if item.startswith("n")),
+                "",
+            )
+            if process_cwd and Path(process_cwd).resolve() != current_dir:
+                continue
+        except Exception:
+            pass
+        if pid not in found:
+            found.append(pid)
+    return found
+
+
 def follow_engine_running_flag() -> Tuple[bool, Optional[int]]:
     try:
         obj = _read_follow_engine_pid_info()
@@ -443,6 +529,13 @@ def follow_engine_running_flag() -> Tuple[bool, Optional[int]]:
         alive = [pid for pid in pids if is_pid_running(pid)]
         if alive:
             return True, int(alive[0])
+        discovered = _follow_engine_process_pids()
+        if discovered:
+            atomic_write_json(
+                Path(".run/follow_engine.pid.json"),
+                {"recovered_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "live": True, "pids": [discovered[0]]},
+            )
+            return True, int(discovered[0])
         return False, None
     except Exception:
         return False, None
@@ -450,6 +543,50 @@ def follow_engine_running_flag() -> Tuple[bool, Optional[int]]:
 
 SNAPSHOT_WATCH_PID_FILE = Path(".run/odds_snapshot_watch.pid.json")
 SNAPSHOT_WATCH_LIFECYCLE_LOCK = threading.Lock()
+
+
+def _snapshot_watch_process_pids() -> List[int]:
+    """Find an already-running watcher when lifecycle PID files are stale."""
+    current_dir = Path.cwd().resolve()
+    found: List[int] = []
+    try:
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid=,command="],
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).decode("utf-8", "ignore")
+    except Exception:
+        return found
+    for line in output.splitlines():
+        text = line.strip()
+        if not text or "odds_snapshot_watch.py" not in text:
+            continue
+        match = re.match(r"^(\d+)\s+(.*)$", text)
+        if not match:
+            continue
+        try:
+            pid = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if not is_pid_running(pid) or not _is_snapshot_watch_pid(pid):
+            continue
+        try:
+            cwd_output = subprocess.check_output(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", "ignore")
+            process_cwd = next(
+                (item[1:].strip() for item in cwd_output.splitlines() if item.startswith("n")),
+                "",
+            )
+            if process_cwd and Path(process_cwd).resolve() != current_dir:
+                continue
+        except Exception:
+            pass
+        if pid not in found:
+            found.append(pid)
+    return found
 
 
 def _snapshot_watch_candidate_pids() -> List[int]:
@@ -470,6 +607,10 @@ def _snapshot_watch_candidate_pids() -> List[int]:
             if pid not in seen:
                 seen.add(pid)
                 candidates.append(pid)
+    for pid in _snapshot_watch_process_pids():
+        if pid not in seen:
+            seen.add(pid)
+            candidates.append(pid)
     return candidates
 
 
@@ -540,7 +681,7 @@ def _ensure_snapshot_watch_running() -> Tuple[bool, bool, str, Optional[int]]:
             "--active-seconds", os.environ.get("ODDS_SNAPSHOT_ACTIVE_SECONDS", "120"),
             "--max-workers", os.environ.get("ODDS_SNAPSHOT_MAX_WORKERS", "4"),
             "--target-interval-ms", os.environ.get("ODDS_SNAPSHOT_TARGET_INTERVAL_MS", "400"),
-            "--market-deadline-ms", os.environ.get("ODDS_SNAPSHOT_MARKET_DEADLINE_MS", "2000"),
+            "--market-deadline-ms", os.environ.get("ODDS_SNAPSHOT_MARKET_DEADLINE_MS", "6000"),
             "--public-timeout-s", os.environ.get("ODDS_SNAPSHOT_PUBLIC_TIMEOUT_S", "2"),
             "--hedge-delay-ms", os.environ.get("ODDS_SNAPSHOT_HEDGE_DELAY_MS", "350"),
             "--scheduler-tick-ms", os.environ.get("ODDS_SNAPSHOT_SCHEDULER_TICK_MS", "50"),
@@ -565,6 +706,14 @@ def _ensure_snapshot_watch_running() -> Tuple[bool, bool, str, Optional[int]]:
                 break
             time.sleep(0.1)
         if not is_pid_running(int(proc.pid)):
+            existing_running, existing_pid = snapshot_watch_running_flag()
+            if existing_running:
+                try:
+                    out_f.close()
+                    err_f.close()
+                except Exception:
+                    pass
+                return True, False, "", existing_pid
             atomic_write_json(
                 SNAPSHOT_WATCH_PID_FILE,
                 {
@@ -590,6 +739,50 @@ def telegram_signal_worker_running_flag() -> Tuple[bool, Optional[int]]:
         return (True, alive[0]) if alive else (False, None)
     except Exception:
         return False, None
+
+
+def telegram_signal_worker_health_status(
+    alive: bool,
+    pid: Optional[int],
+    health_path: Path = Path(".run/telegram_signal_health.json"),
+) -> Dict[str, Any]:
+    base: Dict[str, Any] = {
+        "worker_alive": bool(alive),
+        "worker_running": False,
+        "worker_healthy": False,
+        "worker_pid": pid,
+        "worker_state": "stopped" if not alive else "unknown",
+    }
+    if not alive or not pid:
+        return base
+    try:
+        payload = json.loads(Path(health_path).read_text(encoding="utf-8-sig") or "{}")
+    except Exception:
+        # Older listeners do not write health information. Keep the legacy
+        # status until the next restart loads the health-aware worker.
+        base.update({"worker_running": True, "worker_healthy": None})
+        return base
+    if not isinstance(payload, dict) or int(payload.get("pid") or 0) != int(pid):
+        base["worker_state"] = "stale"
+        return base
+    try:
+        heartbeat_age_ms = max(0, int(time.time() * 1000) - int(payload.get("heartbeat_at_ms") or 0))
+    except Exception:
+        heartbeat_age_ms = 10**9
+    state = str(payload.get("state") or "unknown").strip().lower()
+    healthy = state == "healthy" and heartbeat_age_ms <= 15000
+    base.update(
+        {
+            "worker_running": bool(healthy),
+            "worker_healthy": bool(healthy),
+            "worker_state": "stale" if heartbeat_age_ms > 15000 else state,
+            "worker_heartbeat_age_ms": heartbeat_age_ms,
+        }
+    )
+    error = re.sub(r"\s+", " ", str(payload.get("error") or "")).strip()
+    if error:
+        base["worker_error"] = error[:240]
+    return base
 
 def _run_app_command(args: List[str], timeout_s: int = 20) -> Tuple[int, str]:
     runtime_dir = os.getcwd()
@@ -752,6 +945,83 @@ def ensure_ag_wmc_watch_running() -> Tuple[bool, bool, str]:
     except Exception as e:
         return False, False, f"start ag_wmc_watch failed: {e}"
 
+
+def ensure_ps3838_watch_running(config_path: Path, data_dir: Path) -> Tuple[bool, bool, str]:
+    """启动独立的 PS3838 只读 worker；不加入 app.py 的跟单 worker 列表。"""
+    runtime_dir = Path(data_dir) / "ps3838"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    pid_path = runtime_dir / "worker.pid"
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip()) if pid_path.exists() else 0
+    except Exception:
+        pid = 0
+    if pid and is_pid_running(pid):
+        return True, False, ""
+    try:
+        env = dict(os.environ)
+        apply_playwright_browsers_path(env, APP_ROOT)
+        log_dir = Path(os.environ.get("HDZZ_LOG_DIR") or ".run/logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        out_f = open(log_dir / "ps3838_watch.out.log", "ab")
+        err_f = open(log_dir / "ps3838_watch.err.log", "ab")
+        launcher_path = Path(os.getcwd()) / "ps3838_watch.py"
+        if not launcher_path.exists():
+            launcher_path = Path(__file__).resolve().parents[4] / "app" / "ps3838_watch.py"
+        cmd = [sys.executable, "-u", str(launcher_path), "--config", str(config_path), "--data-dir", str(data_dir)]
+        kwargs: Dict[str, Any] = {
+            "args": cmd,
+            "cwd": str(Path(config_path).resolve().parent),
+            "env": env,
+            "stdout": out_f,
+            "stderr": err_f,
+        }
+        if os.name != "nt":
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(**kwargs)
+        pid_path.write_text(str(proc.pid), encoding="utf-8")
+        return True, True, ""
+    except Exception as exc:
+        return False, False, f"start ps3838_watch failed: {exc}"
+
+
+def ps3838_login_in_progress(data_dir: Path, account: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    """重复点击登录不能打断正在输入的 2FA；崩溃后残留状态不能阻止重开。"""
+    if not bool(account.get("enabled", True)) or not state.get("relogin_in_progress"):
+        return False
+    try:
+        pid = int((Path(data_dir) / "ps3838" / "worker.pid").read_text(encoding="utf-8").strip())
+        return bool(pid and is_pid_running(pid))
+    except Exception:
+        return False
+
+
+def read_ps3838_status(data_dir: Path, name: str, *, enabled: bool = True) -> Dict[str, Any]:
+    path = Path(data_dir) / "ps3838" / "state" / f"{safe_name(name)}.json"
+    state = read_json_file(path, {})
+    status = str(state.get("status") or "offline").strip().lower()
+    if status not in {"online", "offline", "relogin"}:
+        status = "offline"
+    message = str(state.get("status_message") or "").strip()
+    login_waiting = ps3838_login_in_progress(data_dir, {"enabled": enabled}, state)
+    if not enabled:
+        status = "offline"
+        message = "已停用，不会自动登录或扫描"
+    elif status == "relogin" and not login_waiting:
+        status = "offline"
+        message = "登录进程已停止；请点击重新登录继续"
+    return {
+        "status": status,
+        "status_message": message or ({"online": "在线", "relogin": "登录中"}.get(status) or "未登录"),
+        "needs_manual_login": enabled and status != "online",
+        "has_session": enabled and bool(state.get("session_ready")),
+        "relogin_in_progress": login_waiting,
+        "last_ok_at": float(state.get("last_ok_at") or 0),
+        "last_poll_at": float(state.get("last_poll_at") or 0),
+        "order_count": int(state.get("order_count") or 0),
+        "new_count": int(state.get("new_count") or 0),
+        "update_count": int(state.get("update_count") or 0),
+    }
+
 def _prepare_stop_all_without_killing_self() -> Tuple[bool, str]:
     """
     When WebUI is started by app.py start (ALL mode), current webui_server pid is in .run/pids.json.
@@ -877,15 +1147,23 @@ def redact_secret_in_text(text: str, secret: str) -> str:
 
 def apply_telegram_config_update(cfg: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(cfg if isinstance(cfg, dict) else {})
+    # 账号状态 Telegram 推送已下线；保存通知配置时清理旧字段，避免旧配置继续产生歧义。
+    for legacy_key in (
+        "telegram_status_push_enabled",
+        "telegram_status_bot_token",
+        "telegram_status_chat_id",
+        "telegram_status_proxy",
+    ):
+        out.pop(legacy_key, None)
     if bool(data.get("clear_config") or False):
         out["telegram_bot_token"] = ""
         out["telegram_chat_id"] = ""
         out["telegram_allow_chat"] = ""
         out["telegram_proxy"] = ""
-        out["telegram_status_push_enabled"] = False
-        out["telegram_status_bot_token"] = ""
-        out["telegram_status_chat_id"] = ""
-        out["telegram_status_proxy"] = ""
+        out["telegram_backend_order_push_enabled"] = False
+        out["telegram_backend_order_bot_token"] = ""
+        out["telegram_backend_order_chat_id"] = ""
+        out["telegram_backend_order_proxy"] = ""
         return out
 
     bot_token = str(data.get("bot_token") or "").strip()
@@ -893,12 +1171,24 @@ def apply_telegram_config_update(cfg: Dict[str, Any], data: Dict[str, Any]) -> D
     allow_chat = (str(data.get("allow_chat") or "").strip() if "allow_chat" in data else None)
     proxy = str(data.get("proxy") or "").strip()
     clear_token = bool(data.get("clear_token") or False)
-    status_push_enabled = data.get("status_push_enabled", None)
-    # status_* 仅在请求显式携带字段时才更新，避免被其它保存动作“误清空”
-    status_bot_token = (str(data.get("status_bot_token") or "").strip() if "status_bot_token" in data else None)
-    status_chat_id = (str(data.get("status_chat_id") or "").strip() if "status_chat_id" in data else None)
-    status_proxy = (str(data.get("status_proxy") or "").strip() if "status_proxy" in data else None)
-    clear_status_token = bool(data.get("clear_status_token") or False) if "clear_status_token" in data else False
+    order_forward_enabled = data.get("order_forward_enabled", None)
+    backend_order_push_enabled = data.get("backend_order_push_enabled", None)
+    backend_order_bot_token = (
+        str(data.get("backend_order_bot_token") or "").strip()
+        if "backend_order_bot_token" in data
+        else None
+    )
+    backend_order_chat_id = (
+        str(data.get("backend_order_chat_id") or "").strip()
+        if "backend_order_chat_id" in data
+        else None
+    )
+    backend_order_proxy = (
+        str(data.get("backend_order_proxy") or "").strip()
+        if "backend_order_proxy" in data
+        else None
+    )
+    clear_backend_order_token = bool(data.get("clear_backend_order_token") or False)
 
     if clear_token:
         out["telegram_bot_token"] = ""
@@ -910,17 +1200,33 @@ def apply_telegram_config_update(cfg: Dict[str, Any], data: Dict[str, Any]) -> D
         out["telegram_allow_chat"] = allow_chat
     if proxy or proxy == "":
         out["telegram_proxy"] = proxy
-    if status_push_enabled is not None:
-        out["telegram_status_push_enabled"] = bool(status_push_enabled)
-    if clear_status_token:
-        out["telegram_status_bot_token"] = ""
-    elif status_bot_token is not None and status_bot_token:
-        out["telegram_status_bot_token"] = status_bot_token
-    if status_chat_id is not None:
-        out["telegram_status_chat_id"] = status_chat_id
-    if status_proxy is not None:
-        out["telegram_status_proxy"] = status_proxy
+    if order_forward_enabled is not None:
+        out["telegram_order_forward_enabled"] = bool(order_forward_enabled)
+    if backend_order_push_enabled is not None:
+        out["telegram_backend_order_push_enabled"] = bool(backend_order_push_enabled)
+    if clear_backend_order_token:
+        out["telegram_backend_order_bot_token"] = ""
+    elif backend_order_bot_token:
+        out["telegram_backend_order_bot_token"] = backend_order_bot_token
+    if backend_order_chat_id is not None:
+        out["telegram_backend_order_chat_id"] = backend_order_chat_id
+    if backend_order_proxy is not None:
+        out["telegram_backend_order_proxy"] = backend_order_proxy
     return out
+
+
+def format_backend_order_telegram_test_message(cfg: Dict[str, Any]) -> str:
+    return format_backend_order_telegram_message(
+        {
+            "league": "后台订单推送测试",
+            "sides": "主队 v 客队 (0 - 0)",
+            "betType": "(滚球) 角球数 - 大 / 小",
+            "line": "小 11",
+            "odds": "0.70",
+            "stake": "100",
+        },
+        ui_theme=_load_order_tg_ui_theme(cfg),
+    )
 
 
 def tg_send_message(
@@ -1630,6 +1936,57 @@ def read_orders_file(path: Path, since: int = 0, limit: int = 200) -> List[Dict[
     # 最新在前
     out.sort(key=lambda x: int(x.get("ts") or 0), reverse=True)
     return out[: max(1, int(limit))]
+
+
+def read_ps3838_dashboard_orders(
+    data_dir: Path, accounts: List[Dict[str, Any]], *, target: str = "", since: int = 0, limit: int = 200,
+) -> List[Dict[str, Any]]:
+    """只读合并平博采集流水；同账号同票号取最新事件，不进入跟单订单目录。"""
+    result: List[Dict[str, Any]] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        name = str(account.get("name") or "").strip()
+        if not name or (target and target != name):
+            continue
+        latest: Dict[str, Dict[str, Any]] = {}
+        path = Path(data_dir) / "ps3838" / "orders" / f"{ps3838_safe_name(name)}.jsonl"
+        try:
+            with path.open(encoding="utf-8-sig") as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                        if not isinstance(row, dict):
+                            continue
+                        oid = str(row.get("orderId") or "").strip()
+                        ts = int(row.get("ts") or 0)
+                        if not oid or ts <= 0:
+                            continue
+                    except (ValueError, TypeError):
+                        continue  # 容忍末行尚未写完。
+                    previous = latest.get(oid)
+                    if previous and int(previous["ts"]) > ts:
+                        continue
+                    row.update({
+                        "ts": ts, "target": name, "provider": "ps3838", "read_only": True,
+                        "display_id": json.dumps(["ps3838", name, oid], separators=(",", ":")),
+                        "backendName": str(account.get("username") or name),
+                        "display_line": row.get("line") or "",
+                        "display_reverse_applied": False,
+                        "follow_avg_odds": None, "follow_avg_odds_count": 0,
+                    })
+                    choices = row.get("choices") or []
+                    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+                    if len(choices) == 1:
+                        row["marketLabel"] = {"HDP": "让球"}.get(choice.get("btName"), choice.get("btName") or "")
+                        if isinstance(choice.get("inplay"), bool):
+                            row["orderType"] = "滚球" if choice["inplay"] else "早盘"
+                    latest[oid] = row
+        except OSError:
+            continue
+        result.extend(row for row in latest.values() if not since or row["ts"] > since)
+    result.sort(key=lambda row: row["ts"], reverse=True)
+    return result[:max(1, int(limit))]
 
 
 def _compose_order_play(row: Dict[str, Any]) -> str:
@@ -4000,6 +4357,88 @@ def _chashui_simplify_games(games: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return out
 
 
+def _telegram_signal_load_games(arsenal_path: Path, *, mode: str) -> Dict[str, Any]:
+    """Resolve fixture identities for TG intake without exposing credentials or odds."""
+    mode2 = _chashui_normalize_mode(mode)
+    doc = read_json_file(Path(arsenal_path), {"members": []})
+    members_raw = doc.get("members") if isinstance(doc, dict) else []
+    members = [member for member in (members_raw or []) if isinstance(member, dict)]
+
+    def load_for_member(member: Dict[str, Any]) -> Dict[str, Any]:
+        member_id = str(member.get("id") or "").strip()
+        base_url = str(member.get("base_url") or "").strip()
+        uid = str(member.get("uid") or "").strip()
+        ver = str(member.get("ver") or "").strip()
+        cookie = str(member.get("cookie") or "").strip()
+        proxy = str(member.get("proxy") or "").strip()
+        if not (member_id and base_url and uid and ver and cookie):
+            raise RuntimeError("member_missing_uid_cookie_ver")
+
+        cached = _get_chashui_games_cache(member_id, mode2)
+        if cached:
+            return {"mode": mode2, "games": cached["games"], "cached": True}
+
+        session = _make_member_session(base_url=base_url, proxy=proxy, cookie=cookie)
+        xml_text = _chashui_get_game_list_xml(
+            session=session,
+            base_url=base_url,
+            ver=ver,
+            uid=uid,
+            mode=mode2,
+            timeout_s=10,
+        )
+        raw_text = str(xml_text or "").strip()
+        if not raw_text:
+            raise RuntimeError("game_list_empty_response")
+        if not raw_text.startswith("<"):
+            raise RuntimeError(f"game_list_non_xml: {raw_text[:160]}")
+        games_raw = _chashui_parse_game_list_original(raw_text) or _chashui_parse_game_list_xml_games(raw_text)
+        games = _chashui_simplify_games(games_raw)
+        _set_chashui_games_cache(member_id, mode2, games)
+        return {"mode": mode2, "games": games, "cached": False}
+
+    run = _run_readonly_member_with_failover(
+        arsenal_path=Path(arsenal_path),
+        members=members,
+        lane="telegram_signal_games",
+        runner=load_for_member,
+    )
+    if run.get("ok"):
+        payload = dict(run.get("result") or {})
+        payload.update(
+            {
+                "ok": True,
+                "readonly_member": _readonly_member_ref(run.get("member")),
+                "fallback_used": bool(run.get("fallback_used")),
+            }
+        )
+        return payload
+
+    for attempted_id in run.get("attempted_member_ids") or []:
+        stale = _get_chashui_games_cache(
+            attempted_id,
+            mode2,
+            allow_stale_s=CHASHUI_GAMES_CACHE_STALE_TTL_S,
+        )
+        if stale:
+            return {
+                "ok": True,
+                "mode": mode2,
+                "games": stale["games"],
+                "cached": True,
+                "stale": True,
+                "warning": str(run.get("error") or "game_list_failed"),
+                "fallback_used": bool(run.get("fallback_used")),
+            }
+    return {
+        "ok": False,
+        "mode": mode2,
+        "games": [],
+        "message": str(run.get("error") or "readonly_pool_empty"),
+        "fallback_used": bool(run.get("fallback_used")),
+    }
+
+
 def _xml_tag_value(xml_text: str, tag: str) -> str:
     t = str(xml_text or "")
     k = str(tag or "").strip()
@@ -4606,6 +5045,7 @@ def _chashui_resolve_game_by_gid(
     wanted_away = _fixture_text(locator.get("team_c"), strip_corner=True)
     wanted_num_h = _fixture_text(locator.get("gnum_h"))
     wanted_num_c = _fixture_text(locator.get("gnum_c"))
+    locator_is_corner = bool(locator.get("is_corner"))
 
     def _fixture_candidates(games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not ((wanted_home and wanted_away) or (wanted_num_h and wanted_num_c)):
@@ -4622,7 +5062,18 @@ def _chashui_resolve_game_by_gid(
                 continue
             if wanted_home and wanted_away and actual_home and actual_away and not names_match:
                 continue
-            if wanted_num_h and wanted_num_c and actual_num_h and actual_num_c and not numbers_match:
+            # CN corner boards use different provider team numbers from their
+            # parent FT fixture. Exact team names plus league identify the
+            # parent; get_game_more later proves the requested child gid is on
+            # that parent before a snapshot can be published.
+            if (
+                not locator_is_corner
+                and wanted_num_h
+                and wanted_num_c
+                and actual_num_h
+                and actual_num_c
+                and not numbers_match
+            ):
                 continue
             actual_league = _fixture_text(_field_ci(game, "LEAGUE"))
             if wanted_league and actual_league and actual_league != wanted_league:
@@ -4781,7 +5232,16 @@ def _snapshot_market_matches(snapshot: Dict[str, Any], demand: Dict[str, Any]) -
             continue
         if target_value is None:
             return True
-        current = _line_average(line.get("rawLine") or side.get("line"))
+        # Handicap ``rawLine`` is only the unsigned board magnitude.  The
+        # selected side owns the actual signed line (for example, a home
+        # favourite is ``-0.5`` while rawLine is ``0.5``).  Comparing the
+        # unsigned value makes a valid favourite order look missing and sends
+        # the snapshot worker through every Main/All retry until its deadline.
+        current = (
+            _signed_line_average(side.get("line") or line.get("rawLine"))
+            if market_type == "HANDICAP"
+            else _line_average(line.get("rawLine") or side.get("line"))
+        )
         if current == current and line_matches(
             target_value,
             current,
@@ -5056,21 +5516,39 @@ class Handler(SimpleHTTPRequestHandler):
             secret_status = sanitize_telegram_signal_secret_status(
                 load_telegram_signal_secrets(self._data_dir / "telegram_signal_secrets.json")
             )
-            running, pid = telegram_signal_worker_running_flag()
+            alive, pid = telegram_signal_worker_running_flag()
+            worker_status = telegram_signal_worker_health_status(
+                alive,
+                pid,
+                self._data_dir.parent / ".run/telegram_signal_health.json",
+            )
             self._send_json(
                 200,
                 {
                     "ok": True,
                     "settings": settings,
                     **secret_status,
-                    "worker_running": bool(running),
-                    "worker_pid": pid,
+                    **worker_status,
                     "server_time": now_iso(),
                 },
             )
             return
 
         if u.path == "/api/telegram-signal/chats":
+            alive, _pid = telegram_signal_worker_running_flag()
+            if alive:
+                settings = load_telegram_signal_settings(self._data_dir / "telegram_signal.json")
+                saved = [dict(item) for item in (settings.get("source_chats") or []) if isinstance(item, dict)]
+                known = {str(item.get("id") or "").strip() for item in saved}
+                for chat_id in settings.get("source_chat_ids") or []:
+                    value = str(chat_id or "").strip()
+                    if value and value not in known:
+                        saved.append({"id": value, "title": "已保存来源", "type": "group"})
+                self._send_json(
+                    200,
+                    {"ok": True, "chats": saved, "cached": True, "server_time": now_iso()},
+                )
+                return
             try:
                 chats = list_source_dialogs(self._data_dir / "telegram_signal_secrets.json")
             except TelegramSignalClientError as exc:
@@ -5111,16 +5589,21 @@ class Handler(SimpleHTTPRequestHandler):
                 # 汇总所有 target
                 for p in self._orders_dir.glob("*.jsonl"):
                     orders.extend(read_orders_file(p, since=since, limit=limit))
-                orders.sort(key=lambda x: int(x.get("ts") or 0), reverse=True)
-                orders = orders[: max(1, int(limit))]
+
+            orders.extend(read_ps3838_dashboard_orders(
+                self._data_dir, self._read_config().get("ps3838_accounts") or [],
+                target=target, since=since, limit=limit,
+            ))
+            orders.sort(key=lambda x: int(x.get("ts") or 0), reverse=True)
 
             if deleted_order_ids:
-                orders = [row for row in orders if _extract_order_id_from_row(row) not in deleted_order_ids]
+                orders = [row for row in orders if (row.get("display_id") if row.get("read_only") else _extract_order_id_from_row(row)) not in deleted_order_ids]
+            orders = orders[:max(1, int(limit))]
 
             order_ids: List[str] = []
             seen_order_ids: set = set()
             for row in orders:
-                if not isinstance(row, dict):
+                if not isinstance(row, dict) or row.get("read_only"):
                     continue
                 oid = _extract_order_id_from_row(row)
                 if not oid or oid in seen_order_ids:
@@ -5135,7 +5618,7 @@ class Handler(SimpleHTTPRequestHandler):
                 order_ids,
             )
             for row in orders:
-                if not isinstance(row, dict):
+                if not isinstance(row, dict) or row.get("read_only"):
                     continue
                 oid = _extract_order_id_from_row(row)
                 rec = avg_odds_by_order.get(oid)
@@ -5441,7 +5924,25 @@ class Handler(SimpleHTTPRequestHandler):
                         "time_offset_hours": t.get("time_offset_hours") or 0,
                     }
                 )
-            self._send_json(200, {"ok": True, "accounts": accounts, "server_time": now_iso()})
+            ps_accounts = []
+            for item in cfg.get("ps3838_accounts") or []:
+                if not isinstance(item, dict):
+                    continue
+                ps_accounts.append(
+                    {
+                        "name": item.get("name") or "",
+                        "provider": "ps3838",
+                        "base_url": item.get("base_url") or "https://www.ps38ag.com",
+                        "username": item.get("username") or "",
+                        "enabled": bool(item.get("enabled", True)),
+                        "proxy": item.get("proxy") or "",
+                        "interval_seconds": float(item.get("interval_seconds") or 15),
+                    }
+                )
+            self._send_json(
+                200,
+                {"ok": True, "accounts": accounts, "ps3838_accounts": ps_accounts, "server_time": now_iso()},
+            )
             return
 
         if u.path == "/api/telegram-config":
@@ -5450,10 +5951,11 @@ class Handler(SimpleHTTPRequestHandler):
             chat_id = str(cfg.get("telegram_chat_id") or "").strip()
             allow_chat = str(cfg.get("telegram_allow_chat") or "").strip()
             proxy = str(cfg.get("telegram_proxy") or "").strip()
-            status_push_enabled = bool(cfg.get("telegram_status_push_enabled") or False)
-            status_bot_token = str(cfg.get("telegram_status_bot_token") or "").strip()
-            status_chat_id = str(cfg.get("telegram_status_chat_id") or "").strip()
-            status_proxy = str(cfg.get("telegram_status_proxy") or "").strip()
+            order_forward_enabled = bool(cfg.get("telegram_order_forward_enabled", True))
+            backend_order_push_enabled = bool(cfg.get("telegram_backend_order_push_enabled") or False)
+            backend_order_bot_token = str(cfg.get("telegram_backend_order_bot_token") or "").strip()
+            backend_order_chat_id = str(cfg.get("telegram_backend_order_chat_id") or "").strip()
+            backend_order_proxy = str(cfg.get("telegram_backend_order_proxy") or "").strip()
             self._send_json(
                 200,
                 {
@@ -5463,11 +5965,12 @@ class Handler(SimpleHTTPRequestHandler):
                     "chat_id": chat_id,
                     "allow_chat": allow_chat,
                     "proxy": proxy,
-                    "status_push_enabled": status_push_enabled,
-                    "status_configured": bool(status_bot_token and status_chat_id),
-                    "status_token_mask": mask_secret(status_bot_token, keep=4) if status_bot_token else "",
-                    "status_chat_id": status_chat_id,
-                    "status_proxy": status_proxy,
+                    "order_forward_enabled": order_forward_enabled,
+                    "backend_order_push_enabled": backend_order_push_enabled,
+                    "backend_order_configured": bool(backend_order_bot_token and backend_order_chat_id),
+                    "backend_order_token_mask": mask_secret(backend_order_bot_token, keep=4) if backend_order_bot_token else "",
+                    "backend_order_chat_id": backend_order_chat_id,
+                    "backend_order_proxy": backend_order_proxy,
                     "server_time": now_iso(),
                 },
             )
@@ -5564,6 +6067,18 @@ class Handler(SimpleHTTPRequestHandler):
         # -------------------------
         # 查水（实时盘口/水位，只读）
         # -------------------------
+        if u.path == "/api/telegram-signal/games":
+            qs = parse_qs(u.query)
+            mode = _chashui_normalize_mode(str((qs.get("mode") or ["live"])[0]).strip())
+            payload = _telegram_signal_load_games(self._arsenal_path, mode=mode)
+            payload["server_time"] = now_iso()
+            if payload.get("ok"):
+                self._send_json(200, payload)
+            else:
+                status = 404 if payload.get("message") == "readonly_pool_empty" else 502
+                self._send_json(status, payload)
+            return
+
         if u.path == "/api/chashui/status":
             # 查水已移除：只返回本地会员状态，严禁展示层通过此路由触发上游访问。
             doc = read_json_file(self._arsenal_path, {"members": []})
@@ -5834,7 +6349,9 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/arsenal":
             doc = read_json_file(self._arsenal_path, {"members": []})
             members = doc.get("members") or []
-            request_cooldown_enabled = _as_bool(doc.get("request_cooldown_enabled"), True)
+            # 会员冷却已废弃；旧数据中的时间戳不应再被 WebUI 展示为冷却中。
+            request_cooldown_enabled = False
+            platform_state = read_platform_state(self._data_dir)
             out: List[Dict[str, Any]] = []
             for m in members:
                 if not isinstance(m, dict):
@@ -5844,6 +6361,16 @@ class Handler(SimpleHTTPRequestHandler):
                     ads_sync_interval = max(1, int(m.get("adspower_sync_interval_seconds") or 5))
                 except Exception:
                     ads_sync_interval = 5
+                member_status = m.get("status") or "unknown"
+                member_error = m.get("last_error") or ""
+                if is_platform_maintenance(platform_state) or str(platform_state.get("status") or "").strip().lower() == "recovering":
+                    recovering = str(platform_state.get("status") or "").strip().lower() == "recovering"
+                    member_status = "recovering" if recovering else "maintenance"
+                    member_error = (
+                        "平台维护结束，正在验证原有会话"
+                        if recovering
+                        else maintenance_status_message(platform_state)
+                    )
                 out.append(
                     {
                         "id": m.get("id") or "",
@@ -5866,9 +6393,7 @@ class Handler(SimpleHTTPRequestHandler):
                         "last_ok_at": float(m.get("last_ok_at") or 0),
                         "relogin_fail_count": int(m.get("relogin_fail_count") or 0),
                         "request_fail_count": int(m.get("request_fail_count") or 0),
-                        "request_cooldown_until": float(m.get("request_cooldown_until") or 0)
-                        if request_cooldown_enabled
-                        else 0.0,
+                        "request_cooldown_until": 0.0,
                         "request_cooldown_enabled": request_cooldown_enabled,
                         "relogin_backoff_until": float(m.get("relogin_backoff_until") or 0),
                         "balance": _to_float_or_none(m.get("maxcredit") or m.get("nowcredit") or m.get("cash")),
@@ -5904,13 +6429,16 @@ class Handler(SimpleHTTPRequestHandler):
                         "proxy_label": disp.get("label") or "",
                         "proxy_ip": disp.get("proxy_ip") or "",
                         "proxy_geo": disp.get("proxy_geo"),
-                        "status": m.get("status") or "unknown",
+                        "status": member_status,
                         "last_check_at": float(m.get("last_check_at") or 0),
-                        "last_error": m.get("last_error") or "",
+                        "last_error": member_error,
                         "last_systemtime": m.get("last_systemtime") or "",
+                        "platform_status": platform_state.get("status") or "unknown",
+                        "maintenance_start_at": float(platform_state.get("maintenance_start_at") or 0),
+                        "maintenance_until": float(platform_state.get("maintenance_until") or 0),
                     }
                 )
-            self._send_json(200, {"ok": True, "members": out, "server_time": now_iso()})
+            self._send_json(200, {"ok": True, "members": out, "platform": platform_state, "server_time": now_iso()})
             return
 
         if u.path == "/api/follow-settings":
@@ -6126,14 +6654,46 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/status":
             cfg = self._read_config()
             targets = cfg.get("targets") or []
+            # WebUI 可能在 app.py 重启后先收到状态请求；确保已保存的平博账号
+            # 仍有独立只读 worker，不需要用户重新点击“接入节点”。
+            ps_accounts = [
+                item for item in (cfg.get("ps3838_accounts") or [])
+                if isinstance(item, dict) and bool(item.get("enabled", True))
+            ]
+            if ps_accounts:
+                try:
+                    ensure_ps3838_watch_running(self._config_path, self._data_dir)
+                except Exception:
+                    pass
             now = time.time()
+            platform_state = read_platform_state(self._data_dir)
             statuses: Dict[str, Any] = {}
             for t in targets:
                 name = str(t.get("name") or "").strip()
                 if not name:
                     continue
                 st = self._read_state(name)
+                if is_platform_maintenance(platform_state) or str(platform_state.get("status") or "").strip().lower() == "recovering":
+                    st = dict(st)
+                    recovering = str(platform_state.get("status") or "").strip().lower() == "recovering"
+                    st.update(
+                        {
+                            "platform_status": "recovering" if recovering else "maintenance",
+                            "platform_maintenance_start_at": platform_state.get("maintenance_start_at") or 0,
+                            "platform_maintenance_until": platform_state.get("maintenance_until") or 0,
+                            "last_error_code": PLATFORM_MAINTENANCE_CODE,
+                            "last_error_msg": "平台维护结束，正在验证原有会话" if recovering else maintenance_status_message(platform_state),
+                        }
+                    )
                 statuses[name] = build_account_status_entry(t, st, now=now)
+
+            ps_statuses: Dict[str, Any] = {}
+            for account in cfg.get("ps3838_accounts") or []:
+                if not isinstance(account, dict):
+                    continue
+                ps_name = str(account.get("name") or "").strip()
+                if ps_name:
+                    ps_statuses[ps_name] = read_ps3838_status(self._data_dir, ps_name, enabled=bool(account.get("enabled", True)))
 
             core_running, core_pid_count = core_running_flag()
             follow_running, follow_pid = follow_engine_running_flag()
@@ -6142,6 +6702,7 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, {
                 "ok": True,
                 "statuses": statuses,
+                "ps3838_statuses": ps_statuses,
                 "server_time": now_iso(),
                 "uptime": int(time.time() - SERVER_START_TIME),
                 "latency": get_latency(), 
@@ -6154,6 +6715,7 @@ class Handler(SimpleHTTPRequestHandler):
                 # 用于确认当前运行的 WebUI 版本/路径（避免启动到别的目录的旧代码）
                 "server_file": server_meta["server_file"],
                 "server_mtime": server_meta["server_mtime"],
+                "platform": platform_state,
             })
             return
 
@@ -6196,6 +6758,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _queue_manual_relogin(self, name: str) -> Tuple[bool, str]:
         try:
+            platform_state = read_platform_state(self._data_dir)
+            if is_platform_maintenance(platform_state):
+                return False, maintenance_status_message(platform_state)
             p = self._state_dir / f"{safe_name(name)}.json"
             st = read_json_file(p, {})
             if not isinstance(st, dict):
@@ -6244,9 +6809,7 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/follow-settings",
             "/api/telegram-config",
             "/api/telegram-test",
-            "/api/telegram-status-test",
-            "/api/telegram-test",
-            "/api/telegram-status-test",
+            "/api/telegram-backend-order-test",
             "/api/signal-pull-config",
             "/api/signal-pull-config/delete",
             "/api/manual-signal/login",
@@ -6260,6 +6823,10 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/telegram-signal/logout",
             "/api/mapping",
             "/api/accounts/add",
+            "/api/ps3838/add",
+            "/api/ps3838/relogin",
+            "/api/ps3838/update",
+            "/api/ps3838/delete",
             "/api/start",
             "/api/stop",
             "/api/arsenal/add",
@@ -6514,6 +7081,132 @@ class Handler(SimpleHTTPRequestHandler):
             )
             return
 
+        if u.path == "/api/ps3838/add":
+            base_url = str(data.get("base_url") or "https://www.ps38ag.com").strip().rstrip("/")
+            username = str(data.get("username") or "").strip()
+            password = str(data.get("password") or "")
+            if not username or not password:
+                self._send_json(400, {"ok": False, "message": "请填写平博账号和密码"})
+                return
+            cfg = self._read_config()
+            accounts = cfg.setdefault("ps3838_accounts", [])
+            if not isinstance(accounts, list):
+                accounts = []
+                cfg["ps3838_accounts"] = accounts
+            existing = {str(item.get("name") or "") for item in accounts if isinstance(item, dict)}
+            base_name = f"ps3838_{safe_name(username)}"
+            name = base_name
+            suffix = 2
+            while name in existing:
+                name = f"{base_name}_{suffix}"
+                suffix += 1
+            try:
+                interval = max(5.0, min(300.0, float(data.get("interval_seconds") or 15)))
+            except Exception:
+                interval = 15.0
+            account = {
+                "name": name,
+                "provider": "ps3838",
+                "base_url": base_url or "https://www.ps38ag.com",
+                "username": username,
+                "password": password,
+                "enabled": True,
+                "interval_seconds": interval,
+                "headless": bool(data.get("headless", False)),
+                "login_timeout_seconds": 0,
+                "telegram_chat_id": str(data.get("telegram_chat_id") or "").strip(),
+                "x_intellifend_secret": "",
+            }
+            accounts.append(account)
+            try:
+                atomic_write_json(self._config_path, cfg)
+                state_path = self._data_dir / "ps3838" / "state" / f"{safe_name(name)}.json"
+                st = read_json_file(state_path, {})
+                st.update({"status": "relogin", "status_message": "登录窗口已发起，请完成登录/2FA；窗口不会自动关闭", "relogin_requested_at": time.time(), "relogin_in_progress": True, "session_ready": False, "login_required": False})
+                atomic_write_json(state_path, st)
+                ok, started, err = ensure_ps3838_watch_running(self._config_path, self._data_dir)
+                payload: Dict[str, Any] = {
+                    "ok": True,
+                    "name": name,
+                    "provider": "ps3838",
+                    "message": "已发起平博登录，请在弹出的浏览器窗口完成验证码/登录",
+                    "watch_started": bool(started),
+                }
+                if not ok:
+                    payload["warning"] = err
+                self._send_json(200, payload)
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "message": f"保存平博配置失败: {exc}"})
+            return
+
+        if u.path == "/api/ps3838/relogin":
+            name = str(data.get("name") or "").strip()
+            cfg = self._read_config()
+            account = next((x for x in (cfg.get("ps3838_accounts") or []) if isinstance(x, dict) and str(x.get("name") or "") == name), None)
+            if not account:
+                self._send_json(404, {"ok": False, "message": "未找到平博账号"})
+                return
+            state_path = self._data_dir / "ps3838" / "state" / f"{safe_name(name)}.json"
+            st = read_json_file(state_path, {})
+            if ps3838_login_in_progress(self._data_dir, account, st):
+                self._send_json(200, {"ok": True, "provider": "ps3838", "watch_started": False, "message": "登录窗口已打开，请在原窗口完成登录/2FA；不会重新打开或重复提交"})
+                return
+            st.update({"status": "relogin", "status_message": "等待你在浏览器完成登录/2FA，窗口不会自动关闭", "relogin_requested_at": time.time(), "relogin_in_progress": True, "session_ready": False, "login_required": False})
+            try:
+                # 点击“重新登录”是明确恢复停用账号的请求。
+                account["enabled"] = True
+                account["login_timeout_seconds"] = 0
+                atomic_write_json(self._config_path, cfg)
+                atomic_write_json(state_path, st)
+                ok, started, err = ensure_ps3838_watch_running(self._config_path, self._data_dir)
+                if not ok:
+                    self._send_json(500, {"ok": False, "message": err})
+                    return
+                self._send_json(200, {"ok": True, "provider": "ps3838", "watch_started": bool(started), "message": "已发起平博重新登录"})
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "message": f"发起平博登录失败: {exc}"})
+            return
+
+        if u.path == "/api/ps3838/update":
+            name = str(data.get("name") or "").strip()
+            patch = data.get("patch")
+            if not isinstance(patch, dict) or not isinstance(patch.get("enabled"), bool):
+                self._send_json(400, {"ok": False, "message": "请提供 enabled 布尔值"})
+                return
+            cfg = self._read_config()
+            account = next((item for item in cfg.get("ps3838_accounts") or [] if isinstance(item, dict) and str(item.get("name") or "") == name), None)
+            if account is None:
+                self._send_json(404, {"ok": False, "message": "未找到平博账号"})
+                return
+            account["enabled"] = patch["enabled"]
+            try:
+                atomic_write_json(self._config_path, cfg)
+                if account["enabled"]:
+                    ok, started, err = ensure_ps3838_watch_running(self._config_path, self._data_dir)
+                    if not ok:
+                        self._send_json(500, {"ok": False, "message": err})
+                        return
+                self._send_json(200, {"ok": True, "provider": "ps3838", "enabled": account["enabled"]})
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "message": f"切换平博监控状态失败: {exc}"})
+            return
+
+        if u.path == "/api/ps3838/delete":
+            name = str(data.get("name") or "").strip()
+            cfg = self._read_config()
+            accounts = cfg.get("ps3838_accounts") or []
+            kept = [x for x in accounts if not (isinstance(x, dict) and str(x.get("name") or "") == name)]
+            if len(kept) == len(accounts):
+                self._send_json(404, {"ok": False, "message": "未找到平博账号"})
+                return
+            cfg["ps3838_accounts"] = kept
+            try:
+                atomic_write_json(self._config_path, cfg)
+                self._send_json(200, {"ok": True, "removed": name, "provider": "ps3838"})
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "message": f"删除平博账号失败: {exc}"})
+            return
+
         if u.path == "/api/accounts/add":
             base_url = str(data.get("base_url") or "").strip()
             username = str(data.get("username") or "").strip()
@@ -6693,6 +7386,18 @@ class Handler(SimpleHTTPRequestHandler):
             if not any(str(t.get("name") or "") == name for t in targets):
                 self._send_json(404, {"ok": False, "message": "未找到该账号"})
                 return
+            platform_state = read_platform_state(self._data_dir)
+            if is_platform_maintenance(platform_state):
+                self._send_json(
+                    409,
+                    {
+                        "ok": False,
+                        "status": "maintenance",
+                        "message": maintenance_status_message(platform_state),
+                        "platform": platform_state,
+                    },
+                )
+                return
 
             # 若 core worker 未启动，则“重登”只会写 state，不会被执行（没有进程去消费）。
             # 这里 best-effort 拉起 core，避免用户误以为“点了没反应”。
@@ -6745,6 +7450,13 @@ class Handler(SimpleHTTPRequestHandler):
             doc["members"] = members
             try:
                 atomic_write_json(self._arsenal_path, doc)
+                # Remove the deleted member's optional target mapping from the
+                # same runtime data directory.  Orders and member browser
+                # profiles are intentionally left untouched.
+                mappings = read_json_file(self._mappings_path, {})
+                if member_id in mappings:
+                    mappings.pop(member_id, None)
+                    atomic_write_json(self._mappings_path, mappings)
             except Exception as e:
                 self._send_json(500, {"ok": False, "message": f"写入失败: {e}"})
                 return
@@ -7123,6 +7835,19 @@ class Handler(SimpleHTTPRequestHandler):
                 self._send_json(404, {"ok": False, "message": "未找到该会员账号"})
                 return
 
+            platform_state = read_platform_state(self._data_dir)
+            if is_platform_maintenance(platform_state):
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "status": "maintenance",
+                        "message": maintenance_status_message(platform_state),
+                        "platform": platform_state,
+                    },
+                )
+                return
+
             base_url = normalize_member_base_url(m.get("base_url"))
             username = str(m.get("username") or "").strip()
             password = str(m.get("password") or "").strip()
@@ -7219,6 +7944,19 @@ class Handler(SimpleHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "message": "缺少 id"})
                 return
 
+            platform_state = read_platform_state(self._data_dir)
+            if is_platform_maintenance(platform_state):
+                self._send_json(
+                    409,
+                    {
+                        "ok": False,
+                        "status": "maintenance",
+                        "message": maintenance_status_message(platform_state),
+                        "platform": platform_state,
+                    },
+                )
+                return
+
             core_ok, core_started, core_err = self._ensure_core_running()
             if not core_ok:
                 self._send_json(500, {"ok": False, "message": core_err})
@@ -7312,8 +8050,8 @@ class Handler(SimpleHTTPRequestHandler):
             bt = str(cfg.get("telegram_bot_token") or "").strip()
             cid = str(cfg.get("telegram_chat_id") or "").strip()
             allow_chat2 = str(cfg.get("telegram_allow_chat") or "").strip()
-            sbt = str(cfg.get("telegram_status_bot_token") or "").strip()
-            scid = str(cfg.get("telegram_status_chat_id") or "").strip()
+            backend_token = str(cfg.get("telegram_backend_order_bot_token") or "").strip()
+            backend_chat_id = str(cfg.get("telegram_backend_order_chat_id") or "").strip()
             self._send_json(
                 200,
                 {
@@ -7323,11 +8061,12 @@ class Handler(SimpleHTTPRequestHandler):
                     "chat_id": cid,
                     "allow_chat": allow_chat2,
                     "proxy": str(cfg.get("telegram_proxy") or "").strip(),
-                    "status_push_enabled": bool(cfg.get("telegram_status_push_enabled") or False),
-                    "status_configured": bool(sbt and scid),
-                    "status_token_mask": mask_secret(sbt, keep=4) if sbt else "",
-                    "status_chat_id": scid,
-                    "status_proxy": str(cfg.get("telegram_status_proxy") or "").strip(),
+                    "order_forward_enabled": bool(cfg.get("telegram_order_forward_enabled", True)),
+                    "backend_order_push_enabled": bool(cfg.get("telegram_backend_order_push_enabled") or False),
+                    "backend_order_configured": bool(backend_token and backend_chat_id),
+                    "backend_order_token_mask": mask_secret(backend_token, keep=4) if backend_token else "",
+                    "backend_order_chat_id": backend_chat_id,
+                    "backend_order_proxy": str(cfg.get("telegram_backend_order_proxy") or "").strip(),
                 },
             )
             return
@@ -7388,15 +8127,16 @@ class Handler(SimpleHTTPRequestHandler):
             )
             return
 
-        if u.path == "/api/telegram-status-test":
+        if u.path == "/api/telegram-backend-order-test":
             cfg = self._read_config()
-            # 允许测试时使用前端“当前输入值”（未保存也能测试），否则回退到 config.json
-            bot_token = str(data.get("bot_token") or cfg.get("telegram_status_bot_token") or "").strip()
-            chat_id = str(data.get("chat_id") or cfg.get("telegram_status_chat_id") or "").strip()
-            proxy = str(data.get("proxy") or cfg.get("telegram_status_proxy") or cfg.get("telegram_proxy") or "").strip()
-            msg = str(data.get("message") or "测试消息：TG 状态推送正常").strip()
+            bot_token = str(data.get("bot_token") or cfg.get("telegram_backend_order_bot_token") or "").strip()
+            chat_id = str(data.get("chat_id") or cfg.get("telegram_backend_order_chat_id") or "").strip()
+            proxy = str(data.get("proxy") or cfg.get("telegram_backend_order_proxy") or "").strip()
+            msg = str(data.get("message") or "").strip()
+            if not msg:
+                msg = format_backend_order_telegram_test_message(cfg)
             if not (bot_token and chat_id):
-                self._send_json(400, {"ok": False, "message": "请先配置：状态 Bot Token + 状态 Chat ID/频道"})
+                self._send_json(400, {"ok": False, "message": "请先配置后台订单 Bot Token 和群 Chat ID"})
                 return
             res = tg_send_message(bot_token=bot_token, chat_id=chat_id, text=msg, proxy=proxy, timeout_s=15)
             if not res.get("ok"):
@@ -7572,7 +8312,8 @@ def main() -> int:
             "mode": "fixed",
             "fixed_amount": 50,
             "ratio_percent": 100,
-            "max_amount": 0,
+            "match_limit_amount": 0,
+            "market_limit_amount": 0,
             "split_count": 1,
             "split_delay_seconds": 0,
             "targets": [],
@@ -7580,6 +8321,14 @@ def main() -> int:
             "updated_at": "",
         },
     )
+
+    # 服务重启后自动恢复已保存的平博只读监听。没有账号时不启动空 worker。
+    saved_cfg = read_json_file(config_path, {})
+    if isinstance(saved_cfg, dict) and any(
+        isinstance(item, dict) and bool(item.get("enabled", True))
+        for item in (saved_cfg.get("ps3838_accounts") or [])
+    ):
+        ensure_ps3838_watch_running(config_path, data_dir)
 
     def handler_factory(*h_args, **h_kwargs):
         return Handler(

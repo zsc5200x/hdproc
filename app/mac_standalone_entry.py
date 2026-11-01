@@ -22,7 +22,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from typing import List, Optional, Tuple
 from urllib import error, request
 
-DEFAULT_APP_NAME = "AG Matrix Standalone"
+DEFAULT_APP_NAME = "HD跟单系统v1.0"
 DEFAULT_PORT = 9999
 WORKER_MODULES = {
     "ag_wmc_watch": "ag_wmc_watch",
@@ -32,6 +32,7 @@ WORKER_MODULES = {
     "member_arsenal_watch": "member_arsenal_watch",
     "odds_snapshot_watch": "odds_snapshot_watch",
     "settlement_importer": "settlement_importer",
+    "network_telemetry_sampler": "tools.hd_network_telemetry_sampler",
     "follow_engine": "follow_engine",
     "telegram_bot": "telegram_bot",
     "telegram_signal_watch": "telegram_signal_watch",

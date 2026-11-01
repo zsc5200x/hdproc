@@ -28,6 +28,13 @@
         limit: 200,
         interval_seconds: 1,
       },
+      ps3838: {
+        base_url: 'https://www.ps38ag.com',
+        username: '',
+        password: '',
+        interval_seconds: 15,
+        telegram_chat_id: '',
+      },
     };
   }
 
@@ -80,6 +87,20 @@
 
   function buildAddNodeSubmitRequest(form) {
     const current = form || {};
+    if (current.mode === 'ps3838') {
+      const ps = current.ps3838 || {};
+      const payload = {
+        base_url: toTrimmedString(ps.base_url) || 'https://www.ps38ag.com',
+        username: toTrimmedString(ps.username),
+        password: String(ps.password || ''),
+        interval_seconds: Number(ps.interval_seconds || 15),
+        telegram_chat_id: toTrimmedString(ps.telegram_chat_id),
+      };
+      if (!payload.username || !payload.password) {
+        throw new Error('请填写：平博账号 / 登录密码');
+      }
+      return { endpoint: '/api/ps3838/add', payload };
+    }
     const mode = current.mode === 'signal' ? 'signal' : 'account';
     if (mode === 'signal') {
       return {

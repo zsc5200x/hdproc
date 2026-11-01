@@ -1,5 +1,6 @@
 import atexit
 import argparse
+import hashlib
 import html
 import json
 import math
@@ -10,6 +11,7 @@ import re
 import signal
 import threading
 import time
+import tempfile
 import warnings
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -23,6 +25,11 @@ warnings.filterwarnings("ignore", message=r"urllib3 v2 only supports OpenSSL.*")
 import requests
 
 from hdzz.common.config import JsonFileCache
+from hdzz.common.platform_maintenance import (
+    PLATFORM_MAINTENANCE_CODE,
+    maintenance_status_message,
+    read_platform_state,
+)
 from member_arsenal_watch import (
     atomic_write_json,
     ensure_member_defaults,
@@ -51,9 +58,12 @@ from .snapshot_direct import (
     SNAPSHOT_INVALID,
     SNAPSHOT_MISSING,
     SNAPSHOT_STALE,
+    SOURCE_ORDER_DIRECT,
+    SOURCE_ORDER_READY,
     TARGET_LINE_MISSING,
     SnapshotValidator,
     SNAPSHOT_VALID,
+    build_source_order_submit_template,
     build_submit_template,
     intent_market_fields,
     line_matches,
@@ -73,6 +83,10 @@ from .executor import (
     member_post_session,
     member_warmup_menu,
     member_warmup_sport_menu,
+)
+from hdzz.core.member.session_state import (
+    session_fingerprint as member_session_fingerprint,
+    session_ready_state,
 )
 from .game_more_resolver import (
     match_handicap_from_game_more_parsed,
@@ -131,6 +145,7 @@ def now_cn() -> str:
 
 _TG_FAIL_LAST: Dict[str, float] = {}
 _ENGINE_LOCK_FH = None
+_ENGINE_GLOBAL_LOCK_FH = None
 _MEMBER_COOLDOWN_UNTIL: Dict[str, float] = {}
 _MARKET_RETRY_ERRORS = frozenset({
     "1X001",
@@ -149,6 +164,7 @@ _MARKET_RETRY_ERRORS = frozenset({
 STAKE_EXCEEDS_MAX_ERR = "STAKE_EXCEEDS_MAX"
 _TG_ORDER_CB_PREFIX = "odr"
 _JSON_FILE_CACHE = JsonFileCache()
+NETWORK_COOLDOWN_SECONDS = 30
 _TG_ORDER_BUTTON_SPECS: Dict[str, Dict[str, str]] = {
     "res": {"text": "跟单结果", "style": "primary"},
     "log": {"text": "跟单日志", "style": "primary"},
@@ -336,16 +352,8 @@ def _attach_order_preview_image(html_text: str, image_url: str) -> str:
 
 
 def _cooldown_member(member_id: str, seconds: float) -> None:
-    mid = str(member_id or "").strip()
-    if not mid:
-        return
-    try:
-        sec = float(seconds or 0.0)
-    except Exception:
-        sec = 0.0
-    if sec <= 0:
-        return
-    _MEMBER_COOLDOWN_UNTIL[mid] = float(now_ts()) + float(sec)
+    # 会员冷却已停用，保留调用点兼容历史状态恢复。
+    return
 
 
 def _is_member_in_cooldown(member_id: str) -> bool:
@@ -599,20 +607,12 @@ def acquire_single_instance_lock(lock_path: Path) -> bool:
     防止同一个 data_dir 下同时跑多个 follow_engine：
     - 多实例会导致重复下注、重复写 follow_results、TG 多条播报。
     """
-    global _ENGINE_LOCK_FH
+    global _ENGINE_LOCK_FH, _ENGINE_GLOBAL_LOCK_FH
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fh = lock_path.open("a+", encoding="utf-8")
     except Exception:
         return False
-
-    try:
-        fh.seek(0)
-        fh.truncate(0)
-        fh.write(f"pid={os.getpid()}\nstarted_at={now_iso()}\n")
-        fh.flush()
-    except Exception:
-        pass
 
     try:
         if os.name == "nt":
@@ -640,7 +640,48 @@ def acquire_single_instance_lock(lock_path: Path) -> bool:
             pass
         return False
 
+    # A data-dir lock prevents duplicates within one runtime directory.  A
+    # second per-user lock prevents an old source-tree launcher and a Tauri
+    # runtime (which use different data directories) from both executing the
+    # same follow engine at once.
+    global_path = Path(tempfile.gettempdir()) / f"hdzz-follow-engine-{getattr(os, 'getuid', lambda: 0)()}.lock"
+    try:
+        global_fh = global_path.open("a+")
+        if os.name == "nt":
+            import msvcrt  # type: ignore
+
+            global_fh.seek(0)
+            if not global_fh.read(1):
+                global_fh.seek(0)
+                global_fh.write("0")
+                global_fh.flush()
+            global_fh.seek(0)
+            msvcrt.locking(global_fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl  # type: ignore
+
+            fcntl.flock(global_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        try:
+            global_fh.close()  # type: ignore[union-attr]
+        except Exception:
+            pass
+        try:
+            fh.close()
+        except Exception:
+            pass
+        return False
+
+    try:
+        fh.seek(0)
+        fh.truncate(0)
+        fh.write(f"pid={os.getpid()}\nstarted_at={now_iso()}\n")
+        fh.flush()
+    except Exception:
+        pass
+
     _ENGINE_LOCK_FH = fh
+    _ENGINE_GLOBAL_LOCK_FH = global_fh
     return True
 
 
@@ -3736,7 +3777,6 @@ def compute_follow_stake(order: Dict[str, Any], settings: Dict[str, Any]) -> flo
     mode = str(settings.get("mode") or "fixed")
     fixed_amount = float(settings.get("fixed_amount") or 0)
     ratio_percent = float(settings.get("ratio_percent") or 0)
-    max_amount = float(settings.get("max_amount") or 0)
     source_name = resolve_order_source_name(order)
     target_ratio_override = target_ratio_percent_override(settings, source_name)
     if target_ratio_override is not None:
@@ -3754,8 +3794,6 @@ def compute_follow_stake(order: Dict[str, Any], settings: Dict[str, Any]) -> flo
     else:
         stake = fixed_amount
 
-    if max_amount and stake > max_amount:
-        stake = max_amount
     if stake < 0:
         stake = 0.0
     # 下注金额必须为整数：有小数就向上取整（多买 1 块），避免 2499.75 这类无法下注。
@@ -3871,6 +3909,358 @@ def classify_order_market(order: Dict[str, Any]) -> Tuple[str, str]:
     return ("other", "其他")
 
 
+LIMIT_MARKET_LABELS: Dict[str, str] = {
+    "handicap": "让球",
+    "total_over": "大球",
+    "total_under": "小球",
+    "moneyline": "独赢",
+    "other": "其他",
+}
+
+
+def _limit_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _limit_token(value: Any) -> str:
+    return re.sub(r"\s+", "", _limit_text(value)).lower()
+
+
+def _canonical_match_key(gtype: Any, gid: Any) -> str:
+    gid_text = _limit_text(gid)
+    if not gid_text:
+        return ""
+    return f"{_limit_text(gtype).upper() or 'UNKNOWN'}:{gid_text}"
+
+
+def classify_effective_limit_market(order: Dict[str, Any], settings: Dict[str, Any]) -> Tuple[str, str]:
+    """Return the market bucket actually submitted after reverse rules."""
+    market_code, market_label = classify_order_market(order)
+    rules = normalize_reverse_rules(settings)
+    reverse_total = bool(rules.get("all") or rules.get("total"))
+    if reverse_total and market_code == "total_over":
+        return ("total_under", LIMIT_MARKET_LABELS["total_under"])
+    if reverse_total and market_code == "total_under":
+        return ("total_over", LIMIT_MARKET_LABELS["total_over"])
+    return (market_code, market_label)
+
+
+def follow_limit_identity(order: Dict[str, Any], settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Build stable match and market keys for cumulative amount limits."""
+    payload = order if isinstance(order, dict) else {}
+    raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+    gtype = _limit_text(raw.get("GTYPE") or payload.get("gtype") or payload.get("sport"))
+    gid = _limit_text(payload.get("gid") or raw.get("_EVENT") or raw.get("GID"))
+    match_key = _canonical_match_key(gtype, gid)
+
+    if not match_key:
+        home_no = _limit_token(raw.get("NUM_H") or raw.get("GNUM_H") or payload.get("home_number"))
+        away_no = _limit_token(raw.get("NUM_C") or raw.get("GNUM_C") or payload.get("away_number"))
+        if home_no and away_no:
+            match_key = f"{gtype.upper() or 'UNKNOWN'}:NUM:{home_no}:{away_no}"
+
+    match_label = _limit_text(payload.get("sides"))
+    if not match_label:
+        home = _limit_text(raw.get("TEAM_H") or payload.get("home"))
+        away = _limit_text(raw.get("TEAM_C") or payload.get("away"))
+        match_label = f"{home} v {away}".strip(" v")
+    if not match_key:
+        league = _limit_token(payload.get("league") or raw.get("LEAGUE"))
+        home = _limit_token(raw.get("TEAM_H") or payload.get("home"))
+        away = _limit_token(raw.get("TEAM_C") or payload.get("away"))
+        date = _limit_token(payload.get("date") or raw.get("DATE"))
+        if home and away:
+            raw_key = "|".join((gtype.upper() or "UNKNOWN", date, league, home, away))
+            match_key = f"FALLBACK:{hashlib.sha256(raw_key.encode('utf-8')).hexdigest()[:24]}"
+
+    market_code, market_label = classify_effective_limit_market(payload, settings or {})
+    market_key = f"{match_key}|{market_code}" if match_key else ""
+    return {
+        "match_key": match_key,
+        "match_label": match_label or gid or match_key,
+        "market_key": market_key,
+        "market_code": market_code,
+        "market_label": market_label or LIMIT_MARKET_LABELS.get(market_code, market_code),
+    }
+
+
+def _market_identity_from_intent(intent: Dict[str, Any]) -> Tuple[str, str]:
+    market_type = _limit_text(intent.get("market_type")).upper()
+    side = _limit_text(intent.get("side")).upper()
+    if market_type == "TOTAL":
+        code = "total_under" if side == "UNDER" else "total_over"
+    elif market_type == "HANDICAP":
+        code = "handicap"
+    elif market_type == "MONEYLINE":
+        code = "moneyline"
+    else:
+        code = "other"
+    return code, LIMIT_MARKET_LABELS.get(code, code)
+
+
+def follow_limit_identity_from_result(result: Dict[str, Any]) -> Dict[str, str]:
+    """Recover limit keys from new metadata or historical Snapshot results."""
+    payload = result if isinstance(result, dict) else {}
+    explicit_match = _limit_text(payload.get("limit_match_key"))
+    explicit_market = _limit_text(payload.get("limit_market_key"))
+    if explicit_match and explicit_market:
+        return {
+            "match_key": explicit_match,
+            "match_label": _limit_text(payload.get("limit_match_label")) or explicit_match,
+            "market_key": explicit_market,
+            "market_code": _limit_text(payload.get("limit_market_code")) or explicit_market.rsplit("|", 1)[-1],
+            "market_label": _limit_text(payload.get("limit_market_label")) or explicit_market,
+        }
+
+    intent = payload.get("snapshot_direct_intent")
+    if not isinstance(intent, dict):
+        intent = payload.get("snapshot_direct_source_intent")
+    if not isinstance(intent, dict):
+        intent = {}
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    gid = _limit_text(intent.get("gid") or params.get("gid") or payload.get("market_row_gid"))
+    gtype = _limit_text(intent.get("gtype") or params.get("gtype"))
+    match_key = _canonical_match_key(gtype, gid)
+    market_code, market_label = _market_identity_from_intent(intent)
+    return {
+        "match_key": match_key,
+        "match_label": gid or match_key,
+        "market_key": f"{match_key}|{market_code}" if match_key else "",
+        "market_code": market_code,
+        "market_label": market_label,
+    }
+
+
+def load_follow_limit_usage(results_path: Path) -> Tuple[Dict[str, float], Dict[str, float], set[str]]:
+    """Restore successful exposure totals; ticket ids make the scan idempotent."""
+    match_usage: Dict[str, float] = {}
+    market_usage: Dict[str, float] = {}
+    success_keys: set[str] = set()
+    try:
+        handle = Path(results_path).open("r", encoding="utf-8-sig")
+    except OSError:
+        return match_usage, market_usage, success_keys
+    with handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(item, dict) or item.get("ok") is not True:
+                continue
+            identity = follow_limit_identity_from_result(item)
+            match_key = identity.get("match_key") or ""
+            market_key = identity.get("market_key") or ""
+            if not match_key or not market_key:
+                continue
+            ticket_id = _limit_text(item.get("ticket_id"))
+            success_key = (
+                f"ticket:{ticket_id}"
+                if ticket_id
+                else "result:"
+                + "|".join(
+                    (
+                        _limit_text(item.get("target")),
+                        _limit_text(item.get("orderId") or item.get("order_id")),
+                        _limit_text(item.get("split_index")),
+                        _limit_text(item.get("ts_ms") or item.get("ts")),
+                    )
+                )
+            )
+            if success_key in success_keys:
+                continue
+            amount = _safe_float(item.get("stake"), 0.0)
+            if amount <= 0:
+                continue
+            success_keys.add(success_key)
+            match_usage[match_key] = match_usage.get(match_key, 0.0) + amount
+            market_usage[market_key] = market_usage.get(market_key, 0.0) + amount
+    return match_usage, market_usage, success_keys
+
+
+def job_remaining_limit_reservation(job: RetryJob) -> float:
+    parts = [max(0.0, _safe_float(value, 0.0)) for value in (job.split_stakes or [])]
+    index = max(0, int(job.split_index or 0))
+    if parts:
+        if bool(job.independent_split):
+            return parts[index] if index < len(parts) else 0.0
+        return float(sum(parts[index:]))
+    return max(0.0, _safe_float(job.stake, 0.0))
+
+
+def collect_active_limit_reservations(
+    jobs: Dict[str, RetryJob],
+    *,
+    settings: Optional[Dict[str, Any]] = None,
+    exclude_parent_key: str = "",
+) -> Tuple[Dict[str, float], Dict[str, float]]:
+    match_reserved: Dict[str, float] = {}
+    market_reserved: Dict[str, float] = {}
+    excluded = _limit_text(exclude_parent_key)
+    for job in (jobs or {}).values():
+        if not isinstance(job, RetryJob):
+            continue
+        parent_key = _limit_text(job.parent_key or job.key)
+        if excluded and parent_key == excluded:
+            continue
+        identity = follow_limit_identity(job.order, settings or {})
+        stored = job.order.get("_follow_limit") if isinstance(job.order.get("_follow_limit"), dict) else {}
+        match_key = _limit_text(stored.get("match_key") or identity.get("match_key"))
+        market_key = _limit_text(stored.get("market_key") or identity.get("market_key"))
+        amount = job_remaining_limit_reservation(job)
+        if amount <= 0 or not match_key or not market_key:
+            continue
+        match_reserved[match_key] = match_reserved.get(match_key, 0.0) + amount
+        market_reserved[market_key] = market_reserved.get(market_key, 0.0) + amount
+    return match_reserved, market_reserved
+
+
+def apply_follow_amount_limits(
+    *,
+    order: Dict[str, Any],
+    settings: Dict[str, Any],
+    requested_stake: float,
+    match_committed: Dict[str, float],
+    market_committed: Dict[str, float],
+    match_reserved: Dict[str, float],
+    market_reserved: Dict[str, float],
+    min_stake: float = 1.0,
+) -> Tuple[float, str, Dict[str, Any]]:
+    """Cap a new order by match and same-match market exposure."""
+    identity = follow_limit_identity(order, settings)
+    requested = float(int(math.ceil(max(0.0, _safe_float(requested_stake, 0.0)))))
+    match_limit = max(0.0, _safe_float(settings.get("match_limit_amount"), 0.0))
+    market_limit = max(0.0, _safe_float(settings.get("market_limit_amount"), 0.0))
+    match_key = identity.get("match_key") or ""
+    market_key = identity.get("market_key") or ""
+    meta: Dict[str, Any] = {
+        **identity,
+        "requested_stake": requested,
+        "match_limit_amount": match_limit,
+        "market_limit_amount": market_limit,
+        "match_committed_amount": _safe_float(match_committed.get(match_key), 0.0),
+        "market_committed_amount": _safe_float(market_committed.get(market_key), 0.0),
+        "match_reserved_amount": _safe_float(match_reserved.get(match_key), 0.0),
+        "market_reserved_amount": _safe_float(market_reserved.get(market_key), 0.0),
+    }
+    if requested <= 0:
+        meta["allowed_stake"] = 0.0
+        return 0.0, "跟单金额为 0。", meta
+    if (match_limit > 0 or market_limit > 0) and not match_key:
+        meta["allowed_stake"] = 0.0
+        return 0.0, "无法识别比赛，已按累计限额保护跳过。", meta
+
+    allowed = requested
+    reached: List[str] = []
+    if match_limit > 0:
+        match_remaining = match_limit - meta["match_committed_amount"] - meta["match_reserved_amount"]
+        meta["match_remaining_amount"] = max(0.0, match_remaining)
+        allowed = min(allowed, max(0.0, match_remaining))
+        if match_remaining <= 0:
+            reached.append("单场限额")
+    if market_limit > 0:
+        market_remaining = market_limit - meta["market_committed_amount"] - meta["market_reserved_amount"]
+        meta["market_remaining_amount"] = max(0.0, market_remaining)
+        allowed = min(allowed, max(0.0, market_remaining))
+        if market_remaining <= 0:
+            reached.append(f"{identity.get('market_label') or '盘口'}限额")
+
+    allowed_int = float(max(0, int(math.floor(allowed + 1e-9))))
+    minimum = max(1.0, float(math.ceil(max(0.0, _safe_float(min_stake, 1.0)))))
+    if allowed_int < minimum:
+        meta["allowed_stake"] = 0.0
+        reason = "、".join(reached) or "累计限额剩余额度"
+        return 0.0, f"已按{reason}跳过：剩余额度不足最小下注金额 {minimum:g} 元。", meta
+    meta["allowed_stake"] = allowed_int
+    meta["limited"] = allowed_int < requested
+    return allowed_int, "", meta
+
+
+def store_follow_limit_metadata(order: Dict[str, Any], meta: Dict[str, Any]) -> None:
+    if not isinstance(order, dict) or not isinstance(meta, dict):
+        return
+    order["_follow_limit"] = {
+        key: meta.get(key)
+        for key in (
+            "match_key",
+            "match_label",
+            "market_key",
+            "market_code",
+            "market_label",
+            "requested_stake",
+            "allowed_stake",
+            "match_limit_amount",
+            "market_limit_amount",
+            "match_committed_amount",
+            "market_committed_amount",
+            "match_reserved_amount",
+            "market_reserved_amount",
+            "limited",
+        )
+    }
+
+
+def attach_follow_limit_metadata(result: Dict[str, Any], order: Dict[str, Any], settings: Dict[str, Any]) -> None:
+    if not isinstance(result, dict):
+        return
+    stored = order.get("_follow_limit") if isinstance(order.get("_follow_limit"), dict) else {}
+    identity = follow_limit_identity(order, settings)
+    combined = dict(identity)
+    combined.update(stored)
+    for source, target in (
+        ("match_key", "limit_match_key"),
+        ("match_label", "limit_match_label"),
+        ("market_key", "limit_market_key"),
+        ("market_code", "limit_market_code"),
+        ("market_label", "limit_market_label"),
+        ("requested_stake", "limit_requested_stake"),
+        ("allowed_stake", "limit_allowed_stake"),
+        ("match_limit_amount", "limit_match_amount"),
+        ("market_limit_amount", "limit_market_amount"),
+    ):
+        if combined.get(source) not in (None, ""):
+            result[target] = combined.get(source)
+
+
+def record_follow_limit_success(
+    result: Dict[str, Any],
+    *,
+    match_committed: Dict[str, float],
+    market_committed: Dict[str, float],
+    success_keys: set[str],
+) -> bool:
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return False
+    identity = follow_limit_identity_from_result(result)
+    match_key = identity.get("match_key") or ""
+    market_key = identity.get("market_key") or ""
+    if not match_key or not market_key:
+        return False
+    ticket_id = _limit_text(result.get("ticket_id"))
+    success_key = (
+        f"ticket:{ticket_id}"
+        if ticket_id
+        else "result:"
+        + "|".join(
+            (
+                _limit_text(result.get("target")),
+                _limit_text(result.get("orderId") or result.get("order_id")),
+                _limit_text(result.get("split_index")),
+                _limit_text(result.get("ts_ms") or result.get("ts")),
+            )
+        )
+    )
+    if success_key in success_keys:
+        return False
+    amount = _safe_float(result.get("stake"), 0.0)
+    if amount <= 0:
+        return False
+    success_keys.add(success_key)
+    match_committed[match_key] = match_committed.get(match_key, 0.0) + amount
+    market_committed[market_key] = market_committed.get(market_key, 0.0) + amount
+    return True
+
+
 def apply_market_rule_to_stake(
     *,
     order: Dict[str, Any],
@@ -3927,7 +4317,8 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             "mode": "fixed",
             "fixed_amount": 50,
             "ratio_percent": 100,
-            "max_amount": 0,
+            "match_limit_amount": 0,
+            "market_limit_amount": 0,
             # 防止重启/重登时把历史订单当新单：只“监听启动后”的订单
             # - 若订单含 bet_ts（下注时间戳），且 bet_ts < (引擎启动时间 - grace) 则直接忽略该订单
             "ignore_history_on_start": True,
@@ -3954,7 +4345,7 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             "retry_max_seconds": 0,
             # role=quote 的会员是否允许参与真实下注（默认 false：只用于查水/行情）
             "allow_quote_members": False,
-            # Snapshot Direct 是唯一真实执行路径；该字段只用于状态展示和日志自检。
+            # Snapshot Direct 是唯一生产执行路径。
             "execution_mode": "snapshot_direct",
             "snapshot_direct_enabled": True,
             "snapshot_max_age_ms": 500,
@@ -3963,9 +4354,9 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             # the final submit-time structure/quote confirmation.
             "snapshot_preferred_age_ms": 500,
             "snapshot_structure_max_age_ms": 3000,
-            # 默认关闭。诊断 A/B 时显式设为 diagnostic_order_view，
-            # 只在同一个 fresh Session 中增加一次 FT_order_view。
-            "bet_context_mode": "disabled",
+            # 在同一个 fresh Session 中先执行 FT_order_view，
+            # 取得提交时平台认可的盘口结构/ioratio，再继续 FT_bet。
+            "bet_context_mode": "diagnostic_order_view",
             # UNKNOWN_RESULT 的核验窗口。窗口结束后只允许进入
             # CONFIRMED_FAILED 或 STILL_UNKNOWN，绝不降级成普通失败换会员重下。
             "unknown_result_reconcile_max_seconds": 120,
@@ -4020,16 +4411,14 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             doc.setdefault(k, v)
     else:
         doc = dict(defaults)
+    doc.pop("max_amount", None)
     # 硬隔离：quote/read 号永远不参与真实下注
     doc["allow_quote_members"] = False
-    # Snapshot Direct 是唯一生产执行模式。
+    # 当前生产执行模式：Snapshot 精确盘口 + 同会话 FT_order_view。
     doc["execution_mode"] = "snapshot_direct"
     doc["snapshot_direct_enabled"] = True
-    if str(doc.get("bet_context_mode") or "disabled").strip().lower() not in {
-        "disabled",
-        "diagnostic_order_view",
-    }:
-        doc["bet_context_mode"] = "disabled"
+    # 不允许旧配置/旧客户端把已验证的生产链路降级为直接提交源水位。
+    doc["bet_context_mode"] = "diagnostic_order_view"
     for retired_key in (
         "snapshot_missing_policy",
         "snapshot_only_for_market",
@@ -4088,6 +4477,8 @@ def extract_err_from_result(result: Dict[str, Any]) -> str:
         MEMBER_IORATIO_MISSING,
         MEMBER_IORATIO_STALE,
         MEMBER_IORATIO_INVALID,
+        BET_CONTEXT_MISMATCH,
+        MARKET_CHANGED_DURING_CONTEXT,
         MARKET_SUBMIT_REJECTED,
         CONTEXT_RETRYABLE,
         UNKNOWN_RESULT,
@@ -4359,6 +4750,8 @@ def is_retryable_follow_result(result: Dict[str, Any]) -> bool:
         MEMBER_IORATIO_MISSING,
         MEMBER_IORATIO_STALE,
         MEMBER_IORATIO_INVALID,
+        BET_CONTEXT_MISMATCH,
+        MARKET_CHANGED_DURING_CONTEXT,
         CONTEXT_RETRYABLE,
     }:
         return True
@@ -4603,12 +4996,28 @@ def _flag_enabled(value: Any, default: bool = True) -> bool:
 
 def load_arsenal(data_dir: Path) -> Dict[str, Any]:
     doc = _JSON_FILE_CACHE.read_dict(data_dir / "arsenal.json", {"members": []})
-    if "request_cooldown_enabled" in doc:
-        enabled = _flag_enabled(doc.get("request_cooldown_enabled"), True)
-        for member in doc.get("members") or []:
-            if isinstance(member, dict):
-                member["request_cooldown_enabled"] = enabled
+    doc["request_cooldown_enabled"] = False
+    for member in doc.get("members") or []:
+        if isinstance(member, dict):
+            member["request_cooldown_enabled"] = False
+            member["request_cooldown_until"] = 0
+            member["network_cooldown_until"] = 0
     return doc
+
+
+def _load_current_members(data_dir: Path) -> List[Dict[str, Any]]:
+    """Load a fresh member snapshot for the final acquire/dispatch gate.
+
+    The scheduler keeps a per-tick snapshot for cheap candidate probing, but
+    cooldown/status patches may be written by another worker between probing
+    and dispatch.  This helper deliberately bypasses that stale in-memory
+    list while retaining the normal member-default normalization.
+    """
+    try:
+        doc = load_arsenal(data_dir)
+        return [ensure_member_defaults(m) for m in (doc.get("members") or []) if isinstance(m, dict)]
+    except Exception:
+        return []
 
 
 def load_mappings(data_dir: Path) -> Dict[str, str]:
@@ -4641,21 +5050,52 @@ def member_balance(member: Dict[str, Any]) -> float:
 
 
 def _member_has_transient_network_issue(member: Dict[str, Any], *, now_s: Optional[float] = None) -> bool:
-    # request_cooldown_enabled=false 表示用户明确要求不做会员请求冷却。
-    # 仍保留 last_error 记录，但不要因此把会员从稳定执行池中排除。
-    if isinstance(member, dict) and not _flag_enabled(member.get("request_cooldown_enabled"), True):
-        return False
-    now_eff = float(now_s if now_s is not None else now_ts())
-    err = str((member or {}).get("last_error") or "").strip().lower()
-    if "network_transient:" in err or "keepalive_transient:" in err:
-        return True
-    if "request_failed:" in err and ("connection aborted" in err or "bad gateway" in err or "remote end closed" in err):
-        return True
+    # 502/超时只记录诊断，不阻止会员再次被选中。
+    return False
+
+
+def _network_error_class(result: Dict[str, Any]) -> str:
+    """Classify post-submit transport failures without changing result semantics."""
+
+    response = result.get("ft_bet_response_fingerprint") if isinstance(result.get("ft_bet_response_fingerprint"), dict) else {}
+    status = _safe_int(response.get("status") or result.get("http_status"), 0)
+    error_code = str(result.get("error_code") or "").strip().lower()
+    message = str(result.get("error_message") or result.get("message") or "").strip().lower()
+    if status == 502 or "bad gateway" in message:
+        return "UPSTREAM_502"
+    if "readtimeout" in error_code or "read timed out" in message:
+        return "READ_TIMEOUT"
+    if "ssl" in error_code or "ssl eof" in message:
+        return "SSL_EOF"
+    if any(token in error_code for token in ("connectionerror", "proxyerror", "connecttimeout", "chunkedencoding")):
+        return error_code.upper()
+    return ""
+
+
+def _mark_member_network_cooldown(*, data_dir: Path, member_id: str, error_class: str) -> None:
+    """Cool a member's route after an ambiguous transport result.
+
+    This never changes status/session fields and never schedules another FT_bet
+    for the current UNKNOWN_RESULT job. It only keeps unrelated new jobs from
+    immediately selecting the same unhealthy route.
+    """
+
+    if not member_id or not error_class:
+        return
     try:
-        cooldown_until = float((member or {}).get("request_cooldown_until") or 0.0)
+        patch_member(
+            data_dir / "arsenal.json",
+            member_id,
+            {
+                "network_health": "degraded",
+                "network_last_error": error_class,
+                "network_cooldown_until": 0,
+                "request_cooldown_until": 0,
+                "request_cooldown_enabled": False,
+            },
+        )
     except Exception:
-        cooldown_until = 0.0
-    return cooldown_until > now_eff
+        return
 
 
 def _member_has_login_seed(member: Dict[str, Any]) -> bool:
@@ -4692,12 +5132,14 @@ def _member_eligible_for_stake(
         return False
     if str((member or {}).get("status") or "").strip().lower() != "online":
         return False
-    if _member_has_transient_network_issue(member):
-        return False
+    # 网络抖动不再触发会员冷却；真正的可用性由在线状态和会话完整性决定。
     if not all(
         str((member or {}).get(key) or "").strip()
         for key in ("base_url", "ver", "uid", "cookie")
     ):
+        return False
+    session_ready, _session_reason = session_ready_state(member)
+    if not session_ready:
         return False
     if member_balance(member) + 1e-9 < float(stake or 0.0):
         return False
@@ -4860,6 +5302,47 @@ def ensure_member_session(
     return member
 
 
+def _final_session_gate(
+    *,
+    data_dir: Path,
+    member: Dict[str, Any],
+    selected_generation: int,
+    selected_fingerprint: str,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Reject a stale BetContext when the member session changed meanwhile."""
+
+    member_id = str(member.get("id") or "").strip()
+    current_doc = load_arsenal(data_dir)
+    current = next(
+        (
+            item
+            for item in (current_doc.get("members") or [])
+            if isinstance(item, dict) and str(item.get("id") or "").strip() == member_id
+        ),
+        None,
+    )
+    if not isinstance(current, dict):
+        return False, "SESSION_MEMBER_MISSING", {}
+    ready, reason = session_ready_state(current)
+    if not ready:
+        return False, str(reason or "SESSION_NOT_READY"), current
+
+    current_generation = _safe_int(current.get("session_generation"), 0)
+    if selected_generation > 0 and current_generation > 0 and current_generation != selected_generation:
+        return False, "SESSION_CHANGED_BEFORE_SUBMIT", current
+
+    current_fingerprint = member_session_fingerprint(current)
+    if selected_fingerprint and current_fingerprint and current_fingerprint != selected_fingerprint:
+        return False, "SESSION_CHANGED_BEFORE_SUBMIT", current
+
+    # Compare the individual identity fields as a final guard for legacy rows
+    # that predate session_fingerprint/session_generation persistence.
+    for key in ("base_url", "uid", "ver", "cookie"):
+        if str(current.get(key) or "").strip() != str(member.get(key) or "").strip():
+            return False, "SESSION_CHANGED_BEFORE_SUBMIT", current
+    return True, "SESSION_READY", current
+
+
 def append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(obj, ensure_ascii=False)
@@ -4970,6 +5453,7 @@ def _reconcile_only_result(
     if deadline <= 0.0:
         started = _safe_float(order.get("_unknown_result_started_at"), now)
         deadline = started + max_seconds
+    execution_mode = str(settings.get("execution_mode") or "snapshot_direct").strip().lower()
 
     base: Dict[str, Any] = {
         "ts": int(now),
@@ -4987,8 +5471,8 @@ def _reconcile_only_result(
         "unknown_result_check_count": checks,
         "unknown_result_deadline_at": deadline,
         "execution_error_class": UNKNOWN_RESULT,
-        "execution_mode": "snapshot_direct",
-        "execution_path": "snapshot_direct",
+        "execution_mode": execution_mode,
+        "execution_path": execution_mode,
         "real_submission": "reconcile_only",
         "result_status": UNKNOWN_RESULT,
     }
@@ -5152,6 +5636,8 @@ def _snapshot_status_message(status: str, message: str = "") -> str:
         MEMBER_IORATIO_MISSING: "执行会员的最新水位尚未同步，正在等待盘口厨房更新。",
         MEMBER_IORATIO_STALE: "执行会员的水位已过期，正在等待盘口厨房更新。",
         MEMBER_IORATIO_INVALID: "执行会员水位与目标盘口行不一致，禁止提交。",
+        BET_CONTEXT_MISMATCH: "FT_order_view 确认盘口已变化，正在等待目标盘口更新。",
+        MARKET_CHANGED_DURING_CONTEXT: "FT_order_view 返回期间盘口已变化，正在等待最新盘口。",
         CONTEXT_RETRYABLE: "FT_order_view 传输失败，正在快速更换会员重试。",
     }
     base = messages.get(str(status or "").strip(), "盘口快照暂不可用，正在重试。")
@@ -5277,12 +5763,32 @@ def _snapshot_direct_result(
             out["nowcredit"] = response.get("nowcredit")
     if result.request:
         out["ft_bet_request"] = dict(result.request)
+    response_fingerprint = result.session_meta.get("ft_bet_response_fingerprint") if isinstance(result.session_meta, dict) else {}
+    if not isinstance(response_fingerprint, dict):
+        response_fingerprint = {}
     out["ft_bet_raw_response"] = {
         "http_status": result.http_status,
-        "response_body": str(result.raw_response or ""),
+        "response_body_length": int(
+            response_fingerprint.get("body_length")
+            or len(str(result.raw_response or "").encode("utf-8"))
+        ),
+        "response_body_sha256": str(
+            response_fingerprint.get("body_sha256")
+            or hashlib.sha256(str(result.raw_response or "").encode("utf-8")).hexdigest()
+        ),
+        "content_type": str(response_fingerprint.get("content_type") or ""),
+        "server": str(response_fingerprint.get("server") or ""),
+        "via": str(response_fingerprint.get("via") or ""),
+        "ticket_present": bool(result.ticket_id),
         "xml_code": str(result.xml_code or ""),
-        "errormsg": str(result.xml_errormsg or ""),
-        "parsed_fields": response,
+        "errormsg": response_fingerprint.get("xml_errormsg", str(result.xml_errormsg or "")),
+        # Keep only fields used by retry/UI decisions.  The full upstream XML
+        # remains in memory for parsing but is never persisted to JSONL.
+        "parsed_fields": {
+            key: response.get(key)
+            for key in ("code", "errormsg", "msg", "ticket_id", "ticketId")
+            if key in response
+        },
     }
     out["execution_member"] = member_id
     if result.ticket_id:
@@ -5310,6 +5816,9 @@ def _snapshot_attempt_trace_fields(result: Dict[str, Any]) -> Dict[str, Any]:
     direct = result.get("snapshot_direct") if isinstance(result.get("snapshot_direct"), dict) else {}
     template = direct.get("submit_template") if isinstance(direct.get("submit_template"), dict) else {}
     return {
+        "execution_mode": str(result.get("execution_mode") or "snapshot_direct"),
+        "execution_path": str(result.get("execution_path") or result.get("execution_mode") or "snapshot_direct"),
+        "source_order_direct_submission": bool(result.get("source_order_direct_submission")),
         "member_id": str(result.get("member_id") or ""),
         "member_account": str(result.get("member_account") or result.get("member") or ""),
         "snapshot_direct_status": str(result.get("snapshot_direct_status") or direct.get("status") or ""),
@@ -5343,6 +5852,8 @@ def _snapshot_attempt_trace_fields(result: Dict[str, Any]) -> Dict[str, Any]:
         "market_row_fingerprint": str(result.get("market_row_fingerprint") or template.get("market_row_fingerprint") or ""),
         "ft_bet_request": result.get("ft_bet_request") if isinstance(result.get("ft_bet_request"), dict) else {},
         "ft_bet_raw_response": result.get("ft_bet_raw_response") if isinstance(result.get("ft_bet_raw_response"), dict) else {},
+        "ft_bet_request_fingerprint": result.get("ft_bet_request_fingerprint") if isinstance(result.get("ft_bet_request_fingerprint"), dict) else {},
+        "ft_bet_response_fingerprint": result.get("ft_bet_response_fingerprint") if isinstance(result.get("ft_bet_response_fingerprint"), dict) else {},
         "amount": float(result.get("stake") or 0.0),
         "ft_bet_started_at": result.get("ft_bet_started_at") or result.get("submit_started_at"),
         "ft_bet_elapsed_ms": int(result.get("ft_bet_elapsed_ms") or result.get("submit_elapsed_ms") or 0),
@@ -5353,6 +5864,21 @@ def _snapshot_attempt_trace_fields(result: Dict[str, Any]) -> Dict[str, Any]:
         "session_mode": str(result.get("session_mode") or ""),
         "session_created_at": result.get("session_created_at"),
         "session_object_id": str(result.get("session_object_id") or ""),
+        "build_version": str(result.get("build_version") or ""),
+        "git_commit": str(result.get("git_commit") or ""),
+        "build_id": str(result.get("build_id") or ""),
+        "member_id_hash": str(result.get("member_id_hash") or result.get("member_id_sha256") or ""),
+        "uid_hash": str(result.get("uid_hash") or result.get("uid_sha256") or ""),
+        "ver_sha256": str(result.get("ver_sha256") or ""),
+        "cookie_count": int(result.get("cookie_count") or 0),
+        "trust_env": bool(result.get("trust_env")),
+        "proxy_enabled": bool(result.get("proxy_enabled")),
+        "session_generation": int(result.get("session_generation") or 0),
+        "session_ready": bool(result.get("session_ready")),
+        "session_ready_reason": str(result.get("session_ready_reason") or ""),
+        "session_fingerprint": str(result.get("session_fingerprint") or ""),
+        "network_health": str(result.get("network_health") or ""),
+        "network_error_class": str(result.get("network_error_class") or ""),
         "bet_context_mode": str(result.get("bet_context_mode") or ""),
         "bet_context_request": result.get("bet_context_request") if isinstance(result.get("bet_context_request"), dict) else {},
         "bet_context_http_status": result.get("bet_context_http_status"),
@@ -5487,6 +6013,19 @@ def _probe_snapshot_market(
         intent = _snapshot_intent_for_settings(source_intent, order=order, settings=settings)
         if not intent.gid:
             raise ValueError("source order has no gid")
+        execution_mode = str(settings.get("execution_mode") or "snapshot_direct").strip().lower()
+        if execution_mode == SOURCE_ORDER_DIRECT:
+            template = build_source_order_submit_template(intent, execution_member="")
+            return {
+                "ready": True,
+                "status": SOURCE_ORDER_READY,
+                "message": "源订单 FT_bet 协议字段已通过本地校验。",
+                "intent": intent,
+                "revision": 0,
+                "fetched_at": 0.0,
+                "age_ms": 0,
+                "submit_template": template.to_dict(),
+            }
         context_mode = str(settings.get("bet_context_mode") or "disabled").strip().lower()
         service = MarketSnapshotService(Path(data_dir) / "odds_snapshot_cache.json")
         lookup, candidate_max_age_ms = _lookup_snapshot_candidate(
@@ -5547,6 +6086,331 @@ def _probe_snapshot_market(
         }
 
 
+def _source_order_waiting_result(
+    *,
+    status: str,
+    message: str,
+    member: Dict[str, Any],
+    order: Dict[str, Any],
+    stake: float,
+    intent: Optional[MarketIntent] = None,
+) -> Dict[str, Any]:
+    result = _snapshot_waiting_result(
+        status=status,
+        message=message,
+        member=member,
+        order=order,
+        stake=stake,
+        intent=intent,
+    )
+    result.update(
+        {
+            "execution_mode": SOURCE_ORDER_DIRECT,
+            "execution_path": SOURCE_ORDER_DIRECT,
+            "real_submission": "none",
+            "source_order_direct_submission": False,
+        }
+    )
+    direct = result.get("snapshot_direct")
+    if isinstance(direct, dict):
+        direct["execution_mode"] = SOURCE_ORDER_DIRECT
+    return result
+
+
+def _mark_source_order_execution(result: Dict[str, Any]) -> Dict[str, Any]:
+    result.update(
+        {
+            "execution_mode": SOURCE_ORDER_DIRECT,
+            "execution_path": SOURCE_ORDER_DIRECT,
+            "real_submission": SOURCE_ORDER_DIRECT,
+            "source_order_direct_submission": True,
+        }
+    )
+    direct = result.get("snapshot_direct")
+    if isinstance(direct, dict):
+        direct["execution_mode"] = SOURCE_ORDER_DIRECT
+    return result
+
+
+def _place_bet_source_order_direct(
+    *,
+    data_dir: Path,
+    settings: Dict[str, Any],
+    member: Dict[str, Any],
+    order: Dict[str, Any],
+    stake: float,
+    timeout_s: int,
+    debug: bool,
+    session_pool: Optional["MemberSessionPool"] = None,
+) -> Dict[str, Any]:
+    """Submit one validated source order directly without Snapshot/FT_order_view."""
+
+    del debug
+    execution_session = None
+    execution_session_meta: Dict[str, Any] = {}
+    ft_bet_started = False
+    try:
+        selected_session_generation = _safe_int(member.get("session_generation"), 0)
+        selected_session_fingerprint = member_session_fingerprint(member)
+        source_intent = MarketIntent.from_order(order, split_amount=float(stake or 0.0))
+        intent = _snapshot_intent_for_settings(source_intent, order=order, settings=settings)
+        template = build_source_order_submit_template(
+            intent,
+            execution_member=str(member.get("id") or ""),
+        )
+
+        odds_skipped, odds_message, odds_meta = evaluate_follow_odds_limit(
+            settings=settings,
+            ioratio=template.ioratio,
+        )
+        if odds_skipped:
+            result = _snapshot_direct_result(
+                result=ExecutionResult(
+                    "SKIPPED",
+                    str(member.get("id") or ""),
+                    error_code="ODDS_LIMIT",
+                    error_message=odds_message,
+                ),
+                member=member,
+                order=order,
+                stake=stake,
+                template=template,
+                intent=intent,
+                snapshot_status=SOURCE_ORDER_READY,
+            )
+            _mark_source_order_execution(result)
+            result["real_submission"] = "none"
+            result["source_order_direct_submission"] = False
+            result["skipped"] = True
+            result["skip_reason"] = "odds_limit"
+            result["odds_limit"] = odds_meta
+            result["snapshot_direct_source_intent"] = source_intent.to_dict()
+            result["ioratio_source"] = "source_order"
+            result["bet_context_mode"] = "disabled"
+            return result
+
+        session_ok, session_reason, current_member = _final_session_gate(
+            data_dir=data_dir,
+            member=member,
+            selected_generation=selected_session_generation,
+            selected_fingerprint=selected_session_fingerprint,
+        )
+        if not session_ok:
+            waiting = _source_order_waiting_result(
+                status=session_reason,
+                message=f"提交前 Session gate 拒绝源订单直投：{session_reason}",
+                member=member,
+                order=order,
+                stake=stake,
+                intent=intent,
+            )
+            waiting.update(
+                {
+                    "session_ready": False,
+                    "session_ready_reason": session_reason,
+                    "session_generation": selected_session_generation,
+                    "session_fingerprint": selected_session_fingerprint,
+                    "execution_member": str(member.get("id") or ""),
+                    "bet_context_mode": "disabled",
+                    "ioratio_source": "source_order",
+                }
+            )
+            return waiting
+
+        selected_session_generation = _safe_int(
+            current_member.get("session_generation"), selected_session_generation
+        )
+        selected_session_fingerprint = member_session_fingerprint(current_member)
+        session_created_at = float(now_ts())
+        execution_session = make_member_session(
+            base_url=str(current_member.get("base_url") or ""),
+            proxy=str(current_member.get("proxy") or ""),
+            cookie=str(current_member.get("cookie") or ""),
+        )
+        execution_session_meta = {
+            "session_mode": "fresh_per_attempt",
+            "session_created_at": session_created_at,
+            "session_object_id": str(id(execution_session)),
+            "proxy": "configured" if str(current_member.get("proxy") or "").strip() else "",
+            "proxy_enabled": bool(str(current_member.get("proxy") or "").strip()),
+            **_session_cookie_diagnostics(execution_session),
+        }
+
+        submit_started_at = float(now_ts())
+        try:
+            ft_bet_started = True
+            execution = MemberExecutor().submit(
+                current_member,
+                template,
+                float(stake or 0.0),
+                session=execution_session,
+                timeout_s=max(2, int(timeout_s or 0)),
+            )
+        except (TimeoutError, HardTimeout) as exc:
+            execution = ExecutionResult(
+                UNKNOWN_RESULT,
+                str(current_member.get("id") or ""),
+                error_code=type(exc).__name__ or "HardTimeout",
+                error_message="下注请求超时，结果待核验。",
+            )
+        finally:
+            if execution_session is not None:
+                close_member_session(execution_session)
+                execution_session = None
+        submit_finished_at = float(now_ts())
+
+        result = _snapshot_direct_result(
+            result=execution,
+            member=current_member,
+            order=order,
+            stake=stake,
+            template=template,
+            intent=intent,
+            snapshot_status=SOURCE_ORDER_READY,
+        )
+        _mark_source_order_execution(result)
+        result.update(
+            {
+                "snapshot_direct_source_intent": source_intent.to_dict(),
+                "source_order_direct_intent": intent.to_dict(),
+                "submit_started_at": submit_started_at,
+                "submit_finished_at": submit_finished_at,
+                "submit_elapsed_ms": int(max(0.0, submit_finished_at - submit_started_at) * 1000.0),
+                "ft_bet_started_at": submit_started_at,
+                "ft_bet_elapsed_ms": int(max(0.0, submit_finished_at - submit_started_at) * 1000.0),
+                "bet_submitted_at": submit_started_at,
+                "session_generation": selected_session_generation,
+                "session_fingerprint": selected_session_fingerprint,
+                "session_ready": True,
+                "session_ready_reason": "SESSION_READY",
+                "bet_context_mode": "disabled",
+                "bet_context_request": {},
+                "bet_context_http_status": None,
+                "bet_context_response": {},
+                "bet_context_code": "",
+                "bet_context_error": "",
+                "context_started_at": 0.0,
+                "context_finished_at": 0.0,
+                "context_ioratio": "",
+                "context_ratio": "",
+                "final_submit_ioratio": template.ioratio,
+                "final_submit_ratio": template.ratio,
+                "ioratio_source": "source_order",
+                "params": template.to_dict(),
+                "snapshot_direct_actual_line": template.line,
+                "snapshot_direct_line_change_allowed": False,
+                "snapshot_direct_line_changed": False,
+            }
+        )
+        if isinstance(execution.session_meta, dict):
+            result.update(execution.session_meta)
+        result.update(execution_session_meta)
+        if execution.ft_bet_started_at:
+            result["ft_bet_started_at"] = execution.ft_bet_started_at
+            result["bet_submitted_at"] = execution.ft_bet_started_at
+        if execution.ft_bet_finished_at:
+            result["ft_bet_finished_at"] = execution.ft_bet_finished_at
+        if execution.ft_bet_elapsed_ms:
+            result["ft_bet_elapsed_ms"] = execution.ft_bet_elapsed_ms
+            result["submit_elapsed_ms"] = execution.ft_bet_elapsed_ms
+        result["timings"] = {
+            "ft_bet_s": round(float(result.get("ft_bet_elapsed_ms") or 0) / 1000.0, 3),
+            "attempt_wall_s": round(float(result.get("ft_bet_elapsed_ms") or 0) / 1000.0, 3),
+        }
+
+        network_error_class = _network_error_class(result)
+        result["network_health"] = "cooldown" if network_error_class else "healthy"
+        result["network_error_class"] = network_error_class
+        if execution.status == UNKNOWN_RESULT and network_error_class:
+            _mark_member_network_cooldown(
+                data_dir=data_dir,
+                member_id=str(current_member.get("id") or ""),
+                error_class=network_error_class,
+            )
+        if execution.status == UNKNOWN_RESULT:
+            try:
+                reconcile_session = _get_member_session(
+                    member=current_member,
+                    session_pool=session_pool,
+                )
+                reconciliation = _query_member_recent_wager(
+                    session=reconcile_session,
+                    base_url=str(current_member.get("base_url") or ""),
+                    ver=str(current_member.get("ver") or ""),
+                    uid=str(current_member.get("uid") or ""),
+                    member_id=str(current_member.get("id") or ""),
+                    gid=str(template.gid or ""),
+                    stake=float(stake or 0.0),
+                    submitted_at=float(result.get("bet_submitted_at") or submit_started_at),
+                    timeout_s=min(max(2, int(timeout_s or 0)), 8),
+                )
+                result["reconcile_status"] = str(reconciliation.get("status") or "")
+                if reconciliation.get("status") == "matched":
+                    result["ok"] = True
+                    result["ticket_id"] = str(reconciliation.get("ticket_id") or "")
+                    result["reconciled"] = True
+                    result["reconcile_pending"] = False
+                    result["message"] = "下注请求结果不确定，已通过注单核验确认成交。"
+                elif reconciliation.get("status") == "unavailable":
+                    result["reconcile_error"] = str(reconciliation.get("error") or "")
+            except (TimeoutError, HardTimeout) as exc:
+                result["reconcile_error"] = f"{type(exc).__name__}: {exc}"
+                result["reconcile_pending"] = True
+            except Exception as exc:
+                result["reconcile_error"] = f"{type(exc).__name__}: {exc}"
+        elif execution.status == MEMBER_ERROR:
+            _invalidate_member_session(
+                session_pool=session_pool,
+                member_id=str(current_member.get("id") or ""),
+                reason=str(execution.error_code or "MEMBER_ERROR"),
+            )
+        return result
+    except (TimeoutError, HardTimeout) as exc:
+        if execution_session is not None:
+            close_member_session(execution_session)
+        if not ft_bet_started:
+            return _source_order_waiting_result(
+                status=SNAPSHOT_INVALID,
+                message=f"源订单直投准备超时：{type(exc).__name__}: {exc}",
+                member=member,
+                order=order,
+                stake=stake,
+            )
+        return {
+            "ts": int(now_ts()),
+            "ts_ms": int(now_ts_ms()),
+            "live": bool(is_live_backend_order(order)),
+            "member_id": str(member.get("id") or ""),
+            "member": str(member.get("label") or member.get("username") or member.get("id") or ""),
+            "target": str(order.get("target") or ""),
+            "orderId": str(order.get("orderId") or ""),
+            "stake": float(stake or 0.0),
+            "ok": False,
+            "execution_mode": SOURCE_ORDER_DIRECT,
+            "execution_path": SOURCE_ORDER_DIRECT,
+            "real_submission": SOURCE_ORDER_DIRECT,
+            "source_order_direct_submission": True,
+            "result_status": UNKNOWN_RESULT,
+            "snapshot_direct_result_status": UNKNOWN_RESULT,
+            "error_code": type(exc).__name__ or "HardTimeout",
+            "message": "下注请求超时，结果待核验，暂不更换会员。",
+            "reconcile_pending": True,
+            "unknown_result": True,
+            "bet_context_mode": "disabled",
+            "ioratio_source": "source_order",
+        }
+    except Exception as exc:
+        if execution_session is not None:
+            close_member_session(execution_session)
+        return _source_order_waiting_result(
+            status=SNAPSHOT_INVALID,
+            message=f"源订单 FT_bet 参数构造失败：{type(exc).__name__}: {exc}",
+            member=member,
+            order=order,
+            stake=stake,
+        )
+
+
 def _place_bet_snapshot_direct(
     *,
     data_dir: Path,
@@ -5559,7 +6423,25 @@ def _place_bet_snapshot_direct(
     session_pool: Optional["MemberSessionPool"] = None,
 ) -> Dict[str, Any]:
     """Execute one Snapshot Direct attempt without querying member-side markets."""
+    def _attach_http_telemetry_meta(session: Any) -> None:
+        try:
+            current = getattr(session, "_hdzz_telemetry_meta", {})
+            merged = dict(current) if isinstance(current, dict) else {}
+            member_id = str(member.get("id") or "")
+            merged.update(
+                {
+                    "order_id": str(order.get("orderId") or order.get("order_id") or order.get("id") or "") or None,
+                    "split_id": str(order.get("split_id") or order.get("splitId") or "") or None,
+                    "attempt": settings.get("_attempt_no") or settings.get("attempt") or None,
+                    "member_hash": hashlib.sha256(member_id.encode("utf-8")).hexdigest() if member_id else None,
+                }
+            )
+            setattr(session, "_hdzz_telemetry_meta", merged)
+        except Exception:
+            pass
     try:
+        selected_session_generation = _safe_int(member.get("session_generation"), 0)
+        selected_session_fingerprint = member_session_fingerprint(member)
         source_intent = MarketIntent.from_order(order, split_amount=float(stake or 0.0))
         intent = _snapshot_intent_for_settings(source_intent, order=order, settings=settings)
         if not intent.gid:
@@ -5851,13 +6733,18 @@ def _place_bet_snapshot_direct(
                     proxy=str(member.get("proxy") or ""),
                     cookie=str(member.get("cookie") or ""),
                 )
+                _attach_http_telemetry_meta(execution_session)
                 execution_session_meta = {
                     "session_mode": "fresh_per_attempt",
                     "session_created_at": session_created_at,
                     "session_object_id": str(id(execution_session)),
-                    "proxy": str(member.get("proxy") or ""),
+                    "proxy": "configured" if str(member.get("proxy") or "").strip() else "",
+                    "proxy_enabled": bool(str(member.get("proxy") or "").strip()),
                     **_session_cookie_diagnostics(execution_session),
                 }
+                # Keep the submit sequence identical to the proven path:
+                # FT_order_view -> FT_bet on one fresh Session. Extra menu
+                # requests can trigger the platform edge's 502 Blocked page.
                 context_meta["context_started_at"] = float(now_ts())
                 context = BetContext.prepare(
                     session=execution_session,
@@ -6041,15 +6928,118 @@ def _place_bet_snapshot_direct(
                 close_member_session(execution_session)
                 execution_session = None
                 return result
+        # The normal direct path also uses a fresh Session, without adding
+        # menu requests immediately before FT_bet.
+        if execution_session is None:
+            session_created_at = float(now_ts())
+            execution_session = make_member_session(
+                base_url=str(member.get("base_url") or ""),
+                proxy=str(member.get("proxy") or ""),
+                cookie=str(member.get("cookie") or ""),
+            )
+            _attach_http_telemetry_meta(execution_session)
+            execution_session_meta = {
+                "session_mode": "fresh_per_attempt",
+                "session_created_at": session_created_at,
+                "session_object_id": str(id(execution_session)),
+                "proxy": "configured" if str(member.get("proxy") or "").strip() else "",
+                "proxy_enabled": bool(str(member.get("proxy") or "").strip()),
+                **_session_cookie_diagnostics(execution_session),
+            }
+
+        # Final freshness gate: queueing/member acquisition/context work must
+        # never turn an old MarketRow into a new FT_bet submission.
+        final_freshness_lookup = service.lookup(
+            intent,
+            max_age_ms=_snapshot_preferred_age_ms(settings),
+        )
+        if final_freshness_lookup.snapshot is None or final_freshness_lookup.status != SNAPSHOT_VALID:
+            if execution_session is not None:
+                close_member_session(execution_session)
+                execution_session = None
+            return _snapshot_waiting_result(
+                status=str(final_freshness_lookup.status or SNAPSHOT_STALE),
+                message=(
+                    "提交前盘口已超过允许 freshness，等待最新盘口。"
+                    if final_freshness_lookup.status == SNAPSHOT_STALE
+                    else final_freshness_lookup.message
+                ),
+                member=member,
+                order=order,
+                stake=stake,
+                intent=intent,
+            )
+        final_freshness_validated = SnapshotValidator().validate(
+            intent,
+            final_freshness_lookup.snapshot,
+            max_age_ms=_snapshot_preferred_age_ms(settings),
+        )
+        if final_freshness_validated.snapshot is None or final_freshness_validated.status != SNAPSHOT_VALID:
+            if execution_session is not None:
+                close_member_session(execution_session)
+                execution_session = None
+            return _snapshot_waiting_result(
+                status=str(final_freshness_validated.status or SNAPSHOT_STALE),
+                message=final_freshness_validated.message,
+                member=member,
+                order=order,
+                stake=stake,
+                intent=intent,
+            )
+        if final_freshness_validated.snapshot.market_row_fingerprint != validated.snapshot.market_row_fingerprint:
+            if execution_session is not None:
+                close_member_session(execution_session)
+                execution_session = None
+            return _snapshot_waiting_result(
+                status=MARKET_ERROR,
+                message="提交前盘口 fingerprint 已变化，禁止使用旧 BetContext。",
+                member=member,
+                order=order,
+                stake=stake,
+                intent=intent,
+            )
+        validated = final_freshness_validated
+
+        session_ok, session_reason, current_member = _final_session_gate(
+            data_dir=data_dir,
+            member=member,
+            selected_generation=selected_session_generation,
+            selected_fingerprint=selected_session_fingerprint,
+        )
+        if not session_ok:
+            if execution_session is not None:
+                close_member_session(execution_session)
+                execution_session = None
+            waiting = _snapshot_waiting_result(
+                status=session_reason,
+                message=f"提交前 Session gate 拒绝旧上下文：{session_reason}",
+                member=member,
+                order=order,
+                stake=stake,
+                intent=intent,
+            )
+            waiting.update(
+                {
+                    "session_ready": False,
+                    "session_ready_reason": session_reason,
+                    "session_generation": selected_session_generation,
+                    "session_fingerprint": selected_session_fingerprint,
+                    "execution_member": str(member.get("id") or ""),
+                }
+            )
+            return waiting
+        # Use only the current identity metadata for telemetry. The actual
+        # payload is still rebuilt from the validated current snapshot below.
+        selected_session_generation = _safe_int(current_member.get("session_generation"), selected_session_generation)
+        selected_session_fingerprint = member_session_fingerprint(current_member)
+
         try:
             submit_kwargs = {
                 "timeout_s": max(2, int(timeout_s or 0)),
             }
-            # Keep the default Direct path's existing call shape.  A Session
-            # is passed only for the diagnostic context A/B path, where it
-            # must be shared by FT_order_view and FT_bet.
-            if execution_session is not None:
-                submit_kwargs["session"] = execution_session
+            # Both diagnostic and normal direct paths submit through the same
+            # fresh session that passed the final identity gate.
+            submit_kwargs["session"] = execution_session
             execution = MemberExecutor().submit(
                 member,
                 template,
@@ -6091,6 +7081,21 @@ def _place_bet_snapshot_direct(
         if isinstance(execution.session_meta, dict):
             result.update(execution.session_meta)
             result["session_mode"] = str(execution.session_meta.get("session_mode") or "")
+        result["session_generation"] = selected_session_generation
+        result["session_fingerprint"] = selected_session_fingerprint
+        result["session_ready"] = True
+        result["session_ready_reason"] = "SESSION_READY"
+        network_error_class = _network_error_class(result)
+        result["network_health"] = "cooldown" if network_error_class else "healthy"
+        result["network_error_class"] = network_error_class
+        if execution_session_meta:
+            result.update(execution_session_meta)
+        if execution.status == UNKNOWN_RESULT and network_error_class:
+            _mark_member_network_cooldown(
+                data_dir=data_dir,
+                member_id=str(member.get("id") or ""),
+                error_class=network_error_class,
+            )
         if context_mode == "diagnostic_order_view":
             result.update(context_meta)
             result.update(execution_session_meta)
@@ -6201,7 +7206,7 @@ def place_bet(
     debug: bool,
     session_pool: Optional["MemberSessionPool"] = None,
 ) -> Dict[str, Any]:
-    """执行唯一生产链：Snapshot Direct；UNKNOWN 后只允许核验。"""
+    """执行配置的生产链；UNKNOWN 后只允许核验。"""
     # UNKNOWN_RESULT 的后续尝试只能 reconcile，不能再次触发 FT_bet。
     if bool(settings.get("_reconcile_only")):
         return _reconcile_only_result(
@@ -6211,6 +7216,18 @@ def place_bet(
             order=order,
             stake=stake,
             timeout_s=timeout_s,
+            session_pool=session_pool,
+        )
+    execution_mode = str(settings.get("execution_mode") or "snapshot_direct").strip().lower()
+    if execution_mode == SOURCE_ORDER_DIRECT:
+        return _place_bet_source_order_direct(
+            data_dir=data_dir,
+            settings=settings,
+            member=member,
+            order=order,
+            stake=stake,
+            timeout_s=timeout_s,
+            debug=debug,
             session_pool=session_pool,
         )
     return _place_bet_snapshot_direct(
@@ -6618,6 +7635,7 @@ def _run_parallel_place_bet(
 ) -> Dict[str, Any]:
     """Worker-side one-shot attempt. Shared state is finalized by the main thread."""
     member_id = str(member.get("id") or "")
+    execution_mode = str(settings.get("execution_mode") or "snapshot_direct").strip().lower()
     fallback = {
         "ts": int(now_ts()),
         "ts_ms": int(now_ts_ms()),
@@ -6631,9 +7649,9 @@ def _run_parallel_place_bet(
         "source_stake": _safe_float(order.get("stake"), 0.0),
         "ok": False,
         "message": "FT_bet 结果不确定，正在核验，禁止重复提交。",
-        "execution_mode": "snapshot_direct",
-        "execution_path": "snapshot_direct",
-        "real_submission": "snapshot_direct",
+        "execution_mode": execution_mode,
+        "execution_path": execution_mode,
+        "real_submission": execution_mode,
         # 硬超时无法判断请求是否已经到达 FT_bet；必须先核验，不能把
         # 它当成普通会员失败立即切换会员重下。
         "snapshot_direct_result_status": UNKNOWN_RESULT,
@@ -6699,6 +7717,7 @@ def main() -> int:
     retry_scheduler = RetryScheduler(jobs)
     jobs = retry_scheduler.retry_jobs
     hydrate_done_from_results(done, results_path)
+    limit_match_committed, limit_market_committed, limit_success_keys = load_follow_limit_usage(results_path)
     follow_generated_order_keys = collect_follow_generated_order_keys(done=done, results_path=results_path)
     if follow_generated_order_keys:
         for key in list(pending_orders.keys()):
@@ -6834,6 +7853,7 @@ def main() -> int:
         result.setdefault("orderId", job.order_id)
         result.setdefault("target", job.target)
         result.setdefault("stake", float(meta.get("cur_stake") or 0.0))
+        attach_follow_limit_metadata(result, job.order, settings)
         candidate_at = float(meta.get("candidate_snapshot_at") or job.first_candidate_snapshot_at or 0.0)
         member_acquired_at = float(meta.get("member_acquired_at") or 0.0)
         result["candidate_snapshot_at"] = candidate_at
@@ -6915,8 +7935,17 @@ def main() -> int:
             MEMBER_IORATIO_MISSING,
             MEMBER_IORATIO_STALE,
             MEMBER_IORATIO_INVALID,
+            BET_CONTEXT_MISMATCH,
+            MARKET_CHANGED_DURING_CONTEXT,
         } and str(result.get("real_submission") or "").lower() == "none":
-            if waiting_status in {SNAPSHOT_MISSING, SNAPSHOT_STALE, TARGET_LINE_MISSING, SNAPSHOT_INVALID}:
+            if waiting_status in {
+                SNAPSHOT_MISSING,
+                SNAPSHOT_STALE,
+                TARGET_LINE_MISSING,
+                SNAPSHOT_INVALID,
+                BET_CONTEXT_MISMATCH,
+                MARKET_CHANGED_DURING_CONTEXT,
+            }:
                 job.market_wait_count = int(job.market_wait_count or 0) + 1
             else:
                 job.member_wait_count = int(job.member_wait_count or 0) + 1
@@ -6991,6 +8020,12 @@ def main() -> int:
         except Exception:
             pass
         persist_started_at, persist_finished_at = _append_jsonl_timed(results_path, result)
+        record_follow_limit_success(
+            result,
+            match_committed=limit_match_committed,
+            market_committed=limit_market_committed,
+            success_keys=limit_success_keys,
+        )
         result["result_persist_started_at"] = persist_started_at
         result["result_persist_finished_at"] = persist_finished_at
         result["result_persist_elapsed_ms"] = round(max(0.0, persist_finished_at - persist_started_at) * 1000.0, 3)
@@ -7592,6 +8627,8 @@ def main() -> int:
             if key in done:
                 continue
 
+            parent_jobs = retry_scheduler.get_jobs_for_parent(key)
+
             if not target_follow_enabled(settings, target):
                 try:
                     result = {
@@ -7688,6 +8725,99 @@ def main() -> int:
                     pass
                 continue
 
+            if not parent_jobs:
+                match_reserved, market_reserved = collect_active_limit_reservations(
+                    retry_scheduler.retry_jobs,
+                    settings=settings,
+                    exclude_parent_key=key,
+                )
+                limited_stake, limit_skip_msg, limit_meta = apply_follow_amount_limits(
+                    order=order,
+                    settings=settings,
+                    requested_stake=total_stake,
+                    match_committed=limit_match_committed,
+                    market_committed=limit_market_committed,
+                    match_reserved=match_reserved,
+                    market_reserved=market_reserved,
+                    min_stake=split_min_stake_cfg,
+                )
+                store_follow_limit_metadata(order, limit_meta)
+                if limit_skip_msg:
+                    result = {
+                        "ts": int(now_ts()),
+                        "ts_ms": int(now_ts_ms()),
+                        "live": bool(is_live_backend_order(order)),
+                        "member_id": "",
+                        "member": "-",
+                        "target": target,
+                        "orderId": order_id,
+                        "stake": 0.0,
+                        "source_stake": _safe_float(order.get("stake"), 0.0),
+                        "policy_base_stake": float(base_stake),
+                        "policy_market_stake": float(total_stake),
+                        "ok": False,
+                        "message": str(limit_skip_msg),
+                        "skipped": True,
+                        "skip_reason": "amount_limit",
+                    }
+                    attach_follow_limit_metadata(result, order, settings)
+                    append_jsonl(results_path, result)
+                    done[key] = {"status": "skipped", "reason": str(limit_skip_msg), "ts": int(now_ts())}
+                    pending_orders.pop(key, None)
+                    _append_trace_jsonl(
+                        trace_path,
+                        {
+                            "event": "amount_limit_skipped",
+                            "key": key,
+                            "target": target,
+                            "orderId": order_id,
+                            "message": str(limit_skip_msg),
+                            **{f"limit_{name}": value for name, value in limit_meta.items()},
+                        },
+                    )
+                    try:
+                        bot_token, default_chat_id, proxy, order_preview_image, ui_theme = load_tg_config(Path("config.json"))
+                        if bot_token:
+                            order_chat_id = str(order.get("_tg_chat_id") or default_chat_id).strip()
+                            if order_chat_id:
+                                merged = build_order_follow_combined_message(order=order, follow_result=result, ui_theme=ui_theme)
+                                new_mid = tg_upsert_order_message(
+                                    bot_token=bot_token,
+                                    chat_id=order_chat_id,
+                                    message_id=order.get("_tg_message_id"),
+                                    html_text=merged,
+                                    order_id=order_id,
+                                    order_preview_image=order_preview_image,
+                                    timeout_s=10,
+                                    proxy=proxy,
+                                    ui_theme=ui_theme,
+                                )
+                                if new_mid:
+                                    order["_tg_message_id"] = int(new_mid)
+                                    order["_tg_chat_id"] = order_chat_id
+                    except Exception:
+                        pass
+                    continue
+                total_stake = float(limited_stake)
+                if bool(limit_meta.get("limited")):
+                    _append_trace_jsonl(
+                        trace_path,
+                        {
+                            "event": "amount_limit_applied",
+                            "key": key,
+                            "target": target,
+                            "orderId": order_id,
+                            "requested_stake": _safe_float(limit_meta.get("requested_stake"), 0.0),
+                            "allowed_stake": float(total_stake),
+                            "match_key": str(limit_meta.get("match_key") or ""),
+                            "market_key": str(limit_meta.get("market_key") or ""),
+                            "match_committed_amount": _safe_float(limit_meta.get("match_committed_amount"), 0.0),
+                            "match_reserved_amount": _safe_float(limit_meta.get("match_reserved_amount"), 0.0),
+                            "market_committed_amount": _safe_float(limit_meta.get("market_committed_amount"), 0.0),
+                            "market_reserved_amount": _safe_float(limit_meta.get("market_reserved_amount"), 0.0),
+                        },
+                    )
+
             # per-target 过滤：仅跟滚球
             try:
                 only_live = bool(target_only_live(settings, target) or False)
@@ -7750,7 +8880,6 @@ def main() -> int:
                     pass
                 continue
 
-            parent_jobs = retry_scheduler.get_jobs_for_parent(key)
             if not parent_jobs:
                 eff_split = effective_split_count(total_stake, split_count_cfg, split_min_stake_cfg)
                 parts = split_stakes(total_stake, eff_split)
@@ -7768,7 +8897,7 @@ def main() -> int:
                 print(
                     f"[{now_iso()}] stake_calc target={target} order={order_id} src_stake={src_stake} "
                     f"mode={settings.get('mode')} ratio%={settings.get('ratio_percent')} fixed={settings.get('fixed_amount')} "
-                    f"max={settings.get('max_amount')} split={eff_split} total={float(sum([p for p in parts if isinstance(p,(int,float))]))} "
+                    f"split={eff_split} total={float(sum([p for p in parts if isinstance(p,(int,float))]))} "
                     f"parts={parts_preview}",
                     flush=True,
                 )
@@ -7805,17 +8934,7 @@ def main() -> int:
                         flush=True,
                     )
             elif parent_jobs:
-                # 配置变更时（固定金额/比例/封顶）允许动态更新 stake
-                # 分单已开始（已有成功票）则不再动态改拆分，避免一单多次变更导致金额/次数混乱
-                job = parent_jobs[0]
-                if (not bool(job.independent_split)) and (job.split_index or 0) == 0 and not job.split_tickets:
-                    eff_split = effective_split_count(total_stake, split_count_cfg, split_min_stake_cfg)
-                    parts = split_stakes(total_stake, eff_split)
-                    if parts:
-                        job.split_stakes = parts
-                        job.split_count = int(len(parts) or 1)
-                        job.split_delay_seconds = float(split_delay_seconds_cfg)
-                        job.stake = float(sum(parts))
+                # 已入队任务保留创建时的金额和额度预留，避免运行中改设置导致任务被放大。
                 for parent_job in parent_jobs:
                     parent_job.order = order
 
@@ -7825,6 +8944,66 @@ def main() -> int:
         one_shot_settings["retry_max_attempts"] = 1
         one_shot_settings["retry_delay_seconds"] = 0
         one_shot_settings["retry_max_seconds"] = 1
+
+        # 平台维护/恢复验证期间，订单继续保留在队列，但禁止任何新的
+        # Snapshot、FT_order_view 或 FT_bet 请求。维护状态由后台 watcher
+        # 通过 data/platform_maintenance.json 共享；恢复为 online 后自动放行。
+        platform_state = read_platform_state(data_dir)
+        platform_status = str(platform_state.get("status") or "").strip().lower()
+        platform_paused = platform_status in {"maintenance", "recovering"}
+        if platform_paused:
+            pause_message = maintenance_status_message(platform_state)
+            for paused_job in list(retry_scheduler.retry_jobs.values()):
+                if not isinstance(paused_job, RetryJob):
+                    continue
+                # UNKNOWN_RESULT 代表下注请求可能已经到达平台，必须保留原会员
+                # 和核验状态；维护期间只延后核验，绝不能把它改成普通重试。
+                if str(paused_job.last_err or "").strip().upper() == UNKNOWN_RESULT:
+                    paused_job.next_try_at = float(now_ts()) + 5.0
+                    paused_job.order["_platform_maintenance_paused"] = True
+                    continue
+                already_paused = str(paused_job.last_err or "").strip().upper() == PLATFORM_MAINTENANCE_CODE
+                paused_job.last_err = PLATFORM_MAINTENANCE_CODE
+                paused_job.last_message = pause_message
+                paused_job.member_id = ""
+                paused_job.next_try_at = float(now_ts()) + 5.0
+                paused_job.order["_platform_maintenance_paused"] = True
+                if not already_paused:
+                    _enqueue_follow_notification(
+                        paused_job,
+                        {
+                            "ts": int(now_ts()),
+                            "ts_ms": int(now_ts_ms()),
+                            "target": paused_job.target,
+                            "orderId": paused_job.order_id,
+                            "stake": float(paused_job.stake or 0.0),
+                            "member": "-",
+                            "member_id": "",
+                            "ok": False,
+                            "status": "maintenance",
+                            "error_code": PLATFORM_MAINTENANCE_CODE,
+                            "message": pause_message,
+                            "split_index": int(paused_job.split_index or 0) + 1,
+                            "split_count": int(paused_job.split_count or 1),
+                        },
+                    )
+            _persist_follow_state()
+            time.sleep(max(0.5, min(5.0, float(args.interval))))
+            continue
+
+        # 维护结束并确认平台在线后，清除暂停标记，让原订单从当前盘口重新
+        # 准备；不增加 attempts，也不把维护等待算作失败。
+        if platform_status == "online":
+            for resumed_job in list(retry_scheduler.retry_jobs.values()):
+                if not isinstance(resumed_job, RetryJob):
+                    continue
+                if str(resumed_job.last_err or "").strip().upper() != PLATFORM_MAINTENANCE_CODE:
+                    continue
+                resumed_job.last_err = ""
+                resumed_job.last_message = ""
+                resumed_job.member_id = ""
+                resumed_job.order.pop("_platform_maintenance_paused", None)
+                resumed_job.next_try_at = float(now_ts())
 
         processed = 0
         used_member_ids: set = set()
@@ -7843,6 +9022,11 @@ def main() -> int:
 
             if not str(job.trigger_reason or "").strip():
                 job.trigger_reason = "INITIAL_READY" if not str(job.last_err or "").strip() else "FALLBACK_PROBE"
+
+            # UNKNOWN_RESULT 已进入专用 reconciliation 状态后，普通提交
+            # attempt/time cap 不得越权终止。专用核验窗口（次数/时间）
+            # 由 _reconcile_only_result 单独决定最终状态。
+            in_unknown_result_wait = str(job.last_err or "").strip().upper() == UNKNOWN_RESULT
 
             # 截止：超过限制则终止该单重试（1X001 使用“封盘等待策略”，走自己的超时控制）
             eff_max_attempts, eff_max_seconds = retry_scheduler.get_effective_limits(
@@ -7863,10 +9047,10 @@ def main() -> int:
                     print(f"[{now_iso()}] 跟单失败(目标盘口线等待超时) member={job.member_id or '-'} order={job.order_id}", flush=True)
                 continue
 
-            if eff_max_attempts and job.attempts >= eff_max_attempts:
+            if (not in_unknown_result_wait) and eff_max_attempts and job.attempts >= eff_max_attempts:
                 _finish_terminal_job(job, {"status": "failed", "reason": "重试次数已达上限", "ts": int(now_ts()), "split_index": int(job.split_index or 0)})
                 continue
-            if eff_max_seconds and (now - float(job.created_at or now)) >= eff_max_seconds:
+            if (not in_unknown_result_wait) and eff_max_seconds and (now - float(job.created_at or now)) >= eff_max_seconds:
                 _finish_terminal_job(job, {"status": "failed", "reason": "重试已超时", "ts": int(now_ts()), "split_index": int(job.split_index or 0)})
                 continue
 
@@ -7945,7 +9129,7 @@ def main() -> int:
                         trace_path,
                         {
                             "event": "waiting_market",
-                            "execution_path": "snapshot_direct",
+                            "execution_path": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
                             "real_submission": "none",
                             "key": job.key,
                             "target": job.target,
@@ -8086,12 +9270,121 @@ def main() -> int:
                     )
                 except Exception:
                     m = None
+
+            # 最终 dispatch gate：候选池是在本轮开始时读取的，而 member
+            # watcher/上一笔 FT_bet 可能刚刚把会员写入 cooldown、离线或
+            # busy。此处必须重新读取持久化快照，禁止沿用旧 member dict。
+            # UNKNOWN_RESULT 是固定原会员核验，允许使用原会员的最新会话
+            # 信息，但绝不会因为 cooldown 而重新 FT_bet。
+            latest_members = _load_current_members(data_dir)
+            members = latest_members
+            selected_id = str((m or {}).get("id") or "").strip()
+            latest_by_id = {
+                str(mm.get("id") or "").strip(): mm
+                for mm in latest_members
+                if str(mm.get("id") or "").strip()
+            }
+            if in_pinned_wait:
+                # 固定原会员做 reconciliation；状态/余额变化不应
+                # 把一次已发出的 UNKNOWN_RESULT 变成换号下注。
+                m = latest_by_id.get(str(job.member_id or "").strip())
+            else:
+                fresh_selected = latest_by_id.get(selected_id) if selected_id else None
+                fresh_selected_ok = bool(
+                    fresh_selected
+                    and _member_eligible_for_stake(
+                        fresh_selected,
+                        stake=float(cur_stake),
+                        avoid_ids=set(),
+                        target=job.target,
+                        mappings=mappings,
+                    )
+                    and selected_id not in busy_member_ids
+                )
+                if fresh_selected_ok:
+                    m = fresh_selected
+                else:
+                    # 候选在 acquire 与 dispatch 之间进入 cooldown 或
+                    # 变为不可用时，从同一份最新快照重选。不能放宽
+                    # cooldown 过滤，也不能退回旧 members 列表。
+                    fresh_avoid = set(avoid) | set(busy_member_ids)
+                    if selected_id:
+                        fresh_avoid.add(selected_id)
+                    m = pick_random_member_for_stake(
+                        latest_members,
+                        float(cur_stake),
+                        avoid_ids=fresh_avoid,
+                        target=job.target,
+                        mappings=mappings,
+                        allow_quote_members=bool(allow_quote_members),
+                    )
+                    if not m and job.member_id:
+                        # 只有当原会员在最新快照中仍健康时才允许
+                        # 重试复用；cooldown 会员绝不能走 fallback。
+                        fresh_previous = latest_by_id.get(str(job.member_id or "").strip())
+                        if fresh_previous and _member_eligible_for_stake(
+                            fresh_previous,
+                            stake=float(cur_stake),
+                            avoid_ids=set(busy_member_ids),
+                            target=job.target,
+                            mappings=mappings,
+                        ):
+                            m = fresh_previous
+
+            # 再做一次极窄的持久化状态检查，覆盖 member watcher 恰好在
+            # 上一份快照之后写入 cooldown 的竞态。若无健康替代会员，
+            # 明确进入 MEMBER_WAIT，绝不把旧候选送入 Context。
+            if m and not in_pinned_wait:
+                dispatch_members = _load_current_members(data_dir)
+                dispatch_by_id = {
+                    str(mm.get("id") or "").strip(): mm
+                    for mm in dispatch_members
+                    if str(mm.get("id") or "").strip()
+                }
+                dispatch_member = dispatch_by_id.get(str(m.get("id") or "").strip())
+                if dispatch_member and _member_eligible_for_stake(
+                    dispatch_member,
+                    stake=float(cur_stake),
+                    avoid_ids=set(busy_member_ids),
+                    target=job.target,
+                    mappings=mappings,
+                ):
+                    m = dispatch_member
+                    members = dispatch_members or members
+                else:
+                    rejected_id = str((m or {}).get("id") or "").strip()
+                    replacement = pick_random_member_for_stake(
+                        dispatch_members,
+                        float(cur_stake),
+                        avoid_ids=set(avoid) | set(busy_member_ids) | ({rejected_id} if rejected_id else set()),
+                        target=job.target,
+                        mappings=mappings,
+                        allow_quote_members=bool(allow_quote_members),
+                    )
+                    m = replacement
+                    members = dispatch_members or members
+                    if m:
+                        _append_trace_jsonl(
+                            trace_path,
+                            {
+                                "event": "member_dispatch_rejected_stale_state",
+                                "key": job.key,
+                                "orderId": job.order_id,
+                                "rejected_member": rejected_id,
+                                "replacement_member": str(m.get("id") or ""),
+                                "reason": "cooldown_or_unavailable_before_dispatch",
+                            },
+                        )
             if not m:
                 try:
                     job.last_attempted_at = float(now_ts())
                 except Exception:
                     job.last_attempted_at = float(now_ts())
-                job.member_id = ""
+                # UNKNOWN_RESULT reconciliation 必须固定原会员；即使
+                # 该会员暂时不可读/不可用，也不能清空 pinned member_id，
+                # 否则下一轮无法继续在原会员上核验。
+                if not in_pinned_wait:
+                    job.member_id = ""
                 if busy_member_ids:
                     job.last_message = f"执行会员暂时忙碌，已排队等待（当前 {len(busy_member_ids)} 个执行中）"
                 else:
@@ -8192,8 +9485,8 @@ def main() -> int:
                         trace_path,
                         {
                             "event": "attempt_start",
-                            "execution_path": "snapshot_direct",
-                            "real_submission": "reconcile_only" if in_unknown_result_wait else "snapshot_direct",
+                            "execution_path": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
+                            "real_submission": "reconcile_only" if in_unknown_result_wait else str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
                             "key": job.key,
                             "target": job.target,
                             "orderId": job.order_id,
@@ -8278,8 +9571,8 @@ def main() -> int:
                 trace_path,
                 {
                     "event": "reconcile_start" if in_unknown_result_wait else "attempt_start",
-                    "execution_path": "snapshot_direct",
-                    "real_submission": "reconcile_only" if in_unknown_result_wait else "snapshot_direct",
+                    "execution_path": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
+                    "real_submission": "reconcile_only" if in_unknown_result_wait else str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
                     "key": job.key,
                     "target": job.target,
                     "orderId": job.order_id,
@@ -8344,12 +9637,11 @@ def main() -> int:
                     "settings_mode": str(one_shot_settings.get("mode") or ""),
                     "settings_ratio_percent": _safe_float(one_shot_settings.get("ratio_percent"), 0.0),
                     "settings_fixed_amount": _safe_float(one_shot_settings.get("fixed_amount"), 0.0),
-                    "settings_max_amount": _safe_float(one_shot_settings.get("max_amount"), 0.0),
                     "ok": False,
                     "message": "FT_bet 结果不确定，正在核验，禁止重复提交。",
-                    "execution_mode": "snapshot_direct",
-                    "execution_path": "snapshot_direct",
-                    "real_submission": "snapshot_direct",
+                    "execution_mode": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
+                    "execution_path": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
+                    "real_submission": str(one_shot_settings.get("execution_mode") or "snapshot_direct"),
                     # 外层硬超时无法判断 FT_bet 是否已发出，先进入核验等待，
                     # 防止下一轮立即更换会员重复下注。
                     "snapshot_direct_result_status": UNKNOWN_RESULT,
@@ -8388,6 +9680,7 @@ def main() -> int:
             result.setdefault("split_order_id", job.key)
             result["split_index"] = int(job.split_index or 0) + 1
             result["split_count"] = int(job.split_count or 1)
+            attach_follow_limit_metadata(result, job.order, one_shot_settings)
             _apply_market_submit_breaker(
                 job,
                 result,
@@ -8469,8 +9762,17 @@ def main() -> int:
                 MEMBER_IORATIO_MISSING,
                 MEMBER_IORATIO_STALE,
                 MEMBER_IORATIO_INVALID,
+                BET_CONTEXT_MISMATCH,
+                MARKET_CHANGED_DURING_CONTEXT,
             } and str(result.get("real_submission") or "").lower() == "none":
-                if waiting_status in {SNAPSHOT_MISSING, SNAPSHOT_STALE, TARGET_LINE_MISSING, SNAPSHOT_INVALID}:
+                if waiting_status in {
+                    SNAPSHOT_MISSING,
+                    SNAPSHOT_STALE,
+                    TARGET_LINE_MISSING,
+                    SNAPSHOT_INVALID,
+                    BET_CONTEXT_MISMATCH,
+                    MARKET_CHANGED_DURING_CONTEXT,
+                }:
                     job.market_wait_count = int(job.market_wait_count or 0) + 1
                 else:
                     job.member_wait_count = int(job.member_wait_count or 0) + 1
@@ -8555,6 +9857,12 @@ def main() -> int:
                 pass
             result["error_class"] = classify_execution_error(result)
             persist_started_at, persist_finished_at = _append_jsonl_timed(results_path, result)
+            record_follow_limit_success(
+                result,
+                match_committed=limit_match_committed,
+                market_committed=limit_market_committed,
+                success_keys=limit_success_keys,
+            )
             result["result_persist_started_at"] = persist_started_at
             result["result_persist_finished_at"] = persist_finished_at
             result["result_persist_elapsed_ms"] = round(max(0.0, persist_finished_at - persist_started_at) * 1000.0, 3)

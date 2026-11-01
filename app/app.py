@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -35,6 +36,7 @@ CORE_PID_FILE = RUN_DIR / "pids_core.json"
 FOLLOW_ENGINE_PID_FILE = RUN_DIR / "follow_engine.pid.json"
 SNAPSHOT_WATCH_PID_FILE = RUN_DIR / "odds_snapshot_watch.pid.json"
 TELEGRAM_SIGNAL_PID_FILE = RUN_DIR / "telegram_signal.pid.json"
+PS3838_PID_FILE = ROOT / "data" / "ps3838" / "worker.pid"
 
 
 @dataclass
@@ -236,9 +238,11 @@ _WORKER_MARKERS = [
     "member_arsenal_watch.py",
     "odds_snapshot_watch.py",
     "settlement_importer.py",
+    "hd_network_telemetry_sampler.py",
     "follow_engine.py",
     "telegram_bot.py",
     "telegram_signal_watch.py",
+    "ps3838_watch.py",
 ]
 
 
@@ -307,6 +311,31 @@ def cleanup_runtime_playwright_browsers(force: bool) -> None:
             continue
         print(f"Stop runtime browser PID={pid}")
         stop_pid(pid, force=bool(force))
+
+
+def stop_ps3838_worker(force: bool) -> bool:
+    """停止 WebUI 独立启动的平博只读 worker，并清理其 PID 文件。"""
+    try:
+        pid = int(PS3838_PID_FILE.read_text(encoding="utf-8").strip()) if PS3838_PID_FILE.exists() else 0
+    except Exception:
+        pid = 0
+    if not pid:
+        return False
+    had_process = is_pid_running(pid)
+    if had_process and _is_probably_hdydf_worker_pid(pid):
+        print(f"Stop PS3838 watcher PID={pid}")
+        stop_pid(pid, force=bool(force))
+        deadline = time.time() + 12.0
+        while time.time() < deadline and is_pid_running(pid):
+            time.sleep(0.2)
+        if is_pid_running(pid) and not force:
+            print(f"Force stop PS3838 watcher PID={pid}")
+            stop_pid(pid, force=True)
+    try:
+        PS3838_PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return had_process
 
 
 def stop_pid(pid: int, force: bool) -> None:
@@ -450,6 +479,19 @@ def workers(host: str, port: int, backend_interval: int, member_interval: int) -
             ],
         )
     )
+    out.append(
+        WorkerSpec(
+            name="network_telemetry_sampler",
+            args=[
+                "-u",
+                "tools/hd_network_telemetry_sampler.py",
+                "--data-dir",
+                "data",
+                "--interval",
+                os.environ.get("HDZZ_NETWORK_SAMPLER_INTERVAL", "0.5").strip() or "0.5",
+            ],
+        )
+    )
     # 跟单引擎：为了降低“分单/重试排队导致延迟”，默认更高频轮询、更短网络超时（可用环境变量覆盖）
     follow_timeout = os.environ.get("FOLLOW_TIMEOUT", "12").strip() or "12"
     follow_interval = os.environ.get("FOLLOW_INTERVAL", "0.2").strip() or "0.2"
@@ -518,6 +560,10 @@ def _telegram_signal_worker_spec() -> WorkerSpec:
             "data/telegram_signal_secrets.json",
             "--state",
             ".run/telegram_signal_state.json",
+            "--cursor-state",
+            ".run/telegram_signal_cursor.json",
+            "--health",
+            ".run/telegram_signal_health.json",
             "--events",
             "data/telegram_signal_events.jsonl",
             "--orders-dir",
@@ -617,6 +663,19 @@ def core_workers(backend_interval: int, member_interval: int) -> List[WorkerSpec
             ],
         )
     )
+    out.append(
+        WorkerSpec(
+            name="network_telemetry_sampler",
+            args=[
+                "-u",
+                "tools/hd_network_telemetry_sampler.py",
+                "--data-dir",
+                "data",
+                "--interval",
+                os.environ.get("HDZZ_NETWORK_SAMPLER_INTERVAL", "0.5").strip() or "0.5",
+            ],
+        )
+    )
     follow_timeout = os.environ.get("FOLLOW_TIMEOUT", "12").strip() or "12"
     follow_interval = os.environ.get("FOLLOW_INTERVAL", "0.2").strip() or "0.2"
     out.append(
@@ -690,11 +749,23 @@ def start_all(host: str, port: int, backend_interval: int, member_interval: int)
             pass
 
     snapshot_pids = _alive_snapshot_watch_pids()
+    global_snapshot_pids = _alive_global_worker_pids("odds_snapshot_watch.py")
+    if global_snapshot_pids and not set(global_snapshot_pids).intersection(snapshot_pids):
+        print(f"[{now_iso()}] 其它运行目录已有 odds_snapshot_watch（PID={global_snapshot_pids[0]}），拒绝启动混合运行时")
+        return 2
+    follow_pids = _alive_follow_engine_pids()[:1]
+    global_follow_pids = _alive_global_worker_pids("follow_engine.py")
+    if global_follow_pids and not set(global_follow_pids).intersection(follow_pids):
+        print(f"[{now_iso()}] 其它运行目录已有 follow_engine（PID={global_follow_pids[0]}），拒绝启动混合运行时")
+        return 2
     launched: List[tuple[WorkerSpec, subprocess.Popen]] = []
     worker_specs = workers(host, port, backend_interval, member_interval)
     for w in worker_specs:
         if w.name == "odds_snapshot_watch" and snapshot_pids:
             print(f"[{now_iso()}] Reuse: odds_snapshot_watch PID={snapshot_pids[0]}")
+            continue
+        if w.name == "follow_engine" and follow_pids:
+            print(f"[{now_iso()}] Reuse: follow_engine PID={follow_pids[0]}")
             continue
         out_path = LOG_DIR / f"{w.name}.out.log"
         err_path = LOG_DIR / f"{w.name}.err.log"
@@ -727,13 +798,15 @@ def start_all(host: str, port: int, backend_interval: int, member_interval: int)
         "host": host,
         "port": int(port),
         "live": True,
-        "pids": [proc.pid for _spec, proc in launched] + snapshot_pids[:1],
+        "pids": [proc.pid for _spec, proc in launched] + snapshot_pids[:1] + follow_pids[:1],
     }
     write_pid_info(payload)
     try:
         started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         if snapshot_pids:
             write_snapshot_watch_pid_info({"recovered_at": started_at, "live": True, "pids": snapshot_pids[:1]})
+        if follow_pids:
+            write_follow_engine_pid_info({"recovered_at": started_at, "live": True, "pids": follow_pids[:1]})
         for spec, proc in launched:
             if spec.name == "odds_snapshot_watch":
                 write_snapshot_watch_pid_info({"started_at": started_at, "live": True, "pids": [proc.pid]})
@@ -767,11 +840,23 @@ def start_core(backend_interval: int, member_interval: int) -> int:
             pass
 
     snapshot_pids = _alive_snapshot_watch_pids()
+    global_snapshot_pids = _alive_global_worker_pids("odds_snapshot_watch.py")
+    if global_snapshot_pids and not set(global_snapshot_pids).intersection(snapshot_pids):
+        print(f"[{now_iso()}] 其它运行目录已有 odds_snapshot_watch（PID={global_snapshot_pids[0]}），拒绝启动混合运行时")
+        return 2
+    follow_pids = _alive_follow_engine_pids()[:1]
+    global_follow_pids = _alive_global_worker_pids("follow_engine.py")
+    if global_follow_pids and not set(global_follow_pids).intersection(follow_pids):
+        print(f"[{now_iso()}] 其它运行目录已有 follow_engine（PID={global_follow_pids[0]}），拒绝启动混合运行时")
+        return 2
     launched: List[tuple[WorkerSpec, subprocess.Popen]] = []
     worker_specs = core_workers(backend_interval, member_interval)
     for w in worker_specs:
         if w.name == "odds_snapshot_watch" and snapshot_pids:
             print(f"[{now_iso()}] Reuse(core): odds_snapshot_watch PID={snapshot_pids[0]}")
+            continue
+        if w.name == "follow_engine" and follow_pids:
+            print(f"[{now_iso()}] Reuse(core): follow_engine PID={follow_pids[0]}")
             continue
         out_path = LOG_DIR / f"{w.name}.out.log"
         err_path = LOG_DIR / f"{w.name}.err.log"
@@ -801,13 +886,15 @@ def start_core(backend_interval: int, member_interval: int) -> int:
     payload = {
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "live": True,
-        "pids": [proc.pid for _spec, proc in launched] + snapshot_pids[:1],
+        "pids": [proc.pid for _spec, proc in launched] + snapshot_pids[:1] + follow_pids[:1],
     }
     write_core_pid_info(payload)
     try:
         started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         if snapshot_pids:
             write_snapshot_watch_pid_info({"recovered_at": started_at, "live": True, "pids": snapshot_pids[:1]})
+        if follow_pids:
+            write_follow_engine_pid_info({"recovered_at": started_at, "live": True, "pids": follow_pids[:1]})
         for spec, proc in launched:
             if spec.name == "odds_snapshot_watch":
                 write_snapshot_watch_pid_info({"started_at": started_at, "live": True, "pids": [proc.pid]})
@@ -824,6 +911,40 @@ def _alive_worker_pids(info: Optional[Dict[str, Any]]) -> List[int]:
         return []
     pids = [int(x) for x in (info.get("pids") or [])]
     return [pid for pid in pids if is_pid_running(pid) and _is_probably_hdydf_worker_pid(int(pid))]
+
+
+def _alive_global_worker_pids(marker: str) -> List[int]:
+    """Find a worker regardless of cwd/data-dir.
+
+    Tauri uses the per-user runtime directory while a legacy source launcher
+    may use ``app/data``. Per-directory PID files cannot detect that duplicate;
+    this discovery complements the worker-level per-user advisory lock.
+    """
+    if os.name == "nt":
+        return []
+    try:
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid=,command="],
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).decode("utf-8", "ignore")
+    except Exception:
+        return []
+    marker = str(marker or "").strip().lower()
+    out: List[int] = []
+    for line in output.splitlines():
+        text = line.strip()
+        if not text or marker not in text.lower():
+            continue
+        match = re.match(r"^(\d+)\s+", text)
+        if not match:
+            continue
+        pid = int(match.group(1))
+        if pid == os.getpid() or not is_pid_running(pid):
+            continue
+        if pid not in out:
+            out.append(pid)
+    return out
 
 
 def _pid_command_line(pid: int) -> str:
@@ -861,6 +982,89 @@ def _alive_snapshot_watch_pids() -> List[int]:
             command = _pid_command_line(pid).lower()
             if "odds_snapshot_watch.py" in command or "--hdzz-worker odds_snapshot_watch" in command:
                 out.append(pid)
+    try:
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid=,command="],
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).decode("utf-8", "ignore")
+    except Exception:
+        output = ""
+    current_dir = ROOT.resolve()
+    for line in output.splitlines():
+        text = line.strip()
+        if not text or "odds_snapshot_watch.py" not in text:
+            continue
+        match = re.match(r"^(\d+)\s+", text)
+        if not match:
+            continue
+        try:
+            pid = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if pid in seen or not is_pid_running(pid):
+            continue
+        command = _pid_command_line(pid).lower()
+        if "odds_snapshot_watch.py" not in command and "--hdzz-worker odds_snapshot_watch" not in command:
+            continue
+        try:
+            cwd_output = subprocess.check_output(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", "ignore")
+            process_cwd = next(
+                (item[1:].strip() for item in cwd_output.splitlines() if item.startswith("n")),
+                "",
+            )
+            if process_cwd and Path(process_cwd).resolve() != current_dir:
+                continue
+        except Exception:
+            pass
+        seen.add(pid)
+        out.append(pid)
+    return out
+
+
+def _alive_follow_engine_pids() -> List[int]:
+    """Discover a live follow engine when its dedicated PID file is stale."""
+    out: List[int] = []
+    seen = set()
+    try:
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid=,command="],
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).decode("utf-8", "ignore")
+    except Exception:
+        output = ""
+    current_dir = ROOT.resolve()
+    for line in output.splitlines():
+        text = line.strip()
+        if not text or "follow_engine.py" not in text:
+            continue
+        match = re.match(r"^(\d+)\s+", text)
+        if not match:
+            continue
+        pid = int(match.group(1))
+        if pid in seen or not is_pid_running(pid):
+            continue
+        try:
+            cwd_output = subprocess.check_output(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", "ignore")
+            process_cwd = next(
+                (item[1:].strip() for item in cwd_output.splitlines() if item.startswith("n")),
+                "",
+            )
+            if process_cwd and Path(process_cwd).resolve() != current_dir:
+                continue
+        except Exception:
+            pass
+        seen.add(pid)
+        out.append(pid)
     return out
 
 
@@ -902,6 +1106,12 @@ def start_follow_engine() -> int:
 
     existing = read_follow_engine_pid_info()
     alive = _alive_worker_pids(existing)
+    if not alive:
+        alive = _alive_follow_engine_pids()
+    global_alive = [pid for pid in _alive_global_worker_pids("follow_engine.py") if pid not in alive]
+    if global_alive:
+        print(f"[{now_iso()}] 检测到其它运行目录已有跟单引擎（PID={global_alive[0]}），拒绝启动重复实例")
+        return 2
     if alive:
         print(f"[{now_iso()}] 检测到跟单引擎已在运行（{len(alive)}个），请先执行：python app.py stop-follow-engine 或 python app.py restart-follow-engine")
         return 2
@@ -1088,10 +1298,11 @@ def status_telegram_signal() -> int:
 
 
 def stop_all(force: bool) -> int:
+    ps3838_was_running = stop_ps3838_worker(force=bool(force))
     info = read_pid_info()
     if not info:
         print(".run/pids.json not found (maybe not started by app.py/app.ps1/run_all.ps1).")
-        return 1
+        return 0 if ps3838_was_running else 1
     pids = _merge_dedicated_worker_pids([int(x) for x in (info.get("pids") or [])])
     if not pids:
         print("PID list is empty.")
