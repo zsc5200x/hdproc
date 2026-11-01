@@ -3869,6 +3869,8 @@ def evaluate_follow_odds_limit(
         "current_odds": current_odds,
     }
     if current_odds is None:
+        if min_odds is not None or max_odds is not None:
+            return (True, "已按水位策略跳过：当前注单缺少有效水位，无法核对限制。", meta)
         return (False, "", meta)
     if min_odds is not None and current_odds < min_odds:
         return (True, f"已按水位策略跳过：当前水位 {current_odds:g} 低于最低跟单水位 {min_odds:g}。", meta)
@@ -4333,7 +4335,7 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             # 近期回补频率（秒）：避免在主循环每一帧都扫尾部导致性能下降
             "backfill_interval_seconds": 10,
             # 分单：把本次应跟金额均分到 N 个会员执行
-            "split_count": 1,
+            "split_count": 2,
             # 分单间隔：同一订单的第2/3/...笔延迟多少秒再下
             "split_delay_seconds": 0,
             # 重试策略（用于滚球/水位变化等瞬态失败）
@@ -4348,12 +4350,12 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             # Snapshot Direct 是唯一生产执行路径。
             "execution_mode": "snapshot_direct",
             "snapshot_direct_enabled": True,
-            "snapshot_max_age_ms": 500,
-            # 500ms is the preferred fast path.  Diagnostic BetContext may
+            "snapshot_max_age_ms": 8000,
+            # 8000ms is the preferred local-run path. Diagnostic BetContext may
             # use a bounded structure candidate because FT_order_view performs
             # the final submit-time structure/quote confirmation.
-            "snapshot_preferred_age_ms": 500,
-            "snapshot_structure_max_age_ms": 3000,
+            "snapshot_preferred_age_ms": 8000,
+            "snapshot_structure_max_age_ms": 15000,
             # 在同一个 fresh Session 中先执行 FT_order_view，
             # 取得提交时平台认可的盘口结构/ioratio，再继续 FT_bet。
             "bet_context_mode": "diagnostic_order_view",
@@ -4392,11 +4394,11 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             "allow_total_line_change": False,
             # 每轮最多处理多少个待重试任务（避免单笔卡死导致漏单）
             "queue_max_per_tick": 5,
-            # 有界并发：不同会员可并行，同一会员始终只允许一个进行中的 attempt。
-            # 每个会员同一时间只跑一个下注请求；默认并发数按常见的 3 个可下注会员设置。
+            # 有界并发：不同会员可并行，每个会员最多允许两个进行中的 attempt。
+            # 默认并发数按本机运行配置设置为 8。
             # 调度器会在实际可用会员不足时自动降为可运行数量。
-            "parallel_attempts": 3,
-            "per_member_parallel_attempts": 1,
+            "parallel_attempts": 8,
+            "per_member_parallel_attempts": 2,
             "market_rules": normalize_market_rules({}),
             "reverse_rules": normalize_reverse_rules({}),
             "targets": [],
@@ -5551,37 +5553,36 @@ def _snapshot_max_age_ms(settings: Dict[str, Any]) -> int:
     except Exception:
         value = 0
     if value <= 0:
-        value = 500
-    return max(50, min(10000, value))
+        value = 8000
+    return max(50, min(30000, value))
 
 
 def _snapshot_preferred_age_ms(settings: Dict[str, Any]) -> int:
-    """Preferred cache age; the configured 500ms remains the default."""
+    """Preferred cache age; the configured 8000ms remains the default."""
     raw = settings.get("snapshot_preferred_age_ms")
     try:
         value = int(raw) if raw not in (None, "") else _snapshot_max_age_ms(settings)
     except Exception:
         value = _snapshot_max_age_ms(settings)
-    return max(50, min(10000, value))
+    return max(50, min(30000, value))
 
 
 def _snapshot_structure_max_age_ms(settings: Dict[str, Any], *, context_mode: str) -> int:
     """Bound the candidate row window used by diagnostic BetContext only.
 
-    The watcher measurements show a roughly 2.45s P99 refresh period.  A
-    3-second structure window gives the diagnostic context a bounded candidate
+    A bounded 15-second structure window gives the diagnostic context a candidate
     while the subsequent FT_order_view remains the authoritative submit-time
-    structure/quote check.  Non-context paths retain the 500ms hard gate.
+    structure/quote check. Non-context paths retain the preferred-age gate.
     """
     preferred = _snapshot_preferred_age_ms(settings)
     if str(context_mode or "").strip().lower() != "diagnostic_order_view":
         return preferred
     raw = settings.get("snapshot_structure_max_age_ms")
     try:
-        value = int(raw) if raw not in (None, "") else 3000
+        value = int(raw) if raw not in (None, "") else 15000
     except Exception:
-        value = 3000
-    return max(preferred, min(10000, value))
+        value = 15000
+    return max(preferred, min(30000, value))
 
 
 def _lookup_snapshot_candidate(
@@ -5591,7 +5592,7 @@ def _lookup_snapshot_candidate(
     settings: Dict[str, Any],
     context_mode: str,
 ) -> Tuple[Any, int]:
-    """Prefer a sub-500ms row, then bounded diagnostic structure fallback."""
+    """Prefer a row within the configured age, then use bounded diagnostic fallback."""
     preferred = _snapshot_preferred_age_ms(settings)
     # A failed FT_order_view is a context transport problem, not a public
     # revision problem.  On its bounded retry we may reuse the current exact
@@ -7740,7 +7741,7 @@ def main() -> int:
     last_session_prune_at = 0.0
     atexit.register(session_pool.close_all)
     # 线程池只负责网络 attempt；结果回收仍在主线程完成，避免并发写状态文件/TG。
-    attempt_dispatcher = AttemptDispatcher(max_workers=50)
+    attempt_dispatcher = AttemptDispatcher(max_workers=50, per_member_limit=2)
     parallel_inflight: Dict[str, Dict[str, Any]] = {}
     notification_queue = _AsyncFollowNotificationQueue(trace_path)
     last_state_persist_at = 0.0
@@ -8208,6 +8209,9 @@ def main() -> int:
 
     while True:
         settings = load_settings(data_dir)
+        attempt_dispatcher.set_per_member_limit(
+            max(1, min(50, int(settings.get("per_member_parallel_attempts") or 2)))
+        )
         # Cross-process watcher publish wakeup.  This only moves matching
         # waiting jobs to the front of the fallback scheduler; it never
         # changes the MarketRow or bypasses validation.
@@ -9209,7 +9213,7 @@ def main() -> int:
 
             # 先排除已经在网络请求中的会员。submit() 仍会做最终原子校验，
             # 但这里提前过滤可以避免选中忙会员后误走同步执行分支。
-            busy_member_ids = attempt_dispatcher.busy_member_ids() if parallel_attempts > 1 else set()
+            busy_member_ids = attempt_dispatcher.saturated_member_ids() if parallel_attempts > 1 else set()
             avoid = set(used_member_ids) | set(busy_member_ids)
             if job.member_id and (not in_pinned_wait) and (not in_member_quote_wait):
                 avoid.add(str(job.member_id))

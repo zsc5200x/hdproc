@@ -65,6 +65,26 @@ def merge_signal_pull_config(existing: Dict[str, Any], incoming: Dict[str, Any])
     return ensure_signal_pull_config_defaults(out)
 
 
+def signal_pull_config_payload(doc: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = ensure_signal_pull_config_defaults(doc)
+    token = cfg["signal_pull_token"]
+    token_mask = (token[:4] + "…" + token[-4:]) if len(token) > 8 else ("已设置" if token else "")
+    return {
+        "ok": True,
+        "config": {
+            "signal_pull_enabled": cfg["signal_pull_enabled"],
+            "signal_pull_url": cfg["signal_pull_url"],
+            "signal_pull_token": "",
+            "signal_pull_token_set": bool(token),
+            "signal_pull_token_mask": token_mask,
+            "signal_pull_live_only": cfg["signal_pull_live_only"],
+            "signal_pull_limit": cfg["signal_pull_limit"],
+            "signal_pull_interval_seconds": cfg["signal_pull_interval_seconds"],
+        },
+        "configured": bool(cfg["signal_pull_url"]),
+    }
+
+
 def reset_signal_pull_config(existing: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(existing, dict):
         out: Dict[str, Any] = {}

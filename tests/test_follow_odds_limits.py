@@ -63,3 +63,15 @@ class TestFollowOddsLimits(unittest.TestCase):
         self.assertEqual(message, "")
         self.assertEqual(meta["min_odds"], None)
         self.assertEqual(meta["max_odds"], None)
+
+    def test_skips_missing_odds_when_limit_is_configured(self) -> None:
+        from hdzz.core.follower.engine import evaluate_follow_odds_limit
+
+        skipped, message, meta = evaluate_follow_odds_limit(
+            settings={"follow_min_odds": 0.6},
+            ioratio=None,
+        )
+
+        self.assertTrue(skipped)
+        self.assertIn("缺少有效水位", message)
+        self.assertIsNone(meta["current_odds"])

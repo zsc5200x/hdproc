@@ -25,6 +25,28 @@ class TestWindowsPortableStartup(unittest.TestCase):
         self.assertIn('%~dp0python\\\\python.exe app.py start --host %HOST% --port %PORT%', packer)
         self.assertNotIn('%~dp0python\\\\python.exe webui_server.py --host %HOST% --port %PORT%', packer)
 
+    def test_package_portable_excludes_runtime_credentials_and_data(self) -> None:
+        packer = read_text("app/tools/package_portable.ps1")
+
+        for path in (
+            'Join-Path $src "app\\data"',
+            'Join-Path $src "app\\orders"',
+            'Join-Path $src "app\\state"',
+            'Join-Path $src "ps3838\\var"',
+            'Join-Path $src "ps3838\\crown\\data"',
+        ):
+            self.assertIn(path, packer)
+        for filename in (
+            '"config.json"',
+            '"arsenal.json"',
+            '"tg_auth.json"',
+            '"telegram_signal_secrets.json"',
+            '"betradar-feed-token.txt"',
+        ):
+            self.assertIn(filename, packer)
+        self.assertIn('if (-not $includeLogs)', packer)
+        self.assertIn('Join-Path $src "app\\.run"', packer)
+
     def test_readme_portable_describes_full_start(self) -> None:
         readme = read_text("README_PORTABLE.txt")
 

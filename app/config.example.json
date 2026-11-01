@@ -61,6 +61,9 @@
   "signal_pull_push_history_on_start": false,
   "signal_pull_live_only": true,
   "signal_pull_debug": false,
+  "ps3838_app_dir": "",
+  "ps3838_app_url": "http://127.0.0.1:8787",
+  "ps3838_app_auto_start": true,
   "proxy": "http://127.0.0.1:7897",
   "targets": [
     {

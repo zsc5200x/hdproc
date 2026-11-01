@@ -363,3 +363,61 @@ def test_pool_toggle_updates_only_ps3838_and_starts_worker_only_on_resume(tmp_pa
     assert saved["ps3838_accounts"][0]["enabled"] is enabled
     assert saved["targets"] == cfg["targets"]
     assert spawn.call_count == int(enabled)
+
+
+def test_pool_update_can_store_partner_sync_fields(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    cfg = {"targets": [{"name": "ag_demo", "enabled": True}],
+           "ps3838_accounts": [{"name": "demo", "enabled": False}]}
+    watch.atomic_write_json(config_path, cfg)
+    spawn = Mock(return_value=(True, True, ""))
+    monkeypatch.setattr(server, "ensure_ps3838_watch_running", spawn)
+    handler = object.__new__(server.Handler)
+    handler.path = "/api/ps3838/update"
+    body = json.dumps({
+        "name": "demo",
+        "patch": {"partner_sync_enabled": True, "partner_agents": "A1, A2"},
+    }).encode()
+    handler.headers = {"content-length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+    handler._config_path = config_path
+    handler._data_dir = tmp_path
+    handler._send_json = Mock()
+    handler.do_POST()
+    assert handler._send_json.call_args.args[0] == 200
+    saved = watch.read_json(config_path, {})["ps3838_accounts"][0]
+    assert saved["partner_sync_enabled"] is True
+    assert saved["partner_agents"] == ["A1", "A2"]
+    assert saved["enabled"] is False
+    spawn.assert_not_called()
+
+
+def test_add_ps3838_node_stores_partner_sync_fields(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    watch.atomic_write_json(config_path, {"ps3838_accounts": []})
+    spawn = Mock(return_value=(True, True, ""))
+    monkeypatch.setattr(server, "ensure_ps3838_watch_running", spawn)
+    handler = object.__new__(server.Handler)
+    handler.path = "/api/ps3838/add"
+    body = json.dumps({
+        "base_url": "https://www.ps38ag.com",
+        "username": "partner-parent",
+        "password": "secret",
+        "interval_seconds": 20,
+        "partner_sync_enabled": True,
+        "partner_agents": ["A1", "A2"],
+    }).encode()
+    handler.headers = {"content-length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+    handler._config_path = config_path
+    handler._data_dir = tmp_path
+    handler._send_json = Mock()
+    handler.do_POST()
+    assert handler._send_json.call_args.args[0] == 200
+    saved = watch.read_json(config_path, {})["ps3838_accounts"][0]
+    assert saved["partner_sync_enabled"] is True
+    assert saved["partner_agents"] == ["A1", "A2"]
+    assert saved["username"] == "partner-parent"
+    state = watch.read_json(tmp_path / "ps3838/state" / f"{saved['name']}.json", {})
+    assert state["relogin_in_progress"] is True
+    spawn.assert_called_once()

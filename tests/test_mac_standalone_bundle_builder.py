@@ -296,7 +296,7 @@ class TestMacStandaloneBundleBuilder(unittest.TestCase):
 
             self.assertIn((str(splash_path.resolve()), "bundle_assets"), spec_inputs["datas"])
 
-    def test_build_spec_inputs_includes_tg_auth_seed_when_present(self) -> None:
+    def test_build_spec_inputs_excludes_tg_auth_seed_when_present(self) -> None:
         from build_mac_standalone_app import build_spec_inputs
 
         with tempfile.TemporaryDirectory() as td:
@@ -315,7 +315,7 @@ class TestMacStandaloneBundleBuilder(unittest.TestCase):
             spec_inputs = build_spec_inputs(source_root, browsers_dir, bundle_name="HD Sports后台系统")
 
             normalized = {(str(Path(src).resolve()), dst) for src, dst in spec_inputs["datas"]}
-            self.assertIn((str(tg_auth.resolve()), "app/data"), normalized)
+            self.assertNotIn((str(tg_auth.resolve()), "app/data"), normalized)
 
     def test_build_spec_inputs_includes_signal_puller_state_seed_when_present(self) -> None:
         from build_mac_standalone_app import build_spec_inputs

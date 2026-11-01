@@ -29,11 +29,21 @@
         interval_seconds: 1,
       },
       ps3838: {
-        base_url: 'https://www.ps38ag.com',
+        base_url: 'https://www.ps38ag.com/partner/zh-cn/login',
         username: '',
         password: '',
         interval_seconds: 15,
         telegram_chat_id: '',
+        partner_sync_enabled: true,
+        partner_agents: [],
+      },
+      bridge: {
+        enabled: true,
+        target: 'ps3838',
+        token: '',
+        allow_remote: false,
+        endpoint: '',
+        status: {},
       },
     };
   }
@@ -85,16 +95,41 @@
     return payload;
   }
 
+  function buildBridgePayload(bridge) {
+    const current = bridge || {};
+    const target = toTrimmedString(current.target) || 'ps3838';
+    if (!/^[A-Za-z0-9_.-]+$/.test(target)) {
+      throw new Error('订单目标只能包含字母、数字、下划线、点和短横线');
+    }
+    return {
+      local_bridge_enabled: !!current.enabled,
+      local_bridge_configured: true,
+      local_bridge_target: target,
+      local_bridge_token: toTrimmedString(current.token),
+      local_bridge_allow_remote: !!current.allow_remote,
+    };
+  }
+
   function buildAddNodeSubmitRequest(form) {
     const current = form || {};
+    if (current.mode === 'bridge') {
+      return {
+        endpoint: '/api/local-bridge-config',
+        payload: buildBridgePayload(current.bridge),
+      };
+    }
     if (current.mode === 'ps3838') {
       const ps = current.ps3838 || {};
       const payload = {
-        base_url: toTrimmedString(ps.base_url) || 'https://www.ps38ag.com',
+        base_url: toTrimmedString(ps.base_url) || 'https://www.ps38ag.com/partner/zh-cn/login',
         username: toTrimmedString(ps.username),
         password: String(ps.password || ''),
         interval_seconds: Number(ps.interval_seconds || 15),
         telegram_chat_id: toTrimmedString(ps.telegram_chat_id),
+        partner_sync_enabled: !!ps.partner_sync_enabled,
+        partner_agents: (Array.isArray(ps.partner_agents) ? ps.partner_agents : String(ps.partner_agents || '').split(','))
+          .map((item) => String(item || '').trim())
+          .filter(Boolean),
       };
       if (!payload.username || !payload.password) {
         throw new Error('请填写：平博账号 / 登录密码');
@@ -116,6 +151,7 @@
 
   return {
     createDefaultAddNodeForm,
+    buildBridgePayload,
     buildAddNodeSubmitRequest,
   };
 });

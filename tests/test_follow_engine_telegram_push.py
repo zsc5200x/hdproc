@@ -257,7 +257,8 @@ class TestFollowEngineTelegramPush(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            bot_token, chat_id, _proxy, order_preview_image, _ui_theme = load_tg_config(cfg_path)
+            with patch("hdzz.core.follower.engine._resolve_order_preview_local_path", return_value=Path("gdcg.jpg")):
+                bot_token, chat_id, _proxy, order_preview_image, _ui_theme = load_tg_config(cfg_path)
 
         self.assertEqual(bot_token, "token")
         self.assertEqual(chat_id, "-100123")

@@ -411,6 +411,20 @@ body[data-view="arsenal"] .pool-alert-item small { color: var(--pool-muted); fon
 #modal-add .form-input:hover { border-color: var(--ops-border-strong); }
 #modal-add .form-input:focus { border-color: var(--ops-cyan); background: rgba(4, 20, 34, 0.96); box-shadow: 0 0 0 2px rgba(22, 199, 245, 0.12); }
 #modal-add .form-hint { color: var(--ops-text-3); font-size: 10px; line-height: 1.45; }
+#modal-add .form-hint code { padding: 1px 4px; border: 1px solid var(--ops-border); border-radius: 3px; color: var(--ops-cyan); background: rgba(22, 199, 245, 0.06); font: 10px/1.4 "JetBrains Mono", monospace; }
+#modal-add .form-input[readonly] { color: var(--ops-cyan); cursor: text; background: rgba(22, 199, 245, 0.05); }
+#modal-add .bridge-token-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+#modal-add .bridge-token-row .form-input { flex: 1; min-width: 0; }
+#modal-add .bridge-token-row .btn { flex: 0 0 auto; height: 38px; padding-inline: 12px; }
+#modal-add .add-node-bridge-status { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--ops-border); border-radius: 6px; color: var(--ops-text-2); background: rgba(3, 15, 27, 0.7); font-size: 11px; line-height: 1.5; }
+#modal-add .add-node-bridge-status b { color: var(--ops-text); font-weight: 650; }
+#modal-add .add-node-bridge-status .bridge-status-line { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+#modal-add .add-node-bridge-status .bridge-status-line span { color: var(--ops-text-3); }
+#modal-add .add-node-bridge-status .bridge-status-line strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ops-text); font-weight: 600; }
+#modal-add .add-node-bridge-status .bridge-status-line strong.is-ok { color: var(--ops-lime); }
+#modal-add .add-node-bridge-status .bridge-status-line strong.is-warn { color: var(--ops-amber); }
+#modal-add .add-node-bridge-status .bridge-status-line strong.is-bad { color: #ff8795; }
+#modal-add .add-node-bridge-status .bridge-status-empty { color: var(--ops-text-3); }
 #modal-add .login-tab-switch { min-height: 38px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px; padding: 3px; border: 1px solid var(--ops-border); border-radius: 6px; background: rgba(3, 15, 27, 0.86); }
 #modal-add .login-tab-btn { height: 30px; border: 1px solid transparent; border-radius: 4px; color: var(--ops-text-2); background: transparent; font-size: 11px; font-weight: 650; box-shadow: none; }
 #modal-add .login-tab-btn:hover { color: var(--ops-text); background: rgba(22, 199, 245, 0.06); }
