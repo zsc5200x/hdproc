@@ -7,8 +7,10 @@ import { describeSource } from "../../dashboard/static/modules/shared/source-sta
 import { crownPinnaclePrice, crownPinnacleQuote, crownPinnacleChange } from "../../crown/static/modules/pinnacle-format.js";
 
 test("only the retained pages resolve, and the default is my-events", () => {
-  for (const page of ["my-events", "settings"]) assert.equal(resolvePage(page), page);
-  for (const retired of ["home", "crown", "pinnacle", "merge", "unknown"]) assert.equal(resolvePage(retired), "my-events");
+  assert.equal(resolvePage("my-events"), "my-events");
+  for (const retired of ["settings", "home", "crown", "pinnacle", "merge", "unknown"]) {
+    assert.equal(resolvePage(retired), "my-events");
+  }
 });
 
 test("homepage Pinnacle prices never fall back to decimal odds", () => {
