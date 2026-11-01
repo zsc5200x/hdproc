@@ -50,6 +50,26 @@ test('builds remote signal request in signal mode', () => {
   });
 });
 
+test('builds read-only PS3838 request with the default base URL', () => {
+  const form = createDefaultAddNodeForm();
+  form.mode = 'ps3838';
+  form.ps3838.username = 'pb-demo';
+  form.ps3838.password = 'secret';
+  form.ps3838.interval_seconds = 20;
+  form.ps3838.telegram_chat_id = '-100123';
+
+  const req = buildAddNodeSubmitRequest(form);
+
+  assert.equal(req.endpoint, '/api/ps3838/add');
+  assert.deepEqual(req.payload, {
+    base_url: 'https://www.ps38ag.com',
+    username: 'pb-demo',
+    password: 'secret',
+    interval_seconds: 20,
+    telegram_chat_id: '-100123',
+  });
+});
+
 test('builds login2 account request with monitor rules', () => {
   const form = createDefaultAddNodeForm();
   form.mode = 'account';

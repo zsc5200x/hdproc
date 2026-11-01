@@ -1,0 +1,11 @@
+{
+  "name": "ps3838",
+  "base_url": "https://www.ps38ag.com",
+  "username": "",
+  "password": "",
+  "interval_seconds": 15,
+  "headless": false,
+  "minimize_after_login": false,
+  "browser_channel": "",
+  "data_dir": "data"
+}

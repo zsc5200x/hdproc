@@ -36,6 +36,7 @@ CORE_PID_FILE = RUN_DIR / "pids_core.json"
 FOLLOW_ENGINE_PID_FILE = RUN_DIR / "follow_engine.pid.json"
 SNAPSHOT_WATCH_PID_FILE = RUN_DIR / "odds_snapshot_watch.pid.json"
 TELEGRAM_SIGNAL_PID_FILE = RUN_DIR / "telegram_signal.pid.json"
+PS3838_PID_FILE = ROOT / "data" / "ps3838" / "worker.pid"
 
 
 @dataclass
@@ -241,6 +242,7 @@ _WORKER_MARKERS = [
     "follow_engine.py",
     "telegram_bot.py",
     "telegram_signal_watch.py",
+    "ps3838_watch.py",
 ]
 
 
@@ -309,6 +311,31 @@ def cleanup_runtime_playwright_browsers(force: bool) -> None:
             continue
         print(f"Stop runtime browser PID={pid}")
         stop_pid(pid, force=bool(force))
+
+
+def stop_ps3838_worker(force: bool) -> bool:
+    """停止 WebUI 独立启动的平博只读 worker，并清理其 PID 文件。"""
+    try:
+        pid = int(PS3838_PID_FILE.read_text(encoding="utf-8").strip()) if PS3838_PID_FILE.exists() else 0
+    except Exception:
+        pid = 0
+    if not pid:
+        return False
+    had_process = is_pid_running(pid)
+    if had_process and _is_probably_hdydf_worker_pid(pid):
+        print(f"Stop PS3838 watcher PID={pid}")
+        stop_pid(pid, force=bool(force))
+        deadline = time.time() + 12.0
+        while time.time() < deadline and is_pid_running(pid):
+            time.sleep(0.2)
+        if is_pid_running(pid) and not force:
+            print(f"Force stop PS3838 watcher PID={pid}")
+            stop_pid(pid, force=True)
+    try:
+        PS3838_PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return had_process
 
 
 def stop_pid(pid: int, force: bool) -> None:
@@ -1271,10 +1298,11 @@ def status_telegram_signal() -> int:
 
 
 def stop_all(force: bool) -> int:
+    ps3838_was_running = stop_ps3838_worker(force=bool(force))
     info = read_pid_info()
     if not info:
         print(".run/pids.json not found (maybe not started by app.py/app.ps1/run_all.ps1).")
-        return 1
+        return 0 if ps3838_was_running else 1
     pids = _merge_dedicated_worker_pids([int(x) for x in (info.get("pids") or [])])
     if not pids:
         print("PID list is empty.")

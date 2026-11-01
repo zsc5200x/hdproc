@@ -887,6 +887,7 @@ def format_telegram_message(
 def format_backend_order_telegram_message(
     order: Dict[str, Any],
     ui_theme: Optional[Dict[str, Any]] = None,
+    source_name: str = "",
 ) -> str:
     """Format a one-shot source-order notification that is never edited by follow_engine."""
     def fmt_amount(value: Any) -> str:
@@ -900,9 +901,17 @@ def format_backend_order_telegram_message(
 
     league = str(order.get("league") or "未知")
     sides = str(order.get("sides") or "未知")
-    order_status = "滚球" if "滚球" in str(order.get("betType") or "") else "早盘"
+    bet_type = str(order.get("betType") or "")
+    if "滚球" in bet_type:
+        order_status = "滚球"
+    elif "早盘" in bet_type or not source_name:
+        order_status = "早盘"
+    else:
+        order_status = "未提供"
     bet_display = parse_bet_display(order, order_status)
     stake = html.escape(fmt_amount(order.get("stake") or "未知"))
+    if source_name and order.get("currency"):
+        stake += f" {html.escape(str(order['currency']))}"
     lines = [
         (
             f"<b>{_order_card_icon(ui_theme, 'title', '🤣')}新注单提醒"
@@ -938,9 +947,17 @@ def format_backend_order_telegram_message(
                 spaced=False,
             ),
             "",
-            _themed_line(_order_card_icon(ui_theme, "stake", "💰"), f"金额：{stake}", spaced=True),
+            _themed_line(_order_card_icon(ui_theme, "stake", "💰"), f"{'原注金额' if source_name else '金额'}：{stake}", spaced=True),
         ]
     )
+    if source_name:
+        dt = f"{order.get('date') or ''} {order.get('time') or ''}".strip() or str(order.get("placed") or "")
+        lines.extend([
+            "",
+            _themed_line(_order_card_icon(ui_theme, "source", ""), f"来源后台：{html.escape(source_name)}", spaced=False),
+            _themed_line(_order_card_icon(ui_theme, "order_id", "🧠"), f"单号：{html.escape(str(order.get('orderId') or '未知'))}", spaced=False),
+            _themed_line(_order_card_icon(ui_theme, "time", "🗓"), f"时间：{html.escape(dt or now_cn())}", spaced=False),
+        ])
     return "\n".join(lines)
 
 

@@ -40,6 +40,7 @@ from hdzz.core.follower.strategy import encode_total_line as _encode_total_line
 from hdzz.core.follower.strategy import format_handicap_line_value as _format_handicap_line_value
 from hdzz.core.follower.strategy import format_total_line_value as _format_total_line_value
 from hdzz.core.watcher.order_filter import normalize_member_names
+from hdzz.core.watcher.ps3838_watch import safe_name as ps3838_safe_name
 from hdzz.core.watcher.ag_watcher import (
     _load_tg_ui_theme as _load_order_tg_ui_theme,
     format_backend_order_telegram_message,
@@ -943,6 +944,83 @@ def ensure_ag_wmc_watch_running() -> Tuple[bool, bool, str]:
         return True, True, ""
     except Exception as e:
         return False, False, f"start ag_wmc_watch failed: {e}"
+
+
+def ensure_ps3838_watch_running(config_path: Path, data_dir: Path) -> Tuple[bool, bool, str]:
+    """启动独立的 PS3838 只读 worker；不加入 app.py 的跟单 worker 列表。"""
+    runtime_dir = Path(data_dir) / "ps3838"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    pid_path = runtime_dir / "worker.pid"
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip()) if pid_path.exists() else 0
+    except Exception:
+        pid = 0
+    if pid and is_pid_running(pid):
+        return True, False, ""
+    try:
+        env = dict(os.environ)
+        apply_playwright_browsers_path(env, APP_ROOT)
+        log_dir = Path(os.environ.get("HDZZ_LOG_DIR") or ".run/logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        out_f = open(log_dir / "ps3838_watch.out.log", "ab")
+        err_f = open(log_dir / "ps3838_watch.err.log", "ab")
+        launcher_path = Path(os.getcwd()) / "ps3838_watch.py"
+        if not launcher_path.exists():
+            launcher_path = Path(__file__).resolve().parents[4] / "app" / "ps3838_watch.py"
+        cmd = [sys.executable, "-u", str(launcher_path), "--config", str(config_path), "--data-dir", str(data_dir)]
+        kwargs: Dict[str, Any] = {
+            "args": cmd,
+            "cwd": str(Path(config_path).resolve().parent),
+            "env": env,
+            "stdout": out_f,
+            "stderr": err_f,
+        }
+        if os.name != "nt":
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(**kwargs)
+        pid_path.write_text(str(proc.pid), encoding="utf-8")
+        return True, True, ""
+    except Exception as exc:
+        return False, False, f"start ps3838_watch failed: {exc}"
+
+
+def ps3838_login_in_progress(data_dir: Path, account: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    """重复点击登录不能打断正在输入的 2FA；崩溃后残留状态不能阻止重开。"""
+    if not bool(account.get("enabled", True)) or not state.get("relogin_in_progress"):
+        return False
+    try:
+        pid = int((Path(data_dir) / "ps3838" / "worker.pid").read_text(encoding="utf-8").strip())
+        return bool(pid and is_pid_running(pid))
+    except Exception:
+        return False
+
+
+def read_ps3838_status(data_dir: Path, name: str, *, enabled: bool = True) -> Dict[str, Any]:
+    path = Path(data_dir) / "ps3838" / "state" / f"{safe_name(name)}.json"
+    state = read_json_file(path, {})
+    status = str(state.get("status") or "offline").strip().lower()
+    if status not in {"online", "offline", "relogin"}:
+        status = "offline"
+    message = str(state.get("status_message") or "").strip()
+    login_waiting = ps3838_login_in_progress(data_dir, {"enabled": enabled}, state)
+    if not enabled:
+        status = "offline"
+        message = "已停用，不会自动登录或扫描"
+    elif status == "relogin" and not login_waiting:
+        status = "offline"
+        message = "登录进程已停止；请点击重新登录继续"
+    return {
+        "status": status,
+        "status_message": message or ({"online": "在线", "relogin": "登录中"}.get(status) or "未登录"),
+        "needs_manual_login": enabled and status != "online",
+        "has_session": enabled and bool(state.get("session_ready")),
+        "relogin_in_progress": login_waiting,
+        "last_ok_at": float(state.get("last_ok_at") or 0),
+        "last_poll_at": float(state.get("last_poll_at") or 0),
+        "order_count": int(state.get("order_count") or 0),
+        "new_count": int(state.get("new_count") or 0),
+        "update_count": int(state.get("update_count") or 0),
+    }
 
 def _prepare_stop_all_without_killing_self() -> Tuple[bool, str]:
     """
@@ -1858,6 +1936,57 @@ def read_orders_file(path: Path, since: int = 0, limit: int = 200) -> List[Dict[
     # 最新在前
     out.sort(key=lambda x: int(x.get("ts") or 0), reverse=True)
     return out[: max(1, int(limit))]
+
+
+def read_ps3838_dashboard_orders(
+    data_dir: Path, accounts: List[Dict[str, Any]], *, target: str = "", since: int = 0, limit: int = 200,
+) -> List[Dict[str, Any]]:
+    """只读合并平博采集流水；同账号同票号取最新事件，不进入跟单订单目录。"""
+    result: List[Dict[str, Any]] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        name = str(account.get("name") or "").strip()
+        if not name or (target and target != name):
+            continue
+        latest: Dict[str, Dict[str, Any]] = {}
+        path = Path(data_dir) / "ps3838" / "orders" / f"{ps3838_safe_name(name)}.jsonl"
+        try:
+            with path.open(encoding="utf-8-sig") as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                        if not isinstance(row, dict):
+                            continue
+                        oid = str(row.get("orderId") or "").strip()
+                        ts = int(row.get("ts") or 0)
+                        if not oid or ts <= 0:
+                            continue
+                    except (ValueError, TypeError):
+                        continue  # 容忍末行尚未写完。
+                    previous = latest.get(oid)
+                    if previous and int(previous["ts"]) > ts:
+                        continue
+                    row.update({
+                        "ts": ts, "target": name, "provider": "ps3838", "read_only": True,
+                        "display_id": json.dumps(["ps3838", name, oid], separators=(",", ":")),
+                        "backendName": str(account.get("username") or name),
+                        "display_line": row.get("line") or "",
+                        "display_reverse_applied": False,
+                        "follow_avg_odds": None, "follow_avg_odds_count": 0,
+                    })
+                    choices = row.get("choices") or []
+                    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+                    if len(choices) == 1:
+                        row["marketLabel"] = {"HDP": "让球"}.get(choice.get("btName"), choice.get("btName") or "")
+                        if isinstance(choice.get("inplay"), bool):
+                            row["orderType"] = "滚球" if choice["inplay"] else "早盘"
+                    latest[oid] = row
+        except OSError:
+            continue
+        result.extend(row for row in latest.values() if not since or row["ts"] > since)
+    result.sort(key=lambda row: row["ts"], reverse=True)
+    return result[:max(1, int(limit))]
 
 
 def _compose_order_play(row: Dict[str, Any]) -> str:
@@ -5460,16 +5589,21 @@ class Handler(SimpleHTTPRequestHandler):
                 # 汇总所有 target
                 for p in self._orders_dir.glob("*.jsonl"):
                     orders.extend(read_orders_file(p, since=since, limit=limit))
-                orders.sort(key=lambda x: int(x.get("ts") or 0), reverse=True)
-                orders = orders[: max(1, int(limit))]
+
+            orders.extend(read_ps3838_dashboard_orders(
+                self._data_dir, self._read_config().get("ps3838_accounts") or [],
+                target=target, since=since, limit=limit,
+            ))
+            orders.sort(key=lambda x: int(x.get("ts") or 0), reverse=True)
 
             if deleted_order_ids:
-                orders = [row for row in orders if _extract_order_id_from_row(row) not in deleted_order_ids]
+                orders = [row for row in orders if (row.get("display_id") if row.get("read_only") else _extract_order_id_from_row(row)) not in deleted_order_ids]
+            orders = orders[:max(1, int(limit))]
 
             order_ids: List[str] = []
             seen_order_ids: set = set()
             for row in orders:
-                if not isinstance(row, dict):
+                if not isinstance(row, dict) or row.get("read_only"):
                     continue
                 oid = _extract_order_id_from_row(row)
                 if not oid or oid in seen_order_ids:
@@ -5484,7 +5618,7 @@ class Handler(SimpleHTTPRequestHandler):
                 order_ids,
             )
             for row in orders:
-                if not isinstance(row, dict):
+                if not isinstance(row, dict) or row.get("read_only"):
                     continue
                 oid = _extract_order_id_from_row(row)
                 rec = avg_odds_by_order.get(oid)
@@ -5790,7 +5924,25 @@ class Handler(SimpleHTTPRequestHandler):
                         "time_offset_hours": t.get("time_offset_hours") or 0,
                     }
                 )
-            self._send_json(200, {"ok": True, "accounts": accounts, "server_time": now_iso()})
+            ps_accounts = []
+            for item in cfg.get("ps3838_accounts") or []:
+                if not isinstance(item, dict):
+                    continue
+                ps_accounts.append(
+                    {
+                        "name": item.get("name") or "",
+                        "provider": "ps3838",
+                        "base_url": item.get("base_url") or "https://www.ps38ag.com",
+                        "username": item.get("username") or "",
+                        "enabled": bool(item.get("enabled", True)),
+                        "proxy": item.get("proxy") or "",
+                        "interval_seconds": float(item.get("interval_seconds") or 15),
+                    }
+                )
+            self._send_json(
+                200,
+                {"ok": True, "accounts": accounts, "ps3838_accounts": ps_accounts, "server_time": now_iso()},
+            )
             return
 
         if u.path == "/api/telegram-config":
@@ -6502,6 +6654,17 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/status":
             cfg = self._read_config()
             targets = cfg.get("targets") or []
+            # WebUI 可能在 app.py 重启后先收到状态请求；确保已保存的平博账号
+            # 仍有独立只读 worker，不需要用户重新点击“接入节点”。
+            ps_accounts = [
+                item for item in (cfg.get("ps3838_accounts") or [])
+                if isinstance(item, dict) and bool(item.get("enabled", True))
+            ]
+            if ps_accounts:
+                try:
+                    ensure_ps3838_watch_running(self._config_path, self._data_dir)
+                except Exception:
+                    pass
             now = time.time()
             platform_state = read_platform_state(self._data_dir)
             statuses: Dict[str, Any] = {}
@@ -6524,6 +6687,14 @@ class Handler(SimpleHTTPRequestHandler):
                     )
                 statuses[name] = build_account_status_entry(t, st, now=now)
 
+            ps_statuses: Dict[str, Any] = {}
+            for account in cfg.get("ps3838_accounts") or []:
+                if not isinstance(account, dict):
+                    continue
+                ps_name = str(account.get("name") or "").strip()
+                if ps_name:
+                    ps_statuses[ps_name] = read_ps3838_status(self._data_dir, ps_name, enabled=bool(account.get("enabled", True)))
+
             core_running, core_pid_count = core_running_flag()
             follow_running, follow_pid = follow_engine_running_flag()
             snapshot_running, snapshot_pid = snapshot_watch_running_flag()
@@ -6531,6 +6702,7 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, {
                 "ok": True,
                 "statuses": statuses,
+                "ps3838_statuses": ps_statuses,
                 "server_time": now_iso(),
                 "uptime": int(time.time() - SERVER_START_TIME),
                 "latency": get_latency(), 
@@ -6651,6 +6823,10 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/telegram-signal/logout",
             "/api/mapping",
             "/api/accounts/add",
+            "/api/ps3838/add",
+            "/api/ps3838/relogin",
+            "/api/ps3838/update",
+            "/api/ps3838/delete",
             "/api/start",
             "/api/stop",
             "/api/arsenal/add",
@@ -6903,6 +7079,132 @@ class Handler(SimpleHTTPRequestHandler):
                     "count": len(deleted_order_ids),
                 },
             )
+            return
+
+        if u.path == "/api/ps3838/add":
+            base_url = str(data.get("base_url") or "https://www.ps38ag.com").strip().rstrip("/")
+            username = str(data.get("username") or "").strip()
+            password = str(data.get("password") or "")
+            if not username or not password:
+                self._send_json(400, {"ok": False, "message": "请填写平博账号和密码"})
+                return
+            cfg = self._read_config()
+            accounts = cfg.setdefault("ps3838_accounts", [])
+            if not isinstance(accounts, list):
+                accounts = []
+                cfg["ps3838_accounts"] = accounts
+            existing = {str(item.get("name") or "") for item in accounts if isinstance(item, dict)}
+            base_name = f"ps3838_{safe_name(username)}"
+            name = base_name
+            suffix = 2
+            while name in existing:
+                name = f"{base_name}_{suffix}"
+                suffix += 1
+            try:
+                interval = max(5.0, min(300.0, float(data.get("interval_seconds") or 15)))
+            except Exception:
+                interval = 15.0
+            account = {
+                "name": name,
+                "provider": "ps3838",
+                "base_url": base_url or "https://www.ps38ag.com",
+                "username": username,
+                "password": password,
+                "enabled": True,
+                "interval_seconds": interval,
+                "headless": bool(data.get("headless", False)),
+                "login_timeout_seconds": 0,
+                "telegram_chat_id": str(data.get("telegram_chat_id") or "").strip(),
+                "x_intellifend_secret": "",
+            }
+            accounts.append(account)
+            try:
+                atomic_write_json(self._config_path, cfg)
+                state_path = self._data_dir / "ps3838" / "state" / f"{safe_name(name)}.json"
+                st = read_json_file(state_path, {})
+                st.update({"status": "relogin", "status_message": "登录窗口已发起，请完成登录/2FA；窗口不会自动关闭", "relogin_requested_at": time.time(), "relogin_in_progress": True, "session_ready": False, "login_required": False})
+                atomic_write_json(state_path, st)
+                ok, started, err = ensure_ps3838_watch_running(self._config_path, self._data_dir)
+                payload: Dict[str, Any] = {
+                    "ok": True,
+                    "name": name,
+                    "provider": "ps3838",
+                    "message": "已发起平博登录，请在弹出的浏览器窗口完成验证码/登录",
+                    "watch_started": bool(started),
+                }
+                if not ok:
+                    payload["warning"] = err
+                self._send_json(200, payload)
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "message": f"保存平博配置失败: {exc}"})
+            return
+
+        if u.path == "/api/ps3838/relogin":
+            name = str(data.get("name") or "").strip()
+            cfg = self._read_config()
+            account = next((x for x in (cfg.get("ps3838_accounts") or []) if isinstance(x, dict) and str(x.get("name") or "") == name), None)
+            if not account:
+                self._send_json(404, {"ok": False, "message": "未找到平博账号"})
+                return
+            state_path = self._data_dir / "ps3838" / "state" / f"{safe_name(name)}.json"
+            st = read_json_file(state_path, {})
+            if ps3838_login_in_progress(self._data_dir, account, st):
+                self._send_json(200, {"ok": True, "provider": "ps3838", "watch_started": False, "message": "登录窗口已打开，请在原窗口完成登录/2FA；不会重新打开或重复提交"})
+                return
+            st.update({"status": "relogin", "status_message": "等待你在浏览器完成登录/2FA，窗口不会自动关闭", "relogin_requested_at": time.time(), "relogin_in_progress": True, "session_ready": False, "login_required": False})
+            try:
+                # 点击“重新登录”是明确恢复停用账号的请求。
+                account["enabled"] = True
+                account["login_timeout_seconds"] = 0
+                atomic_write_json(self._config_path, cfg)
+                atomic_write_json(state_path, st)
+                ok, started, err = ensure_ps3838_watch_running(self._config_path, self._data_dir)
+                if not ok:
+                    self._send_json(500, {"ok": False, "message": err})
+                    return
+                self._send_json(200, {"ok": True, "provider": "ps3838", "watch_started": bool(started), "message": "已发起平博重新登录"})
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "message": f"发起平博登录失败: {exc}"})
+            return
+
+        if u.path == "/api/ps3838/update":
+            name = str(data.get("name") or "").strip()
+            patch = data.get("patch")
+            if not isinstance(patch, dict) or not isinstance(patch.get("enabled"), bool):
+                self._send_json(400, {"ok": False, "message": "请提供 enabled 布尔值"})
+                return
+            cfg = self._read_config()
+            account = next((item for item in cfg.get("ps3838_accounts") or [] if isinstance(item, dict) and str(item.get("name") or "") == name), None)
+            if account is None:
+                self._send_json(404, {"ok": False, "message": "未找到平博账号"})
+                return
+            account["enabled"] = patch["enabled"]
+            try:
+                atomic_write_json(self._config_path, cfg)
+                if account["enabled"]:
+                    ok, started, err = ensure_ps3838_watch_running(self._config_path, self._data_dir)
+                    if not ok:
+                        self._send_json(500, {"ok": False, "message": err})
+                        return
+                self._send_json(200, {"ok": True, "provider": "ps3838", "enabled": account["enabled"]})
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "message": f"切换平博监控状态失败: {exc}"})
+            return
+
+        if u.path == "/api/ps3838/delete":
+            name = str(data.get("name") or "").strip()
+            cfg = self._read_config()
+            accounts = cfg.get("ps3838_accounts") or []
+            kept = [x for x in accounts if not (isinstance(x, dict) and str(x.get("name") or "") == name)]
+            if len(kept) == len(accounts):
+                self._send_json(404, {"ok": False, "message": "未找到平博账号"})
+                return
+            cfg["ps3838_accounts"] = kept
+            try:
+                atomic_write_json(self._config_path, cfg)
+                self._send_json(200, {"ok": True, "removed": name, "provider": "ps3838"})
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "message": f"删除平博账号失败: {exc}"})
             return
 
         if u.path == "/api/accounts/add":
@@ -8019,6 +8321,14 @@ def main() -> int:
             "updated_at": "",
         },
     )
+
+    # 服务重启后自动恢复已保存的平博只读监听。没有账号时不启动空 worker。
+    saved_cfg = read_json_file(config_path, {})
+    if isinstance(saved_cfg, dict) and any(
+        isinstance(item, dict) and bool(item.get("enabled", True))
+        for item in (saved_cfg.get("ps3838_accounts") or [])
+    ):
+        ensure_ps3838_watch_running(config_path, data_dir)
 
     def handler_factory(*h_args, **h_kwargs):
         return Handler(

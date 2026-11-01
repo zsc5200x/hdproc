@@ -3163,6 +3163,7 @@ select.form-input.arsenal-mapping-select option{
 }
 .hg-cell-league{text-align:left;font-weight:700;color:#A9C4DE;}
 .hg-cell-league strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hg-cell-league small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-weight:400;color:var(--text-3);}
 .hg-cell-kind{display:flex;justify-content:center;}
 .hg-order-kind{
   display:inline-flex;align-items:center;justify-content:center;
@@ -3899,6 +3900,7 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
                   <option value="all">全部通道</option>
                   <option value="2">登入2</option>
                   <option value="3">登入3</option>
+                  <option value="ps3838">平博 / PS3838</option>
                   <option value="signal">信号通道</option>
                 </select>
               </label>
@@ -4486,6 +4488,7 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
           <span class="form-label" id="add-node-mode-label">接入类型</span>
           <div class="mode-switch" role="group" aria-labelledby="add-node-mode-label">
             <button class="mode-switch-btn active" type="button" id="add-mode-account" aria-pressed="true" aria-controls="add-account-fields"><i class="fa-solid fa-server" aria-hidden="true"></i><span>本地后台节点</span></button>
+            <button class="mode-switch-btn" type="button" id="add-mode-ps3838" aria-pressed="false" aria-controls="add-ps3838-fields"><i class="fa-solid fa-futbol" aria-hidden="true"></i><span>平博 / PS3838</span></button>
             <button class="mode-switch-btn" type="button" id="add-mode-signal" aria-pressed="false" aria-controls="add-signal-fields"><i class="fa-solid fa-satellite-dish" aria-hidden="true"></i><span>远端交易信号</span></button>
           </div>
         </section>
@@ -4545,6 +4548,41 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
                   <label class="form-label" for="add-monitor-downlines">订单来源（登入3下线）</label>
                   <textarea class="form-input" id="add-monitor-downlines" rows="3" spellcheck="false" placeholder="一行一个 DOWNLINE 或下线账号"></textarea>
                 </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="field-section add-node-fields" id="add-ps3838-fields" hidden>
+          <section class="add-node-section" aria-labelledby="add-ps3838-connection-title">
+            <div class="add-node-section-head"><i class="fa-solid fa-link" aria-hidden="true"></i><h3 id="add-ps3838-connection-title">平博登录信息</h3></div>
+            <div class="form-hint">请在弹出的窗口完成 2FA。验证期间窗口保持打开，开始扫单后自动最小化；后台会话继续运行。</div>
+            <div class="add-node-grid">
+              <div class="form-group add-node-span-2">
+                <label class="form-label" for="add-ps3838-base-url">平台网址 <span>Base URL</span></label>
+                <input class="form-input" type="url" id="add-ps3838-base-url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://www.ps38ag.com">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="add-ps3838-username">登录账号</label>
+                <input class="form-input" type="text" id="add-ps3838-username" autocomplete="username" spellcheck="false" placeholder="平博后台账号">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="add-ps3838-password">登录密码</label>
+                <input class="form-input" type="password" id="add-ps3838-password" autocomplete="current-password" placeholder="请输入登录密码">
+              </div>
+            </div>
+          </section>
+          <section class="add-node-section" aria-labelledby="add-ps3838-policy-title">
+            <div class="add-node-section-head"><i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i><h3 id="add-ps3838-policy-title">只读订单监控</h3></div>
+            <div class="add-node-grid">
+              <div class="form-group">
+                <label class="form-label" for="add-ps3838-interval">扫描间隔 <span>秒</span></label>
+                <input class="form-input" type="number" id="add-ps3838-interval" min="5" max="300" step="1" placeholder="15">
+                <div class="form-hint">只读取订单并推送，不会自动下注或修改订单</div>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="add-ps3838-chat-id">专用 Telegram Chat ID <span>可选</span></label>
+                <input class="form-input" type="text" id="add-ps3838-chat-id" autocomplete="off" spellcheck="false" placeholder="留空则使用全局后台订单配置">
               </div>
             </div>
           </section>
