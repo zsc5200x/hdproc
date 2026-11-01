@@ -3852,14 +3852,9 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
       <section class="ps3838-app-shell" aria-label="PS38赛事">
         <div class="ps3838-app-body">
           <iframe id="ps3838-app-frame" title="PS38赛事" src="about:blank"></iframe>
-          <div class="ps3838-app-empty" id="ps3838-app-empty" hidden>
-            <div class="ps3838-app-empty-card">
-              <i class="fa-solid fa-satellite-dish" aria-hidden="true"></i>
-              <h3 id="ps3838-app-empty-title">正在连接 PS38赛事</h3>
-              <p id="ps3838-app-empty-text">首次打开会自动运行 ps3838-wss，需要启动 Chrome CDP、皇冠服务和数据采集，通常需要几秒。</p>
-              <div class="ps3838-app-empty-meta" id="ps3838-app-empty-meta"></div>
-              <button class="btn btn-primary" id="ps3838-app-empty-start" type="button"><i class="fa-solid fa-play" aria-hidden="true"></i>启动 PS38赛事</button>
-            </div>
+          <!-- 看板未就绪时只显示一个加载指示，不再出现“未运行/启动”卡片。 -->
+          <div class="ps3838-app-loading" id="ps3838-app-loading" hidden>
+            <i class="fa-solid fa-circle-notch fa-spin" aria-hidden="true"></i>
           </div>
         </div>
       </section>

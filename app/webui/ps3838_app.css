@@ -33,67 +33,20 @@ body[data-view="ps3838"] #top-bar { display: none; }
 
 .ps3838-app-body iframe[hidden] { display: none; }
 
-.ps3838-app-empty {
+/* 看板就绪前只显示加载圈：不再出现“未运行 / 启动 PS38赛事”卡片。 */
+.ps3838-app-loading {
   position: absolute;
   inset: 0;
   display: grid;
   place-items: center;
-  padding: 28px;
+  color: rgba(32, 212, 154, 0.75);
+  font-size: 24px;
   background:
-    radial-gradient(circle at 50% 18%, rgba(32, 212, 154, 0.08), transparent 38%),
+    radial-gradient(circle at 50% 18%, rgba(32, 212, 154, 0.06), transparent 38%),
     #020914;
 }
 
-.ps3838-app-empty[hidden] { display: none; }
-
-.ps3838-app-empty-card {
-  width: min(460px, 100%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 28px 26px;
-  border: 1px solid var(--ops-border);
-  border-radius: 10px;
-  background: linear-gradient(145deg, rgba(9, 31, 52, 0.98), rgba(5, 21, 36, 0.98));
-  box-shadow: var(--ops-shadow);
-  text-align: center;
-}
-
-.ps3838-app-empty-card > i {
-  width: 48px;
-  height: 48px;
-  display: grid;
-  place-items: center;
-  margin-bottom: 2px;
-  border: 1px solid rgba(32, 212, 154, 0.3);
-  border-radius: 12px;
-  color: var(--ops-green);
-  background: rgba(32, 212, 154, 0.08);
-  font-size: 20px;
-}
-
-.ps3838-app-empty-card h3 {
-  margin: 0;
-  color: var(--ops-text);
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.ps3838-app-empty-card p {
-  margin: 0;
-  color: var(--ops-text-3);
-  font-size: 11px;
-  line-height: 1.65;
-}
-
-.ps3838-app-empty-card .btn { margin-top: 6px; }
-
-.ps3838-app-empty-meta {
-  color: var(--ops-text-3);
-  font: 10px/1.5 "JetBrains Mono", monospace;
-  word-break: break-all;
-}
+.ps3838-app-loading[hidden] { display: none; }
 
 @media (max-width: 900px) {
   .view[data-view="ps3838"] { height: calc(100dvh - 60px); }

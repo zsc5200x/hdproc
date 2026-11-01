@@ -114,14 +114,14 @@ function formatPick(row) {
 }
 
 function formatPeriod(row) {
-  const rawType = row.period_type;
+  const rawType = row.period_type ?? row.periodType;
   const type = rawType === null || rawType === undefined || rawType === ""
     ? null
     : Number(rawType);
   if (type === 0) return "全场";
   if (type === 1) return "上半场";
   if (type === 2) return "下半场";
-  const name = String(row.period_name || "").replace(/\s+/g, "").trim();
+  const name = String(row.period_name ?? row.periodName ?? "").replace(/\s+/g, "").trim();
   return ["上半场", "下半场", "全场", "中场", "加时", "点球"].includes(name) ? name : "";
 }
 
@@ -973,7 +973,7 @@ export async function refreshMyEventsSummary() {
 }
 
 function formatPushTime(value, tzMinutes) {
-  const date = new Date(String(value || ""));
+  const date = typeof value === "number" ? new Date(value) : new Date(String(value || ""));
   if (Number.isNaN(date.getTime())) return "—";
   const timeZone = Number(tzMinutes) === -240 ? "Etc/GMT+4" : "Asia/Shanghai";
   return date.toLocaleString("zh-CN", { hour12: false, timeZone });
@@ -998,36 +998,337 @@ function pushQuery() {
   return params.toString();
 }
 
+function pushGroupKey(row) {
+  // 同一条合并推送的每条订单共享同一段推送文本；没有文本的排队/失败单各自成行。
+  const text = String(row.pushText || "").trim();
+  return text ? `t:${text}` : `e:${row.eventId}`;
+}
+
+function pushStatusMeta(rows) {
+  const statuses = rows.map((row) => String(row.pushStatus || "").toLowerCase());
+  if (statuses.includes("failed")) return { status: "failed", label: "失败" };
+  if (statuses.includes("queued")) return { status: "queued", label: "排队中" };
+  if (statuses.includes("sent")) return { status: "sent", label: "已推送" };
+  const status = statuses[0] || "";
+  return { status, label: status || "—" };
+}
+
+// ── 跟单上下文：从 HD（同源 9999）读取合并单与跟单结果 ──────────────
+let hdFollowOrders = [];
+let hdFollowResults = [];
+
+async function readRootJson(url) {
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function loadFollowContext() {
+  const [ordersPayload, resultsPayload] = await Promise.all([
+    readRootJson("/api/orders?since=0&limit=500&target=ps3838"),
+    readRootJson("/api/follow-results?limit=200"),
+  ]);
+  hdFollowOrders = Array.isArray(ordersPayload?.orders) ? ordersPayload.orders : [];
+  hdFollowResults = Array.isArray(resultsPayload?.results) ? resultsPayload.results : [];
+}
+
+function marketKindOfRow(row) {
+  const market = String(row?.market || "").toLowerCase();
+  if (market.startsWith("hdp") || market.includes("让球")) return "hdp";
+  if (market.startsWith("ou") || market.includes("大小")) return "ou";
+  return "";
+}
+
+function marketKindOfOrder(order) {
+  const text = `${order?.betType || ""} ${order?.raw?.WAGERSTYPE || ""}`;
+  if (text.includes("让球")) return "hdp";
+  if (text.includes("大小")) return "ou";
+  return "";
+}
+
+function matchFollowOrders(group) {
+  // 分单的 stake 来自这一组的合计；一组可能被拆成多个分单，按时间窗口求和对上。
+  const kind = marketKindOfRow(group.first);
+  const groupTime = Date.parse(group.pushedAt || "");
+  if (!Number.isFinite(groupTime)) return [];
+  const candidates = hdFollowOrders
+    .filter((order) => {
+      const ts = Number(order?.ts) * 1000;
+      if (!Number.isFinite(ts)) return false;
+      if (Math.abs(ts - groupTime) > 10 * 60 * 1000) return false;
+      if (kind && marketKindOfOrder(order) !== kind) return false;
+      return true;
+    })
+    .sort((a, b) => Number(a.ts) - Number(b.ts));
+  const exact = candidates.filter((order) => Math.abs(Number(order.stake) - group.stake) <= 0.5);
+  if (exact.length) {
+    exact.sort(
+      (a, b) =>
+        Math.abs(Number(a.ts) * 1000 - groupTime) - Math.abs(Number(b.ts) * 1000 - groupTime),
+    );
+    return [exact[0]];
+  }
+  for (const base of candidates) {
+    const baseTs = Number(base.ts);
+    const cluster = candidates.filter(
+      (order) => Number(order.ts) >= baseTs && Number(order.ts) <= baseTs + 10,
+    );
+    const total = cluster.reduce((sum, order) => sum + (Number(order.stake) || 0), 0);
+    if (Math.abs(total - group.stake) <= 0.5) return cluster;
+  }
+  // 兜底：桥接可能把相邻的几个推送组合并成一个更大的分单，取时间最近且金额覆盖该组的单。
+  const near = candidates
+    .filter((order) => Number(order.stake) + 0.5 >= group.stake)
+    .sort(
+      (a, b) =>
+        Math.abs(Number(a.ts) * 1000 - groupTime) - Math.abs(Number(b.ts) * 1000 - groupTime),
+    );
+  if (near.length && Math.abs(Number(near[0].ts) * 1000 - groupTime) <= 2 * 60 * 1000) {
+    return [near[0]];
+  }
+  return [];
+}
+
+function opponentText(orders) {
+  const labels = [];
+  for (const order of orders) {
+    const line = String(order.display_line || order.line || "").trim();
+    if (!line) continue;
+    const key = line.replace(/\s+/g, "");
+    if (labels.some((item) => item.key === key)) continue;
+    labels.push({ key, text: `${line}${order.odds ? ` @${order.odds}` : ""}` });
+  }
+  return labels.map((item) => item.text).join(" / ") || "—";
+}
+
+function followSummary(orders) {
+  if (!orders.length) {
+    return { label: "未匹配", tone: "none", detail: "没有找到对应的跟单订单" };
+  }
+  const latest = new Map();
+  const stampOf = (item) => Number(item?.ts_ms ?? (Number(item?.ts) || 0) * 1000) || 0;
+  for (const order of orders) {
+    for (const item of hdFollowResults) {
+      if (String(item?.orderId) !== String(order.orderId)) continue;
+      const key = `${order.orderId}:${item.member || item.member_id || "?"}`;
+      const previous = latest.get(key);
+      // 接口按时间倒序返回，这里显式取每个账号最新的一次结果。
+      if (!previous || stampOf(item) >= stampOf(previous)) latest.set(key, item);
+    }
+  }
+  const values = [...latest.values()];
+  if (!values.length) {
+    return { label: "待跟单", tone: "queued", detail: "订单已生成，暂无跟单结果", successStake: 0, totalStake: 0 };
+  }
+  const stakeOf = (item) => {
+    const amount = Number(item?.stake);
+    return Number.isFinite(amount) ? amount : 0;
+  };
+  const okValues = values.filter((item) => item.ok);
+  const ok = okValues.length;
+  const total = values.length;
+  const totalStake = values.reduce((sum, item) => sum + stakeOf(item), 0);
+  const successStake = okValues.reduce((sum, item) => sum + stakeOf(item), 0);
+  const detail = values
+    .map((item) => `${item.member || "?"}：${item.ok ? "成功" : "失败"}${stakeOf(item) ? ` ${formatMoney(stakeOf(item))}` : ""}`)
+    .join("\n");
+  const stakeText = successStake === totalStake
+    ? formatMoney(totalStake)
+    : `${formatMoney(successStake)} / ${formatMoney(totalStake)}`;
+  // 跟单程序只要报成功就显示成功，不再区分“部分成功”。
+  if (ok > 0) {
+    return {
+      label: "成功",
+      tone: "ok",
+      detail: `${detail}\n成功 ${ok}/${total} 个跟单账号 · 跟单金额 ${stakeText}`,
+      successStake,
+      totalStake,
+    };
+  }
+  return {
+    label: "失败",
+    tone: "fail",
+    detail: `${detail}\n跟单金额 ${stakeText}`,
+    successStake,
+    totalStake,
+  };
+}
+
+function followOrderRows() {
+  const current = myEvents();
+  const from = String(current.from || "");
+  const to = String(current.to || "");
+  const tz = Number(current.tz ?? -240);
+  const search = String(current.search || "").toLowerCase();
+  const rows = [];
+  for (const order of hdFollowOrders) {
+    const ts = Number(order?.ts);
+    if (!Number.isFinite(ts)) continue;
+    const date = new Date(ts * 1000 + tz * 60_000).toISOString().slice(0, 10);
+    if (from && date < from) continue;
+    if (to && date > to) continue;
+    if (search) {
+      const text = [order.league, order.sides, order.orderId, order.line, order.display_line, order.betType]
+        .map((value) => String(value || ""))
+        .join(" ")
+        .toLowerCase();
+      if (!text.includes(search)) continue;
+    }
+    rows.push(order);
+  }
+  rows.sort((a, b) => Number(b.ts) - Number(a.ts));
+  return rows;
+}
+
+function formatFollowBetType(order) {
+  const text = String(order?.betType || order?.raw?.WAGERSTYPE || "").trim();
+  if (!text) return "—";
+  // 有 "(滚球)" 前缀的是滚球；没有前缀的是赛前（源单 inplay=0）。
+  const live = /滚球/.test(text);
+  const body = text
+    .replace(/[（(]滚球[)）]\s*/g, "")
+    .replace(/^滚球\s*[·.]?\s*/, "")
+    .trim();
+  return `${live ? "滚球" : "赛前"} · ${body || "—"}`;
+}
+
+function subsetForAmount(rows, target) {
+  const list = rows.slice(0, 12);
+  const n = list.length;
+  for (let mask = 1; mask < 1 << n; mask += 1) {
+    let sum = 0;
+    const picked = [];
+    for (let i = 0; i < n; i += 1) {
+      if (mask & (1 << i)) {
+        sum += Number(list[i].stake) || 0;
+        picked.push(list[i]);
+      }
+    }
+    if (Math.abs(sum - target) <= 0.5) return picked;
+  }
+  return null;
+}
+
+function sourceRowsForOrder(order, usedEventIds) {
+  // 用本地桥接的实际发单时间 + 金额回溯：同一秒发出的源单里，
+  // 挑出金额正好等于这条订单的源单（桥接拆单时也只取自己那一份）。
+  const ts = Number(order?.ts) * 1000;
+  const stake = Number(order?.stake);
+  if (!Number.isFinite(ts) || !Number.isFinite(stake)) return [];
+  const candidates = (myEvents().pushes || []).filter((row) => {
+    const at = Date.parse(row.signalAt || "");
+    if (!Number.isFinite(at)) return false;
+    if (Math.abs(at - ts) > 2000) return false;
+    return !usedEventIds.has(String(row.eventId));
+  });
+  if (!candidates.length) return [];
+  const total = candidates.reduce((sum, row) => sum + (Number(row.stake) || 0), 0);
+  if (Math.abs(total - stake) <= 0.5) return candidates;
+  const single = candidates.find((row) => Math.abs(Number(row.stake) - stake) <= 0.5);
+  if (single) return [single];
+  const subset = subsetForAmount(candidates, stake);
+  return subset || candidates;
+}
+
+function buildSourceTable(rows) {
+  const table = document.createElement("table");
+  table.className = "follow-source-table";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["联赛", "主队 vs 客队", "比分", "盘口", "水位", "金额", "订单号", "代理", "会员"]) {
+    headRow.append(el("th", "", label));
+  }
+  head.append(headRow);
+  table.append(head);
+  const body = document.createElement("tbody");
+  const ordered = [...rows].sort((a, b) =>
+    String(a.signalAt || "").localeCompare(String(b.signalAt || "")),
+  );
+  for (const row of ordered) {
+    const tr = document.createElement("tr");
+    tr.append(
+      el("td", "league", row.league || "—"),
+      el("td", "teams", String(row.teams || "—").replace(/-vs-/g, " vs ")),
+      el("td", "score", row.score || "—"),
+      el("td", "market", formatPickWithPeriod(row)),
+      el("td", "odds num", formatOdds(row.odds)),
+      el("td", "stake num", formatMoney(row.stake)),
+      el("td", "order", row.orderId || "—"),
+      el("td", "agent", row.agent || "—"),
+      el("td", "member", row.member || "—"),
+    );
+    body.append(tr);
+  }
+  table.append(body);
+  return table;
+}
+
+function toggleSourceRows(mainRow, rows) {
+  const next = mainRow.nextElementSibling;
+  if (next && next.classList.contains("follow-sources")) {
+    next.hidden = !next.hidden;
+    mainRow.classList.toggle("expanded", !next.hidden);
+    return;
+  }
+  const tr = document.createElement("tr");
+  tr.className = "follow-sources";
+  const td = document.createElement("td");
+  td.className = "follow-sources-cell";
+  td.colSpan = 10;
+  td.append(buildSourceTable(rows));
+  tr.append(td);
+  mainRow.after(tr);
+  mainRow.classList.add("expanded");
+}
+
 function renderPushRows() {
   const body = $("myEventsPushBody");
   if (!body) return;
   const current = myEvents();
   body.replaceChildren();
-  for (const row of current.pushes) {
+  // 一条分单一行：订单号就是我们自己生成、推给跟单程序的那个号。
+  const orders = followOrderRows();
+  const usedEventIds = new Set();
+  for (const order of orders) {
+    const follow = followSummary([order]);
+    const opponent = `${order.display_line || order.line || "—"}${order.odds ? ` @${order.odds}` : ""}`;
     const tr = document.createElement("tr");
-    const status = String(row.pushStatus || "").toLowerCase();
-    const label = status === "sent" ? "已推送" : status === "queued" ? "排队中" : status === "failed" ? "失败" : (status || "—");
-    const text = plainText(row.pushText);
-    const textCell = cell(text || "—", "push-text");
-    if (text) textCell.title = text;
+    const resultCell = cell(follow.label, `follow-result ${follow.tone}`);
+    resultCell.title = follow.detail;
+    const timeCell = cell(formatPushTime(Number(order.ts) * 1000, current.tz), "time");
+    const sources = sourceRowsForOrder(order, usedEventIds);
+    if (sources.length) {
+      sources.forEach((row) => usedEventIds.add(String(row.eventId)));
+      tr.className = "follow-row";
+      tr.title = "点击查看这笔订单合并的平博源单";
+      timeCell.prepend(el("span", "follow-caret", "▸"));
+      tr.addEventListener("click", () => toggleSourceRows(tr, sources));
+    }
+    // 只显示跟单程序成功跟出去的金额。
+    const followStakeText = follow.totalStake ? formatMoney(follow.successStake) : "—";
+    const followStakeCell = cell(followStakeText, "follow-stake num");
+    followStakeCell.title = follow.detail;
     tr.append(
-      cell(formatPushTime(row.pushedAt, current.tz), "time"),
-      cell(label, `push-status ${status || "unknown"}`),
-      cell(row.league || "—", "league"),
-      cell(row.teams || "—", "teams"),
-      cell(formatPickWithPeriod(row), "market"),
-      cell(formatMoney(row.stake), "stake"),
-      cell(row.orderId || "—", "order"),
-      cell(row.agent || "—", "agent"),
-      cell(row.member || "—", "member"),
-      textCell,
+      timeCell,
+      cell(order.league || "—", "league"),
+      cell(order.sides || "—", "teams"),
+      cell(formatFollowBetType(order), "market"),
+      cell(opponent, "opponent"),
+      cell(formatMoney(order.stake), "stake num"),
+      followStakeCell,
+      cell(order.orderId || "—", "signal-id"),
+      resultCell,
     );
     body.append(tr);
   }
   const empty = $("myEventsPushEmpty");
-  if (empty) empty.classList.toggle("hidden", current.pushes.length > 0);
+  if (empty) empty.classList.toggle("hidden", orders.length > 0);
   const count = $("myEventsCount");
-  if (count) count.textContent = `${current.pushTotal} 条推送`;
+  if (count) count.textContent = `${orders.length} 条跟单`;
 }
 
 let pushRequestId = 0;
@@ -1037,19 +1338,24 @@ export async function refreshMyEventsPushes() {
   const current = myEvents();
   current.pushLoading = true;
   try {
-    const { response, payload } = await fetchJson(
-      `/api/my-events/pushes?${pushQuery()}`,
-      { cache: "no-store" },
-      { timeoutMs: 10000, allowInvalidJson: true },
-    );
+    // 推送组明细用于展开看合并前的平博源单。
+    try {
+      const { response, payload } = await fetchJson(
+        `/api/my-events/pushes?${pushQuery()}`,
+        { cache: "no-store" },
+        { timeoutMs: 10000, allowInvalidJson: true },
+      );
+      if (response.ok && payload.ok !== false && payload.ready !== false) {
+        current.pushes = Array.isArray(payload.rows) ? payload.rows : [];
+      }
+    } catch (_error) {
+      // 源单明细读不到时仍然显示跟单列表，只是不能展开。
+    }
+    // 跟单视角直接读 HD 的分单（我们自己生成并推给跟单程序）和跟单结果。
+    await loadFollowContext();
     if (requestId !== pushRequestId) return;
-    if (!response.ok || payload.ok === false) return;
-    if (payload.ready === false) return;
-    current.pushes = Array.isArray(payload.rows) ? payload.rows : [];
-    current.pushTotal = Number(payload.total || 0);
+    current.pushTotal = hdFollowOrders.length;
     renderPushRows();
-  } catch (_error) {
-    // Keep the previous push list on transient local reads.
   } finally {
     if (requestId === pushRequestId) current.pushLoading = false;
   }

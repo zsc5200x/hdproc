@@ -13,8 +13,13 @@ runtime_load_config "$PYTHON_BIN"
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
 # The dashboard keeps the existing same-origin Crown proxy available.
-"$PROJECT_DIR/crown.sh"
+if ! "$PROJECT_DIR/crown.sh"; then
+  echo "皇冠服务未能就绪（不影响看板），请查看 $LOG_DIR/crown.log。" >&2
+fi
+RUNTIME_READY_ATTEMPTS="${RUNTIME_READY_ATTEMPTS:-90}"
+DASHBOARD_SOCKET="${DASHBOARD_SOCKET:-$RUN_DIR/dashboard.sock}"
+RUNTIME_HEALTH_SOCKET="$DASHBOARD_SOCKET"
 runtime_start dashboard "$PROJECT_DIR/dashboard_server.py" "$PYTHON_BIN" \
-  "$DASHBOARD_URL/api/health" "$DASHBOARD_PORT" \
-  --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT"
-echo "统一看板：$DASHBOARD_URL"
+  "http://localhost/api/health" "" --socket "$DASHBOARD_SOCKET"
+unset RUNTIME_HEALTH_SOCKET
+echo "看板：unix:${DASHBOARD_SOCKET}（由 HD 9999 的 /ps3838/ 转发）"

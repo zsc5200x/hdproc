@@ -54,12 +54,19 @@ runtime_owned_pid() {
 }
 
 runtime_http_ready() {
+  if [[ -n "${RUNTIME_HEALTH_SOCKET:-}" ]]; then
+    curl --noproxy '*' --unix-socket "$RUNTIME_HEALTH_SOCKET" -fsS --max-time 2 "$1" >/dev/null 2>&1
+    return
+  fi
   curl --noproxy '*' -fsS --max-time 2 "$1" >/dev/null 2>&1
 }
 
 runtime_wait_ready() {
-  local pid="$1" script="$2" health_url="$3" attempt
-  for attempt in {1..30}; do
+  local pid="$1" script="$2" health_url="$3" attempt attempts
+  # 看板首次启动要载入 CSV/SQLite 历史，30 秒可能不够；允许按服务覆盖等待时长。
+  attempts="${RUNTIME_READY_ATTEMPTS:-30}"
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=30
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
     runtime_pid_alive "$pid" || return 1
     if runtime_owned_pid "$pid" "$script" && runtime_http_ready "$health_url"; then return 0; fi
     sleep 1

@@ -21,6 +21,8 @@ from typing import Any, Dict, Optional
 from urllib.error import URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
+from hdzz.api.webui import ps3838_transport
+
 
 BEIJING = timezone(timedelta(hours=8))
 _MERGED_PS3838_DIR = Path(__file__).resolve().parents[4] / "ps3838"
@@ -68,7 +70,28 @@ def _health_url(url: str) -> str:
     return f"{url.rstrip('/')}/api/health"
 
 
-def check_health(url: str, *, timeout: float = 2.0) -> Dict[str, Any]:
+def dashboard_socket_path(cfg: Dict[str, Any]) -> Path:
+    """Resolve ``<ps3838>/<run_dir>/dashboard.sock`` from the PS3838 config."""
+    merged = ensure_ps3838_app_defaults(cfg)
+    directory = Path(merged["ps3838_app_dir"]).expanduser()
+    run_dir = "var/run"
+    try:
+        doc = json.loads((directory / "config.json").read_text(encoding="utf-8"))
+        if isinstance(doc, dict) and doc.get("run_dir"):
+            run_dir = str(doc["run_dir"])
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pass
+    base = Path(run_dir).expanduser()
+    if not base.is_absolute():
+        base = directory / base
+    return base / "dashboard.sock"
+
+
+def check_health(url: str, *, timeout: float = 2.0, socket_path: Optional[Path] = None) -> Dict[str, Any]:
+    # The merged layout talks to the dashboard over a Unix socket, so no TCP
+    # port (8787) is required anymore.  Keep the HTTP path for legacy setups.
+    if socket_path is not None and Path(socket_path).exists():
+        return ps3838_transport.health(Path(socket_path), timeout=timeout)
     request = Request(_health_url(url), headers={"Accept": "application/json"}, method="GET")
     try:
         # Dashboard is loopback; do not route it through a global HTTP proxy.
@@ -90,7 +113,8 @@ def status(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg = ensure_ps3838_app_defaults(cfg)
     directory = Path(cfg["ps3838_app_dir"]).expanduser()
     url = cfg["ps3838_app_url"]
-    health = check_health(url)
+    socket_path = dashboard_socket_path(cfg)
+    health = check_health(url, socket_path=socket_path)
     running = bool(health.get("ok"))
     start_script = directory / "start.sh"
     stop_script = directory / "stop.sh"
@@ -99,6 +123,8 @@ def status(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "running": running,
         "healthy": running,
         "url": url,
+        "socket": str(socket_path),
+        "transport": "unix" if socket_path.exists() else "tcp",
         "embed_url": "/ps3838/",
         "dir": str(directory),
         "auto_start": bool(cfg.get("ps3838_app_auto_start")),

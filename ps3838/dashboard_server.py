@@ -15,6 +15,7 @@ import os
 import re
 import signal
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -1473,6 +1474,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if args and str(args[1]).startswith("4"):
             super().log_message(fmt, *args)
 
+    def address_string(self) -> str:
+        # Unix-domain sockets have no IP: avoid BaseHTTPRequestHandler indexing
+        # client_address[0] (which raises when the address is an empty string).
+        if isinstance(self.client_address, tuple) and self.client_address:
+            return str(self.client_address[0])
+        return "local"
+
     def _partner_connection(self):
         path = getattr(self, "partner_orders_path", None)
         if not path:
@@ -2085,7 +2093,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     f"""SELECT e.event_id, e.agent_code, e.member_identity, e.order_id, e.observed_at,
                                o.member_user_code, o.member_name, o.teams, o.league, o.market,
                                o.selection, o.handicap, o.odds, o.stake, o.status AS order_status,
-                               o.created_at AS order_created_at, o.win_loss
+                               o.created_at AS order_created_at, o.win_loss,
+                               json_extract(o.raw_json,'$.choices[0].periodName') AS period_name,
+                               json_extract(o.raw_json,'$.choices[0].periodType') AS period_type,
+                               json_extract(o.raw_json,'$.choices[0].score') AS score
                           FROM partner_order_events e
                           LEFT JOIN partner_orders o
                             ON o.source=e.source AND o.member_identity=e.member_identity
@@ -2098,6 +2109,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 details = {}
             finally:
                 connection.close()
+        # 本地桥接的实际发单时间：同一个 20 秒合并组的源单共享同一秒，
+        # 用它可以把 HD 订单精确回溯到自己的源单，而不是靠推送组猜。
+        signal_times: Dict[int, str] = {}
+        local_path = Path(partner_path).parent / "local_signal_push.sqlite3" if partner_path else None
+        if local_path and local_path.exists():
+            try:
+                local = sqlite3.connect(f"file:{local_path}?mode=ro", uri=True, timeout=5)
+                try:
+                    for event_id, created_at in local.execute("SELECT event_id, created_at FROM deliveries"):
+                        signal_times[int(event_id)] = str(created_at or "")
+                finally:
+                    local.close()
+            except sqlite3.Error:
+                signal_times = {}
         search = str(scope["search"] or "").lower()
         agent = scope["agent"]
 
@@ -2137,6 +2162,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "stake": data.get("stake"),
                 "orderStatus": str(data.get("order_status") or ""),
                 "orderCreatedAt": str(data.get("order_created_at") or ""),
+                "periodName": str(data.get("period_name") or ""),
+                "periodType": data.get("period_type"),
+                "signalAt": signal_times.get(int(item["event_id"]), ""),
+                "score": str(data.get("score") or ""),
             })
         total = len(rows)
         self.send_json({
@@ -2570,7 +2599,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 _OPPORTUNITY_CACHE_LOCK = threading.Lock()
 
 
-class DashboardServer(ThreadingHTTPServer):
+class _DashboardServiceMixin:
     """Own one dashboard's dependencies and close them in producer-first order."""
 
     def __init__(self, address, handler):
@@ -2604,9 +2633,55 @@ class DashboardServer(ThreadingHTTPServer):
             merge_store.close()
 
 
-def build_server(host: str, port: int, config: Dict[str, Any]) -> ThreadingHTTPServer:
-    # Reserve the port before starting writers or capture tailers.
-    server = DashboardServer((host, port), DashboardHandler)
+class DashboardServer(_DashboardServiceMixin, ThreadingHTTPServer):
+    """TCP server kept for standalone / development use."""
+
+
+class _UnixHTTPServer(ThreadingHTTPServer):
+    """HTTP server bound to an ``AF_UNIX`` socket instead of a TCP port."""
+
+    address_family = socket.AF_UNIX
+
+    def server_bind(self) -> None:
+        path = str(self.server_address)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        self.socket.bind(path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        self.server_name = "localhost"
+        self.server_port = 0
+
+    def server_close(self) -> None:
+        super().server_close()
+        try:
+            os.unlink(str(self.server_address))
+        except OSError:
+            pass
+
+
+class DashboardUnixServer(_DashboardServiceMixin, _UnixHTTPServer):
+    """Unix-socket server used by the merged HD WebUI layout."""
+
+
+def build_server(
+    host: str,
+    port: int,
+    config: Dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+) -> ThreadingHTTPServer:
+    # Reserve the socket/port before starting writers or capture tailers.
+    if socket_path is not None:
+        path = Path(socket_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        server = DashboardUnixServer(str(path), DashboardHandler)
+    else:
+        server = DashboardServer((host, port), DashboardHandler)
     server.dashboard_config = dict(config)
     server.config_lock = threading.RLock()
     server.partner_orders_path = get_path(config, "partner_orders_db_path")
@@ -2643,8 +2718,9 @@ def build_server(host: str, port: int, config: Dict[str, Any]) -> ThreadingHTTPS
     except BaseException:
         server.server_close()
         raise
+    endpoint = f"unix:{socket_path}" if socket_path is not None else f"http://{host}:{server.server_port}"
     print(
-        f"[dashboard] 已启动 http://{host}:{server.server_port} | "
+        f"[dashboard] 已启动 {endpoint} | "
         f"近期消息={store.recent_rows} | 赛事={len(store.events)} | "
         f"历史点={store.history_writer.written_points}",
         flush=True,
@@ -2656,20 +2732,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="PS3838 real-time odds dashboard")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--socket", default=None, help="改为监听 Unix domain socket（不占 TCP 端口）")
     parser.add_argument("--open", action="store_true", help="启动后打开浏览器")
     args = parser.parse_args()
 
     config = load_config()
     host = args.host or config["dashboard_host"]
     port = args.port if args.port is not None else config["dashboard_port"]
-    server = build_server(host, port, config)
+    socket_path = Path(args.socket).expanduser() if args.socket else None
+    server = build_server(host, port, config, socket_path=socket_path)
 
     def handle_sigterm(signum: int, frame: Any) -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, handle_sigterm)
     url = f"http://{host}:{server.server_port}"
-    if args.open:
+    if args.open and socket_path is None:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()

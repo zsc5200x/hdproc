@@ -20,7 +20,7 @@
 ./stop.sh
 ```
 
-默认统一入口为 `http://127.0.0.1:8787`。只启动看板及皇冠后端可使用 `./dashboard.sh`；只启动皇冠后端可使用 `./crown.sh`。停止脚本不会关闭 Chrome。
+默认入口是 HD WebUI 的 `http://127.0.0.1:9999/ps3838/`：看板监听 `var/run/dashboard.sock`（Unix domain socket，不再占用 8787 端口），由 9999 同源转发。只启动看板及皇冠后端可使用 `./dashboard.sh`；只启动皇冠后端可使用 `./crown.sh`。停止脚本不会关闭 Chrome。开发时仍可用 `python dashboard_server.py --host 127.0.0.1 --port 8787` 以独立 TCP 模式运行看板。
 
 完整启动顺序为：检查配置与 Python 环境 → 确认/启动 Chrome CDP → 启动平博采集 → 启动皇冠服务并按已配置账号补开普通标签页 → 启动主看板 → 启动实时快照。已有进程会核对项目归属；HTTP 服务只有通过接口健康检查才会报告就绪。进程就绪不等于数据新鲜，仍需看页面上的最后成功更新时间。
 
@@ -103,7 +103,8 @@ DASHBOARD_PORT=8788 CROWN_PORT=8888 ./start.sh
 | --- | --- | --- |
 | `cdp_url` | `CAPTURE_CDP_URL`，其次 `CDP_URL` | `http://127.0.0.1:9222` |
 | `crown_cdp_url` | `CROWN_CDP_URL` | 留空则继承平博 CDP |
-| `dashboard_host / dashboard_port` | `DASHBOARD_HOST / DASHBOARD_PORT` | `127.0.0.1:8787` |
+| `dashboard_host / dashboard_port` | `DASHBOARD_HOST / DASHBOARD_PORT` | 仅独立 TCP 模式使用（默认 `127.0.0.1:8787`）；合并模式走 `var/run/dashboard.sock` |
+| `dashboard_url` | — | 合并模式下设为 `http://127.0.0.1:9999/ps3838`，供采集进程上报 presence |
 | `crown_host / crown_port` | `CROWN_HOST / CROWN_PORT` | `127.0.0.1:9223` |
 | `capture_path` | `CAPTURE_OUTPUT`，其次 `CAPTURE_PATH` | 原始采集路径 |
 | `events_file / live_snapshot_file` | `EVENTS_FILE / LIVE_SNAPSHOT_FILE` | 赛事元数据与实时快照 |

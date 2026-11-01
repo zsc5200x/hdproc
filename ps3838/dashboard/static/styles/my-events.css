@@ -821,7 +821,6 @@
 
 
 .my-events-push-table th:nth-child(1) { width: 150px; }
-.my-events-push-table th:nth-child(2) { width: 78px; }
 .my-events-push-table .push-status { font-size: 0.68rem; font-weight: 600; white-space: nowrap; }
 .my-events-push-table .push-status.sent { color: var(--accent); }
 .my-events-push-table .push-status.queued { color: #ffd894; }
@@ -834,3 +833,58 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.my-events-push-table th.num,
+.my-events-push-table td.num {
+  text-align: right;
+  white-space: nowrap;
+}
+.my-events-push-table .opponent,
+.my-events-push-table .signal-id,
+.my-events-push-table .follow-result {
+  white-space: nowrap;
+}
+.my-events-push-table .signal-id {
+  color: var(--muted);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.68rem;
+}
+.my-events-push-table .follow-result {
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+.my-events-push-table .follow-result.ok { color: var(--accent); }
+.my-events-push-table .follow-result.fail { color: #ff9b9b; }
+.my-events-push-table .follow-result.partial { color: #ffd894; }
+.my-events-push-table .follow-result.queued { color: #9ecbff; }
+.my-events-push-table .follow-result.none { color: var(--muted); }
+
+/* 展开行：合并前的平博源单 */
+.my-events-push-table tr.follow-row { cursor: pointer; }
+.my-events-push-table tr.follow-row:hover { background: rgba(255, 255, 255, 0.03); }
+.my-events-push-table .follow-caret {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+.my-events-push-table tr.follow-row.expanded .follow-caret { transform: rotate(90deg); }
+.my-events-push-table tr.follow-sources > td { padding: 0; }
+.follow-source-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: rgba(2, 9, 20, 0.6);
+}
+.follow-source-table th,
+.follow-source-table td {
+  padding: 5px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.66rem;
+  text-align: center;
+  white-space: nowrap;
+}
+.follow-source-table th {
+  color: var(--muted);
+  font-weight: 500;
+}
+.follow-source-table th.num,
+.follow-source-table td.num { text-align: center; }

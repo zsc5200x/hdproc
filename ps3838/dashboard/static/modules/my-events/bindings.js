@@ -73,12 +73,13 @@ export function bindMyEventsEvents() {
   if (initialTz) initialTz.value = String(state.myEvents.tz);
   markQuick("24");
   setActiveTab(document.querySelector('[data-my-events-status="ALL"]'));
-  setMyEventsView(state.myEvents.view);
   for (const item of document.querySelectorAll("[data-my-events-basis]")) {
     const active = item.dataset.myEventsBasis === state.myEvents.basis;
     item.classList.toggle("active", active);
     item.setAttribute("aria-pressed", String(active));
   }
+  // 默认视角在 basis 初始化之后再应用；跟单/比赛视角会清掉 basis 的高亮。
+  setMyEventsView(state.myEvents.view);
 
   document.querySelectorAll("[data-my-events-status]").forEach((button) => {
     button.addEventListener("click", () => {

@@ -6339,44 +6339,8 @@ function renderPs3838App() {
   const app = state.ps3838App || {};
   const status = app.status || {};
   const running = !!status.running;
-  const busy = String(app.busy || "");
-  const chip = $("ps3838-app-status");
-  if (chip) {
-    let tone = "stopped";
-    let label = "未运行";
-    if (busy === "start") { tone = "pending"; label = "启动中"; }
-    else if (busy === "stop") { tone = "pending"; label = "停止中"; }
-    else if (app.error) { tone = "error"; label = "检测失败"; }
-    else if (running) { tone = "running"; label = "运行中"; }
-    else if (status.dir_exists === false) { tone = "error"; label = "目录不存在"; }
-    chip.dataset.tone = tone;
-    const icon = tone === "running" ? "fa-circle-check" : tone === "pending" ? "fa-circle-notch fa-spin" : tone === "error" ? "fa-triangle-exclamation" : "fa-circle";
-    chip.innerHTML = `<i class="fa-solid ${icon}" aria-hidden="true"></i>${escapeHtml(label)}`;
-  }
-
-  const meta = $("ps3838-app-meta");
-  if (meta) {
-    if (running) {
-      const healthTime = status.health && (status.health.serverTime || status.health.server_time);
-      meta.textContent = [status.url || "", healthTime || status.checked_at || ""].filter(Boolean).join(" · ");
-    } else if (app.error) {
-      meta.textContent = app.error;
-    } else if (status.dir_exists === false) {
-      meta.textContent = `找不到目录：${status.dir || ""}`;
-    } else {
-      meta.textContent = status.auto_start ? "PS3838 随主项目启动，打开本页会自动拉起" : "PS3838 看板未运行";
-    }
-  }
-
-  const startBtn = $("ps3838-app-start");
-  const stopBtn = $("ps3838-app-stop");
-  const openLink = $("ps3838-app-open");
-  if (startBtn) startBtn.disabled = running || busy === "start";
-  if (stopBtn) stopBtn.disabled = !running || busy === "stop";
-  if (openLink) openLink.href = status.url || "http://127.0.0.1:8787/";
-
   const frame = $("ps3838-app-frame");
-  const empty = $("ps3838-app-empty");
+  const loading = $("ps3838-app-loading");
   const embedUrl = status.embed_url || status.url;
   if (running && embedUrl) {
     if (frame && frame.dataset.loadedUrl !== embedUrl) {
@@ -6384,7 +6348,7 @@ function renderPs3838App() {
       frame.dataset.loadedUrl = embedUrl;
     }
     if (frame) frame.hidden = false;
-    if (empty) empty.hidden = true;
+    if (loading) loading.hidden = true;
     return;
   }
 
@@ -6395,25 +6359,8 @@ function renderPs3838App() {
       frame.dataset.loadedUrl = "";
     }
   }
-  if (empty) empty.hidden = false;
-  const title = $("ps3838-app-empty-title");
-  const text = $("ps3838-app-empty-text");
-  const metaEl = $("ps3838-app-empty-meta");
-  const emptyStart = $("ps3838-app-empty-start");
-  if (emptyStart) emptyStart.disabled = busy === "start";
-  if (title) {
-    title.textContent = busy === "start"
-      ? "正在启动 PS38赛事"
-      : app.error ? "PS38赛事连接失败" : "PS38赛事未运行";
-  }
-  if (text) {
-    text.textContent = busy === "start"
-      ? "正在启动 PS3838（看板 + 皇冠 + 采集）；首次启动需要几秒，请稍候…"
-      : app.error
-        ? "启动或检测失败，日志见 data/ps3838_app_start.log。"
-        : "PS3838 会随主项目一起启动；打开本页也会自动拉起，无需单独启动。";
-  }
-  if (metaEl) metaEl.textContent = app.error || status.dir || "";
+  // 看板未就绪时只显示加载圈，页面里不再出现“未运行 / 启动 PS38赛事”的卡片。
+  if (loading) loading.hidden = false;
 }
 
 async function loadPs3838AppStatus(options = {}) {
@@ -6432,7 +6379,7 @@ async function loadPs3838AppStatus(options = {}) {
       && !state.ps3838App.busy
     ) {
       state.ps3838App.autoStartAttempted = true;
-      await startPs3838App();
+      await startPs3838App({ silent: true });
     }
     return data;
   } catch (e) {
@@ -6440,17 +6387,6 @@ async function loadPs3838AppStatus(options = {}) {
     renderPs3838App();
     return null;
   }
-}
-
-// PS3838 已经并入主项目：打开 HD 页面时看板若没在跑，就直接后台拉起，
-// 不再让用户在 PS38 标签页里单独点一次“启动”。
-async function ensurePs3838AppRunning() {
-  const app = state.ps3838App;
-  if (app.busy || app.autoStartAttempted) return;
-  const data = await loadPs3838AppStatus();
-  if (!data || data.running || !data.auto_start || app.busy || app.autoStartAttempted) return;
-  app.autoStartAttempted = true;
-  await startPs3838App();
 }
 
 function schedulePs3838AppPoll(attempt = 0) {
@@ -6463,7 +6399,7 @@ function schedulePs3838AppPoll(attempt = 0) {
       toast("PS38赛事已就绪", "success");
       return;
     }
-    if (attempt < 30) {
+    if (attempt < 60) {
       schedulePs3838AppPoll(attempt + 1);
     } else {
       app.error = "启动超时：PS3838 看板（127.0.0.1:8787）仍未就绪，请查看 data/ps3838_app_start.log";
@@ -6475,7 +6411,8 @@ function schedulePs3838AppPoll(attempt = 0) {
   }, 2000);
 }
 
-async function startPs3838App() {
+async function startPs3838App(options = {}) {
+  const { silent = false } = options;
   const app = state.ps3838App;
   if (app.busy) return;
   app.busy = "start";
@@ -6489,7 +6426,7 @@ async function startPs3838App() {
       body: "{}",
     }, 15000);
     if (!data.ok) throw new Error(data.message || "启动失败");
-    toast(data.message || "已发起 PS38赛事启动", "info", 5000);
+    if (!silent) toast(data.message || "已发起 PS38赛事启动", "info", 5000);
     schedulePs3838AppPoll();
   } catch (e) {
     app.error = `启动失败：${String(e && e.message ? e.message : e)}`;
@@ -6532,23 +6469,14 @@ async function stopPs3838App() {
 }
 
 function bindPs3838AppControls() {
-  const bind = (id, handler) => {
-    const el = $(id);
-    if (!el || el.dataset.ps3838Bound === "true") return;
-    el.addEventListener("click", handler);
-    el.dataset.ps3838Bound = "true";
-  };
-  bind("ps3838-app-start", () => startPs3838App());
-  bind("ps3838-app-empty-start", () => startPs3838App());
-  bind("ps3838-app-stop", () => stopPs3838App());
-  bind("ps3838-app-refresh", async () => {
+  const refresh = $("ps3838-app-refresh");
+  if (!refresh || refresh.dataset.ps3838Bound === "true") return;
+  refresh.addEventListener("click", async () => {
     const frame = $("ps3838-app-frame");
-    if (frame && frame.dataset.loadedUrl) {
-      frame.src = frame.dataset.loadedUrl;
-    }
+    if (frame && frame.dataset.loadedUrl) frame.src = frame.dataset.loadedUrl;
     await loadPs3838AppStatus();
-    toast("PS38赛事状态已刷新", "info");
   });
+  refresh.dataset.ps3838Bound = "true";
 }
 
 // ── Local bridge config ────────────────────────────────────────
@@ -7404,8 +7332,6 @@ async function loadInitial(opts = {}) {
   loadTelegramConfig().catch(() => {});
   loadSignalPullConfig().catch(() => {});
   loadLocalBridgeConfig().catch(() => {});
-  // PS3838 随主项目启动：页面打开时看板若没在跑，后台自动拉起。
-  ensurePs3838AppRunning().catch(() => {});
 }
 
 let initialLoadPromise = null;

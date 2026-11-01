@@ -1,4 +1,5 @@
 import argparse
+import http.client
 import json
 import os
 import re
@@ -748,7 +749,58 @@ def ps3838_enabled() -> bool:
     return value not in {"0", "false", "no", "off", "disabled"}
 
 
+def ps3838_dashboard_socket() -> Path:
+    """Resolve the dashboard's Unix socket (merged layout, no TCP port)."""
+    config_path = Path(os.environ.get("PS3838_CONFIG") or (PS3838_APP_DIR / "config.json")).expanduser()
+    run_dir = "var/run"
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and payload.get("run_dir"):
+            run_dir = str(payload["run_dir"])
+    except (OSError, ValueError):
+        pass
+    base = Path(run_dir).expanduser()
+    if not base.is_absolute():
+        base = PS3838_APP_DIR / base
+    return base / "dashboard.sock"
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: Path, timeout: float) -> None:
+        super().__init__("localhost", timeout=max(0.2, float(timeout)))
+        self._socket_path = str(socket_path)
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        try:
+            sock.connect(self._socket_path)
+        except BaseException:
+            sock.close()
+            raise
+        self.sock = sock
+
+
+def _ps3838_socket_health(socket_path: Path, timeout: float) -> Dict[str, Any]:
+    connection = _UnixHTTPConnection(socket_path, timeout)
+    try:
+        connection.request("GET", "/api/health", headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        raw = response.read().decode("utf-8", errors="replace")
+        if response.status != 200:
+            return {"ok": False, "error": f"HTTP {response.status}"}
+        payload = json.loads(raw) if raw else {}
+        return payload if isinstance(payload, dict) else {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        connection.close()
+
+
 def ps3838_health(timeout: float = 2.5) -> Dict[str, Any]:
+    socket_path = ps3838_dashboard_socket()
+    if socket_path.exists():
+        return _ps3838_socket_health(socket_path, timeout)
     request = urllib.request.Request(ps3838_health_url(), headers={"Accept": "application/json"}, method="GET")
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -837,7 +889,9 @@ def stop_ps3838_stack() -> int:
 def status_ps3838() -> int:
     health = ps3838_health()
     state = "RUNNING" if health.get("ok") else "STOPPED"
-    print(f"{state:8} url={ps3838_health_url()} dir={PS3838_APP_DIR}")
+    socket_path = ps3838_dashboard_socket()
+    endpoint = f"unix:{socket_path}" if socket_path.exists() else ps3838_health_url()
+    print(f"{state:8} endpoint={endpoint} dir={PS3838_APP_DIR}")
     if health:
         print(json.dumps(health, ensure_ascii=False))
     return 0 if health.get("ok") else 1

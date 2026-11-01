@@ -229,6 +229,7 @@ def shell_config(config: Dict[str, Any]) -> str:
         "CAPTURE_TARGET_HOSTS": ",".join(target_hosts(config)),
         "DASHBOARD_HOST": config["dashboard_host"],
         "DASHBOARD_PORT": config["dashboard_port"],
+        "DASHBOARD_SOCKET": str(get_path(config, "run_dir") / "dashboard.sock"),
         "CROWN_HOST": config["crown_host"],
         "CROWN_PORT": config["crown_port"],
         "DASHBOARD_URL": service_url(config, "dashboard"),

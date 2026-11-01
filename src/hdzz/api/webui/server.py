@@ -61,7 +61,9 @@ from hdzz.api.webui.local_bridge import (
     token_matches as local_bridge_token_matches,
 )
 from hdzz.api.webui.signal_pull_config import ensure_signal_pull_config_defaults, merge_signal_pull_config, reset_signal_pull_config, signal_pull_config_payload
+from hdzz.api.webui import ps3838_transport
 from hdzz.api.webui.ps3838_app import (
+    dashboard_socket_path as ps3838_dashboard_socket_path,
     read_telegram_config as read_ps3838_telegram_config,
     save_telegram_config as save_ps3838_telegram_config,
     start as start_ps3838_app,
@@ -6808,6 +6810,26 @@ class Handler(SimpleHTTPRequestHandler):
             for key, value in self.headers.items()
             if str(key).lower() not in skip_headers
         }
+        socket_path = self._ps3838_dashboard_socket()
+        if socket_path is not None and Path(socket_path).exists():
+            try:
+                status_code, response_headers, content = ps3838_transport.request(
+                    socket_path,
+                    method,
+                    upstream_path + query,
+                    headers=headers,
+                    body=body,
+                    timeout=60,
+                )
+            except Exception as exc:
+                if upstream_path.startswith("/api/"):
+                    self._send_json(502, {"ok": False, "message": f"ps3838 upstream unavailable: {exc}"})
+                else:
+                    self.send_error(502, f"ps3838 upstream unavailable: {exc}")
+                return True
+            self._relay_ps3838_response(status_code, response_headers, content, method)
+            return True
+
         session = requests.Session()
         session.trust_env = False
         try:
@@ -6828,15 +6850,39 @@ class Handler(SimpleHTTPRequestHandler):
         finally:
             session.close()
 
-        content = upstream.content or b""
+        self._relay_ps3838_response(
+            upstream.status_code,
+            list(upstream.headers.items()),
+            upstream.content or b"",
+            method,
+        )
+        return True
+
+    def _ps3838_dashboard_socket(self):
+        """Resolve the dashboard Unix socket once per WebUI process."""
+        server = self.server
+        cached = getattr(server, "_ps3838_socket_path", None)
+        if cached is not None:
+            return cached
+        try:
+            path = ps3838_dashboard_socket_path(self._read_config())
+        except Exception:
+            path = None
+        try:
+            server._ps3838_socket_path = path
+        except Exception:
+            pass
+        return path
+
+    def _relay_ps3838_response(self, status_code, response_headers, content: bytes, method: str) -> None:
         skip_response = {
             "content-length", "content-encoding", "transfer-encoding", "connection",
             "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
             "upgrade",
         }
         try:
-            self.send_response(int(upstream.status_code))
-            for key, value in upstream.headers.items():
+            self.send_response(int(status_code))
+            for key, value in response_headers:
                 if str(key).lower() in skip_response:
                     continue
                 self.send_header(str(key), str(value))
@@ -6846,7 +6892,6 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(content)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             self.close_connection = True
-        return True
 
     def _local_bridge_endpoint(self) -> str:
         host = str(self.headers.get("Host") or "").strip()

@@ -84,10 +84,10 @@
       <div class="my-events-basis-bar">
         <span class="my-events-basis-label">统计口径</span>
         <div class="my-events-basis" role="group" aria-label="日期口径与视角">
-          <button class="my-events-basis-btn active" type="button" data-my-events-basis="created" aria-pressed="true">下单时间</button>
+          <button class="my-events-basis-btn active" type="button" data-my-events-view="pushes" aria-pressed="true">跟单视角</button>
+          <button class="my-events-basis-btn" type="button" data-my-events-basis="created" aria-pressed="false">下单时间</button>
           <button class="my-events-basis-btn" type="button" data-my-events-basis="settled" aria-pressed="false">结算时间</button>
           <button class="my-events-basis-btn" type="button" data-my-events-view="fixtures" aria-pressed="false">比赛视角</button>
-          <button class="my-events-basis-btn" type="button" data-my-events-view="pushes" aria-pressed="false">推送视角</button>
         </div>
         <select id="myEventsTz" class="my-events-select my-events-tz" aria-label="时区">
           <option value="-240" selected>代理后台 GMT-4</option>
@@ -149,21 +149,20 @@
         <table class="my-events-table my-events-push-table">
           <thead>
             <tr>
-              <th>推送时间</th>
-              <th>状态</th>
+              <th>时间</th>
               <th>联赛</th>
               <th>比赛</th>
               <th>盘口</th>
-              <th>金额</th>
+              <th>对手盘</th>
+              <th class="num">金额</th>
+              <th class="num">跟单金额</th>
               <th>订单号</th>
-              <th>代理</th>
-              <th>会员</th>
-              <th>推送内容</th>
+              <th>跟单结果</th>
             </tr>
           </thead>
           <tbody id="myEventsPushBody"></tbody>
         </table>
-        <div id="myEventsPushEmpty" class="my-events-empty hidden">当前范围内没有推送记录</div>
+        <div id="myEventsPushEmpty" class="my-events-empty hidden">当前范围内没有跟单记录</div>
       </div>
     </section>
 
