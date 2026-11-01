@@ -453,15 +453,9 @@ def build_spec_inputs(
         preview_path = source_root / preview_name
         if preview_path.is_file():
             spec_inputs["datas"].append((str(preview_path), "."))
-    config_json = app_dir / "config.json"
-    if config_json.is_file():
-        spec_inputs["datas"].append((str(config_json), "app"))
     puller_state_seed = app_dir / "runtime_seeds" / "ook_signal_puller_state.json"
     if puller_state_seed.is_file():
         spec_inputs["datas"].append((str(puller_state_seed), "app/runtime_seeds"))
-    tg_auth_seed = app_dir / "data" / "tg_auth.json"
-    if tg_auth_seed.is_file():
-        spec_inputs["datas"].append((str(tg_auth_seed), "app/data"))
     if splash_asset_path is not None:
         spec_inputs["datas"].append((str(Path(splash_asset_path).resolve()), "bundle_assets"))
     return spec_inputs

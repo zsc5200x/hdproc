@@ -81,6 +81,16 @@ PY
   export HDZZ_LOG_DIR="${HDZZ_LOG_DIR:-${app_dir}/.run/logs}"
   mkdir -p "${HDZZ_LOG_DIR}"
 
+  # Seed a private first-run config from the template. Live credentials are
+  # intentionally excluded from release bundles and must never be copied into
+  # an installed app by the build step.
+  local config_path="${app_dir}/config.json"
+  local config_seed="${app_dir}/config.example.json"
+  if [[ ! -f "${config_path}" && -f "${config_seed}" ]]; then
+    cp "${config_seed}" "${config_path}"
+    chmod 600 "${config_path}" || true
+  fi
+
   local stamp="${venv_dir}/.bootstrap.stamp"
   local need_bootstrap="0"
   if [[ ! -f "${stamp}" ]]; then

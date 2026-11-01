@@ -80,6 +80,13 @@ def test_missing_order_id_gets_stable_fallback():
     assert order["orderId"] == order["playerWagerId"]
 
 
+def test_safe_name_keeps_distinct_unicode_account_names_separate():
+    from hdzz.core.watcher.ps3838_watch import safe_name
+
+    assert safe_name("节点一") != safe_name("节点二")
+    assert safe_name("节点一") == safe_name("节点一")
+
+
 @pytest.mark.parametrize("event", ["new", "update"])
 def test_telegram_push_uses_shared_theme_and_translates_ps3838_choice(event):
     raw = {

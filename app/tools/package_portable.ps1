@@ -68,18 +68,38 @@ function Robocopy-Tree([string]$src, [string]$dst, [bool]$includeLogs) {
     "dist",
     "hdydf",
     "__pycache__",
-    "data\\_pw_member",
-    "data\\captures",
-    "data\\debug",
-    "data\\_tmp"
+    ".venv",
+    (Join-Path $src "app\data"),
+    (Join-Path $src "app\orders"),
+    (Join-Path $src "app\state"),
+    (Join-Path $src "app\.venv"),
+    (Join-Path $src "ps3838\var"),
+    (Join-Path $src "ps3838\data"),
+    (Join-Path $src "ps3838\.venv"),
+    (Join-Path $src "ps3838\crown\data"),
+    (Join-Path $src "ps3838\crown\.run"),
+    (Join-Path $src "ps3838\crown\.venv")
   )
   if (-not $includeLogs) {
-    $exclude += ".run"
+    $exclude += (Join-Path $src "app\.run")
+    $exclude += (Join-Path $src "ps3838\.run")
+    $exclude += (Join-Path $src "ps3838\crown\.run")
   }
   $args = @($src, $dst, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:1", "/W:1")
   foreach ($d in $exclude) {
     $args += "/XD"
     $args += $d
+  }
+  foreach ($name in @(
+    "config.json",
+    "arsenal.json",
+    "tg_auth.json",
+    "telegram_signal_secrets.json",
+    "betradar-feed-token.txt",
+    "local_signal_gid_map.json"
+  )) {
+    $args += "/XF"
+    $args += $name
   }
   $p = Start-Process -FilePath robocopy -ArgumentList $args -NoNewWindow -Wait -PassThru
   $rc = [int]($p.ExitCode)
@@ -168,6 +188,20 @@ try {
     'set "PYTHONPATH=%CD%"',
     'set "NO_PROXY=127.0.0.1,localhost"',
     'set "no_proxy=127.0.0.1,localhost"',
+    '',
+    'if not exist "config.json" (',
+    '  if not exist "config.example.json" (',
+    '    echo [ERROR] Missing config.example.json.',
+    '    pause',
+    '    exit /b 1',
+    '  )',
+    '  copy /Y "config.example.json" "config.json" >nul',
+    '  if errorlevel 1 (',
+    '    echo [ERROR] Could not initialize config.json.',
+    '    pause',
+    '    exit /b 1',
+    '  )',
+    ')',
     '',
     'set "HOST=127.0.0.1"',
     'set "PORT=9999"',

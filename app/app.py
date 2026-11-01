@@ -7,6 +7,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -37,6 +39,32 @@ FOLLOW_ENGINE_PID_FILE = RUN_DIR / "follow_engine.pid.json"
 SNAPSHOT_WATCH_PID_FILE = RUN_DIR / "odds_snapshot_watch.pid.json"
 TELEGRAM_SIGNAL_PID_FILE = RUN_DIR / "telegram_signal.pid.json"
 PS3838_PID_FILE = ROOT / "data" / "ps3838" / "worker.pid"
+PS3838_APP_DIR = Path(os.environ.get("HDZZ_PS3838_DIR") or (SOURCE_REPO_ROOT / "ps3838")).expanduser()
+PS3838_HEALTH_URL = os.environ.get("HDZZ_PS3838_HEALTH_URL") or ""
+
+
+def ps3838_health_url() -> str:
+    explicit = str(os.environ.get("HDZZ_PS3838_HEALTH_URL") or PS3838_HEALTH_URL).strip()
+    if explicit:
+        return explicit.rstrip("/")
+    host = str(os.environ.get("DASHBOARD_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    port: Any = os.environ.get("DASHBOARD_PORT") or 8787
+    config_path = Path(os.environ.get("PS3838_CONFIG") or (PS3838_APP_DIR / "config.json")).expanduser()
+    try:
+        if config_path.is_file():
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                host = str(payload.get("dashboard_host") or host).strip() or host
+                port = payload.get("dashboard_port") or port
+    except (OSError, TypeError, ValueError):
+        pass
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 8787
+    return f"http://{host}:{port}/api/health"
 
 
 @dataclass
@@ -715,6 +743,106 @@ def core_workers(backend_interval: int, member_interval: int) -> List[WorkerSpec
     return out
 
 
+def ps3838_enabled() -> bool:
+    value = str(os.environ.get("HDZZ_PS3838_ENABLED") or "1").strip().lower()
+    return value not in {"0", "false", "no", "off", "disabled"}
+
+
+def ps3838_health(timeout: float = 2.5) -> Dict[str, Any]:
+    request = urllib.request.Request(ps3838_health_url(), headers={"Accept": "application/json"}, method="GET")
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=max(0.5, float(timeout))) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            payload = json.loads(raw) if raw else {}
+            return payload if isinstance(payload, dict) else {"ok": True}
+    except urllib.error.URLError as exc:
+        return {"ok": False, "error": str(getattr(exc, "reason", exc))}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def start_ps3838_stack(wait_seconds: float = 30.0) -> int:
+    if not ps3838_enabled():
+        print(f"[{now_iso()}] PS3838 已禁用（HDZZ_PS3838_ENABLED=0）")
+        return 0
+    script = PS3838_APP_DIR / "start.sh"
+    if not script.is_file():
+        print(f"[{now_iso()}] 跳过 PS3838：未找到 {script}")
+        return 0
+    if os.name == "nt":
+        print(f"[{now_iso()}] 跳过 PS3838：当前系统不支持 .sh 启动脚本")
+        return 0
+    if ps3838_health().get("ok"):
+        print(f"[{now_iso()}] PS3838 已在运行: {ps3838_health_url()}")
+        return 0
+    log_path = LOG_DIR / "ps3838_stack.out.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("ab")
+    try:
+        process = subprocess.Popen(
+            ["/bin/bash", str(script)],
+            cwd=str(PS3838_APP_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log_handle.close()
+    print(f"[{now_iso()}] Start: ps3838_stack PID={process.pid} dir={PS3838_APP_DIR} log={log_path}")
+    deadline = time.time() + max(1.0, float(wait_seconds))
+    while time.time() < deadline:
+        health = ps3838_health(timeout=1.5)
+        if health.get("ok"):
+            print(f"[{now_iso()}] PS3838 已就绪: {ps3838_health_url()}")
+            return 0
+        time.sleep(0.5)
+    print(f"[{now_iso()}] PS3838 启动后未在 {wait_seconds:.0f}s 内就绪: {ps3838_health_url()}")
+    return 1
+
+
+def stop_ps3838_stack() -> int:
+    if not ps3838_enabled():
+        return 0
+    script = PS3838_APP_DIR / "stop.sh"
+    if not script.is_file():
+        return 0
+    if os.name == "nt":
+        return 0
+    print(f"[{now_iso()}] Stop PS3838 stack: {script}")
+    try:
+        result = subprocess.run(
+            ["/bin/bash", str(script)],
+            cwd=str(PS3838_APP_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=90,
+        )
+        tail = (result.stdout or "").strip().splitlines()[-8:]
+        for line in tail:
+            print(f"  {line}")
+        return int(result.returncode)
+    except subprocess.TimeoutExpired:
+        print(f"[{now_iso()}] PS3838 stop.sh 超时")
+        return 2
+    except Exception as exc:
+        print(f"[{now_iso()}] PS3838 stop.sh 失败: {exc}")
+        return 1
+
+
+def status_ps3838() -> int:
+    health = ps3838_health()
+    state = "RUNNING" if health.get("ok") else "STOPPED"
+    print(f"{state:8} url={ps3838_health_url()} dir={PS3838_APP_DIR}")
+    if health:
+        print(json.dumps(health, ensure_ascii=False))
+    return 0 if health.get("ok") else 1
+
+
 def start_all(host: str, port: int, backend_interval: int, member_interval: int) -> int:
     ensure_dirs()
     env = dict(os.environ)
@@ -814,6 +942,8 @@ def start_all(host: str, port: int, backend_interval: int, member_interval: int)
                 write_follow_engine_pid_info({"started_at": started_at, "live": True, "pids": [proc.pid]})
     except Exception:
         pass
+    if start_ps3838_stack() != 0:
+        print(f"[{now_iso()}] 警告：PS3838 未就绪，主项目仍已启动；请查看 .run/logs/ps3838_stack.out.log")
     print("")
     print(f"WebUI: http://{host}:{port}/")
     print(f"PID file: {PID_FILE}")
@@ -1299,6 +1429,10 @@ def status_telegram_signal() -> int:
 
 def stop_all(force: bool) -> int:
     ps3838_was_running = stop_ps3838_worker(force=bool(force))
+    try:
+        stop_ps3838_stack()
+    except Exception as exc:
+        print(f"[{now_iso()}] PS3838 停止失败: {exc}")
     info = read_pid_info()
     if not info:
         print(".run/pids.json not found (maybe not started by app.py/app.ps1/run_all.ps1).")
@@ -1516,6 +1650,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             "stop-telegram-signal",
             "restart-telegram-signal",
             "status-telegram-signal",
+            "start-ps3838",
+            "stop-ps3838",
+            "restart-ps3838",
+            "status-ps3838",
         ],
         nargs="?",
         default="start",
@@ -1535,6 +1673,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         return status_follow_engine()
     if args.action == "status-telegram-signal":
         return status_telegram_signal()
+    if args.action == "status-ps3838":
+        return status_ps3838()
+    if args.action == "start-ps3838":
+        return start_ps3838_stack()
+    if args.action == "stop-ps3838":
+        return stop_ps3838_stack()
+    if args.action == "restart-ps3838":
+        stop_ps3838_stack()
+        time.sleep(0.5)
+        return start_ps3838_stack()
     if args.action == "stop":
         return stop_all(force=bool(args.force))
     if args.action == "stop-core":

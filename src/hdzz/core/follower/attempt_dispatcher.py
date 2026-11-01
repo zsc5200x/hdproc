@@ -9,16 +9,21 @@ CompletedAttempt = Tuple[str, str, Future]
 
 
 class AttemptDispatcher:
-    """Bounded executor that never runs two attempts for the same member."""
+    """Bounded executor with a configurable per-member concurrency limit."""
 
-    def __init__(self, max_workers: int = 3) -> None:
+    def __init__(self, max_workers: int = 3, per_member_limit: int = 2) -> None:
         workers = max(1, int(max_workers or 1))
         self.max_workers = workers
+        self.per_member_limit = max(1, int(per_member_limit or 1))
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="follow-attempt")
         self._lock = threading.RLock()
-        self._busy_members: set = set()
+        self._busy_members: Dict[str, int] = {}
         self._active: Dict[Future, Tuple[str, str]] = {}
         self._keys: set = set()
+
+    def set_per_member_limit(self, limit: int) -> None:
+        with self._lock:
+            self.per_member_limit = max(1, int(limit or 1))
 
     def submit(
         self,
@@ -34,12 +39,12 @@ class AttemptDispatcher:
             return None
 
         with self._lock:
-            if job_key in self._keys or mid in self._busy_members:
+            if job_key in self._keys or self._busy_members.get(mid, 0) >= self.per_member_limit:
                 return None
             if len(self._active) >= self.max_workers:
                 return None
             self._keys.add(job_key)
-            self._busy_members.add(mid)
+            self._busy_members[mid] = self._busy_members.get(mid, 0) + 1
 
             def run() -> Any:
                 return fn(*args, **kwargs)
@@ -56,7 +61,7 @@ class AttemptDispatcher:
                     continue
                 self._active.pop(future, None)
                 self._keys.discard(job_key)
-                self._busy_members.discard(mid)
+                self._release_member(mid)
                 completed.append((job_key, mid, future))
         return completed
 
@@ -69,14 +74,21 @@ class AttemptDispatcher:
                 if rec:
                     job_key, mid = rec
                     self._keys.discard(job_key)
-                    self._busy_members.discard(mid)
+                    self._release_member(mid)
+
+    def _release_member(self, member_id: str) -> None:
+        count = self._busy_members.get(member_id, 0) - 1
+        if count > 0:
+            self._busy_members[member_id] = count
+        else:
+            self._busy_members.pop(member_id, None)
 
     def is_member_busy(self, member_id: str) -> bool:
         with self._lock:
-            return str(member_id or "").strip() in self._busy_members
+            return self._busy_members.get(str(member_id or "").strip(), 0) > 0
 
     def busy_member_ids(self) -> set:
-        """Return a snapshot of members currently running a network attempt.
+        """Return members with at least one active network attempt.
 
         The scheduler uses this snapshot before picking a member.  Previously it
         picked a busy member first and only discovered the conflict in
@@ -85,6 +97,11 @@ class AttemptDispatcher:
         """
         with self._lock:
             return set(self._busy_members)
+
+    def saturated_member_ids(self) -> set:
+        """Return members that cannot accept another attempt."""
+        with self._lock:
+            return {mid for mid, count in self._busy_members.items() if count >= self.per_member_limit}
 
     def is_key_active(self, key: str) -> bool:
         with self._lock:

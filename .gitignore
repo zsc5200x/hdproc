@@ -101,3 +101,20 @@ _work/
 *.tmp
 *.tmp.*
 .ux_bak/
+
+# 合并后的 PS3838 子系统：真实配置、数据库和运行数据
+ps3838/config.json
+ps3838/var/
+ps3838/.venv
+ps3838/crown/.venv
+ps3838/logs
+ps3838/backups
+ps3838/.run
+ps3838/*.sqlite3
+ps3838/*.csv
+ps3838/*.jsonl
+ps3838/screenshots/
+# PS3838 联赛映射种子（运行数据目录中的唯一源码资产）
+!ps3838/data/
+ps3838/data/*
+!ps3838/data/league_mappings_seed.tsv

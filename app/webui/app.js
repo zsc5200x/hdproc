@@ -15,6 +15,15 @@ const state = {
   members: [],
   followSettings: null,
   signalPullConfig: {},
+  localBridgeConfig: {},
+  ps3838App: {
+    status: null,
+    busy: "",
+    error: "",
+    autoStartAttempted: false,
+    lastAutoStartAt: 0,
+    pollTimer: null,
+  },
   tg: null,
   selectedTarget: "",
   search: "",
@@ -86,6 +95,7 @@ const state = {
 if (typeof window !== "undefined") window.state = state;
 
 const REMOTE_SIGNAL_FILTER_TARGET = "__remote_signal_pull__";
+const LOCAL_BRIDGE_FILTER_TARGET = "__local_bridge__";
 const MATCH_SEARCH_RETAINED_KEY = "hdproc.matchSearch.retained.v1";
 const MATCH_SEARCH_MODES = ["live", "today", "early"];
 const MATCH_ODDS_REFRESH_MS = 2000;
@@ -292,6 +302,7 @@ function bindFollowEngineToggle() {
 const VIEW_TITLES = {
   orders: "实时订单流",
   queue: "跟单队列",
+  ps3838: "PS38赛事",
   arsenal: "号池管理",
   "system-center": "系统中心",
   "follow-settings": "跟单策略",
@@ -429,6 +440,8 @@ function baseFilterOrders() {
   return state.orders.filter((o) => {
     if (state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET) {
       if (!isRemoteSignalOrder(o)) return false;
+    } else if (state.selectedTarget === LOCAL_BRIDGE_FILTER_TARGET) {
+      if (!isLocalBridgeOrder(o)) return false;
     } else if (state.selectedTarget && (o.target || "") !== state.selectedTarget) return false;
     if (!includesText(o, state.search)) return false;
     return true;
@@ -443,8 +456,13 @@ function filterOrders() {
   return rows;
 }
 
+function isLocalBridgeOrder(row) {
+  return !!(row && String(row._signal_origin || "").trim() === "local_bridge");
+}
+
 function isRemoteSignalOrder(row) {
-  return !!(row && (row._skip_signal_forward === true || String(row._signal_origin || "").trim() === "remote_signal_pull"));
+  if (!row || isLocalBridgeOrder(row)) return false;
+  return !!(row._skip_signal_forward === true || String(row._signal_origin || "").trim() === "remote_signal_pull");
 }
 
 function getSignalSourceSidebarItems() {
@@ -454,6 +472,7 @@ function getSignalSourceSidebarItems() {
     accounts: [],
     statuses: state.statuses,
     signalPullConfig: state.signalPullConfig,
+    localBridgeConfig: state.localBridgeConfig,
     orders: state.orders,
   }).filter((item) => item && item.kind === "signal-source");
 }
@@ -465,6 +484,7 @@ function computeTradingNodeStatus() {
       accounts: state.accounts,
       statuses: state.statuses,
       signalPullConfig: state.signalPullConfig,
+      localBridgeConfig: state.localBridgeConfig,
     });
   }
   const onlineAccounts = state.accounts.filter((a) => {
@@ -1034,7 +1054,7 @@ function renderAccountsSidebar() {
     const filterTarget = item.filterTarget || REMOTE_SIGNAL_FILTER_TARGET;
     const div = document.createElement("div");
     const isActive = state.selectedTarget === filterTarget;
-    const isOnline = String(item.statusText || "") === "已接入";
+    const isOnline = String(item.statusText || "") === "已接入" || (item.isLocalBridge && !!state.localBridgeConfig?.local_bridge_enabled);
     const statusTitle = [item.statusText, item.metaText].filter(Boolean).join(" · ");
     div.className = "account-item signal-source-item" + (isActive ? " active" : "");
     div.innerHTML = `
@@ -1047,7 +1067,7 @@ function renderAccountsSidebar() {
       </div>
       ${item.canDelete ? `
       <div class="acct-actions" style="opacity:0; transition:0.15s">
-        <button class="acct-btn danger" data-action="delete-signal" title="删除远端交易节点">×</button>
+        <button class="acct-btn danger" data-action="delete-signal" title="${item.isLocalBridge ? "删除本地桥接" : "删除远端交易节点"}">×</button>
       </div>` : ""}
     `;
     div.addEventListener("mouseenter", () => {
@@ -1140,6 +1160,11 @@ function renderAccountsSidebar() {
     const statusMessage = String(st.status_message || "").trim();
     const statusTitle = statusMessage || (stClass === "online" ? "在线" : stClass === "relogin" ? "正在登录" : "离线");
     const loginWaiting = !!st.relogin_in_progress;
+    const partner = st.partner_sync && typeof st.partner_sync === "object" ? st.partner_sync : {};
+    const partnerLabel = partner.enabled
+      ? (partner.last_error ? "后台同步异常" : `后台代理 ${Array.isArray(partner.agents) ? partner.agents.length : 0}`)
+      : "";
+    const statusMeta = `平博 · ${statusTitle}${partnerLabel ? ` · ${partnerLabel}` : ""}`;
     const dotClass = stClass === "online" ? "st-online" : stClass === "relogin" ? "st-relogin" : "st-offline";
     div.className = ["account-item", "ps3838-account-item", isActive ? "active" : "", stClass === "relogin" ? "is-relogin" : "", stClass !== "online" ? "needs-login" : ""].filter(Boolean).join(" ");
     div.innerHTML = `
@@ -1147,7 +1172,7 @@ function renderAccountsSidebar() {
         <div class="account-status-dot ${dotClass}" title="${escapeHtml(statusTitle)}"></div>
         <div class="account-copy">
           <div class="account-name" title="${escapeHtml(accountLabel(a))}">${escapeHtml(accountLabel(a))}</div>
-          <div class="account-status-meta" title="${escapeHtml(statusTitle)}">平博 · ${escapeHtml(statusTitle)}</div>
+          <div class="account-status-meta" title="${escapeHtml(statusMeta)}">${escapeHtml(statusMeta)}</div>
         </div>
       </div>
       <div class="acct-actions" style="opacity:0; transition:0.15s">
@@ -1162,7 +1187,11 @@ function renderAccountsSidebar() {
       div.querySelector(".acct-actions").style.opacity = 1;
       state.selectedTarget = String(a.name || "");
       const sel = $("account"); if (sel) sel.value = state.selectedTarget;
-      refreshView();
+      if (typeof window.activateView === "function") {
+        window.activateView("ps3838", { syncNav: true, updateTitle: true });
+      } else {
+        refreshView();
+      }
     });
     div.querySelector("[data-action='login']").addEventListener("click", async (ev) => {
       ev.stopPropagation();
@@ -1477,6 +1506,15 @@ function renderOrderDetailCards(model, order, group) {
       ["赔率", `@ ${model.oddsText}`],
     ],
   };
+  const bridge = o._local_bridge && typeof o._local_bridge === "object" ? o._local_bridge : null;
+  if (bridge) {
+    itemsByGroup["盘口信息"].push(
+      ["对手盘", bridge.crown_opponent || o.line || "-"],
+      ["对手水位", bridge.crown_odds || o.odds || "-"],
+      ["对手快照", bridge.crown_snapshot_at || "-"],
+      ["桥接来源", bridge.source || "ps3838-wss"],
+    );
+  }
   const items = itemsByGroup[group] || itemsByGroup["注单详情"];
   return items.map(([label, value]) => `
     <article class="order-detail-card">
@@ -2727,7 +2765,9 @@ function renderKpis(orders) {
   if ($("kpi-today-sub")) {
     $("kpi-today-sub").textContent = state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET
       ? "信号源: 远端交易节点"
-      : state.selectedTarget ? `账号: ${accountLabel(a)}` : "全部目标";
+      : state.selectedTarget === LOCAL_BRIDGE_FILTER_TARGET
+        ? "信号源: 本地桥接"
+        : state.selectedTarget ? `账号: ${accountLabel(a)}` : "全部目标";
   }
 }
 
@@ -2876,6 +2916,41 @@ if (typeof document.addEventListener === "function") {
     }
   });
 }
+function normalizeLocalBridgeConfig(data) {
+  const root = data && typeof data === "object" ? data : {};
+  const cfg = root.config && typeof root.config === "object" ? root.config : root;
+  return {
+    local_bridge_configured: !!cfg.local_bridge_configured,
+    local_bridge_enabled: !!cfg.local_bridge_enabled,
+    local_bridge_name: String(cfg.local_bridge_name || "本地桥接"),
+    local_bridge_target: String(cfg.local_bridge_target || ""),
+    local_bridge_token_set: !!cfg.local_bridge_token_set,
+    local_bridge_allow_remote: !!cfg.local_bridge_allow_remote,
+    endpoint: String(root.endpoint || cfg.endpoint || ""),
+    status: (root.status && typeof root.status === "object" ? root.status : (cfg.status || {})),
+  };
+}
+
+function defaultLocalBridgeEndpoint() {
+  const origin = window.location && window.location.origin && window.location.origin !== "null"
+    ? window.location.origin
+    : "http://127.0.0.1:9999";
+  return `${origin}/api/local-signal/push`;
+}
+
+function applyLocalBridgeConfigToForm() {
+  if (!addNodeFormState) return;
+  const lb = normalizeLocalBridgeConfig(state.localBridgeConfig);
+  addNodeFormState.bridge = {
+    enabled: lb.local_bridge_configured ? lb.local_bridge_enabled : true,
+    target: lb.local_bridge_target || "ps3838",
+    token: "",
+    allow_remote: lb.local_bridge_allow_remote,
+    endpoint: lb.endpoint || defaultLocalBridgeEndpoint(),
+    status: lb.status || {},
+  };
+}
+
 function openAddModal() {
   const helper = window.HDAddNodeForm;
   addNodeFormState = helper && typeof helper.createDefaultAddNodeForm === "function"
@@ -2884,11 +2959,21 @@ function openAddModal() {
         mode: "account",
         account: { base_url: "", username: "", password: "", login_tab: 3, relogin_min_interval_seconds: 5, security_code: "", monitor_members: [], monitor_downlines: [] },
         signal: { enabled: true, url: "", token: "", live_only: true, limit: 200, interval_seconds: 1 },
-        ps3838: { base_url: "https://www.ps38ag.com", username: "", password: "", interval_seconds: 15, telegram_chat_id: "" },
+        ps3838: { base_url: "https://www.ps38ag.com/partner/zh-cn/login", username: "", password: "", interval_seconds: 15, telegram_chat_id: "" },
+        bridge: { enabled: true, target: "ps3838", token: "", allow_remote: false, endpoint: "", status: {} },
       };
+  if (!addNodeFormState.bridge) {
+    addNodeFormState.bridge = { enabled: true, target: "ps3838", token: "", allow_remote: false, endpoint: "", status: {} };
+  }
+  applyLocalBridgeConfigToForm();
   renderAddNodeModal();
   const m = $("modal-add"); if (m) m.classList.add("show");
   if ($("add-base-url")) $("add-base-url").focus();
+  loadLocalBridgeConfig().then(() => {
+    if (!addNodeFormState || addNodeFormState.mode !== "bridge") return;
+    applyLocalBridgeConfigToForm();
+    renderAddNodeModal();
+  }).catch(() => {});
 }
 function closeAddModal() {
   const m = $("modal-add"); if (m) m.classList.remove("show");
@@ -2906,9 +2991,53 @@ function bindAddNodeModalControls() {
   bindOnce($("add-mode-account"), "click", () => setAddMode("account"));
   bindOnce($("add-mode-ps3838"), "click", () => setAddMode("ps3838"));
   bindOnce($("add-mode-signal"), "click", () => setAddMode("signal"));
+  bindOnce($("add-mode-bridge"), "click", () => setAddMode("bridge"));
+  bindOnce($("add-bridge-token-generate"), "click", generateLocalBridgeToken);
+  bindOnce($("add-bridge-token-copy"), "click", copyLocalBridgeToken);
   bindOnce($("add-login-tab-2"), "click", () => setAddLoginTab(2));
   bindOnce($("add-login-tab-3"), "click", () => setAddLoginTab(3));
 }
+
+function generateLocalBridgeToken() {
+  const bytes = new Uint8Array(16);
+  if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+    window.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  const token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  if ($("add-bridge-token")) $("add-bridge-token").value = token;
+  if (addNodeFormState && addNodeFormState.bridge) addNodeFormState.bridge.token = token;
+  if ($("add-hint")) {
+    $("add-hint").textContent = "Token 已生成，请同步到 ps3838-wss 的 local_signal_push_token";
+    $("add-hint").className = "form-hint success";
+  }
+}
+
+async function copyLocalBridgeToken() {
+  const input = $("add-bridge-token");
+  const token = String(input?.value || "").trim();
+  if (!token) {
+    toast("还没有可复制的 Token", "warning");
+    return;
+  }
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(token);
+    } else {
+      input.type = "text";
+      input.select();
+      document.execCommand("copy");
+      input.type = "password";
+    }
+    toast("Token 已复制，请填入 ps3838-wss 的 local_signal_push_token", "success");
+  } catch {
+    input.type = "text";
+    input.select();
+    toast("请手动复制选中的 Token", "info");
+  }
+}
+
 function openMemberModal() {
   setMemberHint("");
   setMemberPasswordVisible(false);
@@ -3085,7 +3214,7 @@ function parseListField(value) {
 
 function setAddMode(mode) {
   if (!addNodeFormState) return;
-  addNodeFormState.mode = mode === "signal" || mode === "ps3838" ? mode : "account";
+  addNodeFormState.mode = mode === "signal" || mode === "ps3838" || mode === "bridge" ? mode : "account";
   renderAddNodeModal();
 }
 
@@ -3098,19 +3227,51 @@ function setAddLoginTab(tab) {
 window.setAddMode = setAddMode;
 window.setAddLoginTab = setAddLoginTab;
 
+function formatLocalBridgeStatus(status) {
+  const st = status && typeof status === "object" ? status : {};
+  const last = st.last_signal && typeof st.last_signal === "object" ? st.last_signal : {};
+  const configured = !!st.configured;
+  const enabled = !!st.enabled;
+  const received = Number(st.received_count || 0);
+  if (!configured && !received) {
+    return '<div class="bridge-status-empty">保存后等待桥接推送；先在 ps3838-wss 开启 local_signal_push_enabled。</div>';
+  }
+  const stateText = !enabled ? "已暂停" : (Number(st.last_received_at || 0) > 0 ? "已接收" : "等待信号");
+  const stateTone = !enabled ? "is-warn" : (Number(st.last_received_at || 0) > 0 ? "is-ok" : "is-warn");
+  const lines = [
+    ["状态", stateText, stateTone],
+    ["最后接收", st.last_received_text || "—", ""],
+    ["来源地址", st.last_remote || "—", ""],
+    ["最近对手盘", last.crownOpponent || last.line || "—", ""],
+    ["对手水位", last.crownOdds || last.odds || "—", ""],
+    ["接收计数", `接收 ${received} · 重复 ${Number(st.duplicate_count || 0)} · 拒绝 ${Number(st.rejected_count || 0)}`, ""],
+  ];
+  if (st.last_error) lines.push(["最近错误", String(st.last_error), "is-bad"]);
+  return lines.map(([label, value, tone]) => `
+    <div class="bridge-status-line">
+      <span>${escapeHtml(label)}</span>
+      <strong class="${escapeHtml(tone || "")}" title="${escapeHtml(value)}">${escapeHtml(value)}</strong>
+    </div>
+  `).join("");
+}
+
 function renderAddNodeModal() {
   if (!addNodeFormState) return;
   const isSignal = addNodeFormState.mode === "signal";
   const isPs3838 = addNodeFormState.mode === "ps3838";
-  $("add-mode-account")?.classList.toggle("active", !isSignal && !isPs3838);
+  const isBridge = addNodeFormState.mode === "bridge";
+  $("add-mode-account")?.classList.toggle("active", !isSignal && !isPs3838 && !isBridge);
   $("add-mode-ps3838")?.classList.toggle("active", isPs3838);
   $("add-mode-signal")?.classList.toggle("active", isSignal);
-  $("add-mode-account")?.setAttribute("aria-pressed", String(!isSignal && !isPs3838));
+  $("add-mode-bridge")?.classList.toggle("active", isBridge);
+  $("add-mode-account")?.setAttribute("aria-pressed", String(!isSignal && !isPs3838 && !isBridge));
   $("add-mode-ps3838")?.setAttribute("aria-pressed", String(isPs3838));
   $("add-mode-signal")?.setAttribute("aria-pressed", String(isSignal));
-  if ($("add-account-fields")) $("add-account-fields").hidden = isSignal || isPs3838;
+  $("add-mode-bridge")?.setAttribute("aria-pressed", String(isBridge));
+  if ($("add-account-fields")) $("add-account-fields").hidden = isSignal || isPs3838 || isBridge;
   if ($("add-ps3838-fields")) $("add-ps3838-fields").hidden = !isPs3838;
   if ($("add-signal-fields")) $("add-signal-fields").hidden = !isSignal;
+  if ($("add-bridge-fields")) $("add-bridge-fields").hidden = !isBridge;
 
   const loginTab = Number(addNodeFormState.account?.login_tab || 3);
   const isLogin2 = loginTab === 2;
@@ -3136,6 +3297,8 @@ function renderAddNodeModal() {
   if ($("add-ps3838-password")) $("add-ps3838-password").value = String(addNodeFormState.ps3838?.password || "");
   if ($("add-ps3838-interval")) $("add-ps3838-interval").value = String(addNodeFormState.ps3838?.interval_seconds ?? 15);
   if ($("add-ps3838-chat-id")) $("add-ps3838-chat-id").value = String(addNodeFormState.ps3838?.telegram_chat_id || "");
+  if ($("add-ps3838-partner-sync")) $("add-ps3838-partner-sync").checked = !!addNodeFormState.ps3838?.partner_sync_enabled;
+  if ($("add-ps3838-agents")) $("add-ps3838-agents").value = (Array.isArray(addNodeFormState.ps3838?.partner_agents) ? addNodeFormState.ps3838.partner_agents : []).join(",");
 
   if ($("add-signal-url")) $("add-signal-url").value = String(addNodeFormState.signal?.url || "");
   if ($("add-signal-token")) $("add-signal-token").value = String(addNodeFormState.signal?.token || "");
@@ -3143,10 +3306,18 @@ function renderAddNodeModal() {
   if ($("add-signal-interval")) $("add-signal-interval").value = String(addNodeFormState.signal?.interval_seconds ?? 1);
   if ($("add-signal-live-only")) $("add-signal-live-only").checked = addNodeFormState.signal?.live_only !== false;
 
+  const bridge = addNodeFormState.bridge || {};
+  if ($("add-bridge-endpoint")) $("add-bridge-endpoint").value = String(bridge.endpoint || state.localBridgeConfig?.endpoint || defaultLocalBridgeEndpoint());
+  if ($("add-bridge-target")) $("add-bridge-target").value = String(bridge.target || "ps3838");
+  if ($("add-bridge-token")) $("add-bridge-token").value = String(bridge.token || "");
+  if ($("add-bridge-enabled")) $("add-bridge-enabled").checked = bridge.enabled !== false;
+  if ($("add-bridge-allow-remote")) $("add-bridge-allow-remote").checked = !!bridge.allow_remote;
+  if ($("add-bridge-status")) $("add-bridge-status").innerHTML = formatLocalBridgeStatus(bridge.status || state.localBridgeConfig?.status || {});
+
   const submitLabel = $("add-submit-label");
-  if (submitLabel) submitLabel.textContent = isSignal ? "保存信号源" : isPs3838 ? "登录并开始监控" : "立即接入";
+  if (submitLabel) submitLabel.textContent = isSignal ? "保存信号源" : isPs3838 ? "登录并开始监控" : isBridge ? "保存桥接配置" : "立即接入";
   const submitIcon = $("add-submit")?.querySelector("i");
-  if (submitIcon) submitIcon.className = `fa-solid ${isSignal ? "fa-floppy-disk" : isPs3838 ? "fa-futbol" : "fa-plug"}`;
+  if (submitIcon) submitIcon.className = `fa-solid ${isSignal ? "fa-floppy-disk" : isPs3838 ? "fa-futbol" : isBridge ? "fa-network-wired" : "fa-plug"}`;
   if ($("add-hint")) {
     $("add-hint").textContent = "";
     $("add-hint").className = "form-hint";
@@ -3297,9 +3468,11 @@ async function deleteAccount(name, label, provider = "ag") {
 
 async function deleteSignalSource(item) {
   const endpoint = item && item.deleteEndpoint ? String(item.deleteEndpoint) : "/api/signal-pull-config/delete";
-  const label = (item && item.name) || "远端交易节点";
+  const isLocalBridge = endpoint.includes("/api/local-bridge-config");
+  const label = (item && item.name) || (isLocalBridge ? "本地桥接" : "远端交易节点");
   const meta = item && item.metaText ? `（${item.metaText}）` : "";
-  if (!confirm(`确定要删除${label}${meta}吗？删除后将停止接收这个远端交易节点的信号。`)) return;
+  const stopText = isLocalBridge ? "删除后将停止接收本地桥接推送。" : "删除后将停止接收这个远端交易节点的信号。";
+  if (!confirm(`确定要删除${label}${meta}吗？${stopText}`)) return;
   try {
     const data = await fetchJson(endpoint, {
       method: "POST",
@@ -3307,16 +3480,24 @@ async function deleteSignalSource(item) {
       body: JSON.stringify({}),
     });
     if (!data.ok) throw new Error(data.message || "delete_signal_source_failed");
-    state.signalPullConfig = normalizeSignalPullConfig(data);
-    if (state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET) {
-      state.selectedTarget = "";
-      const sel = $("account"); if (sel) sel.value = "";
+    if (isLocalBridge) {
+      state.localBridgeConfig = normalizeLocalBridgeConfig(data);
+      if (state.selectedTarget === LOCAL_BRIDGE_FILTER_TARGET) {
+        state.selectedTarget = "";
+        const sel = $("account"); if (sel) sel.value = "";
+      }
+    } else {
+      state.signalPullConfig = normalizeSignalPullConfig(data);
+      if (state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET) {
+        state.selectedTarget = "";
+        const sel = $("account"); if (sel) sel.value = "";
+      }
     }
     renderAccountsSidebar();
     renderAccountSelect();
     renderTradingNodeKpi();
     await refreshView();
-    toast("远端交易节点已删除，已停止接收该远端信号", "success");
+    toast(isLocalBridge ? "本地桥接已删除，已停止接收推送" : "远端交易节点已删除，已停止接收该远端信号", "success");
   } catch (e) {
     toast(`删除失败: ${String(e && e.message ? e.message : e)}`, "error");
   }
@@ -3343,6 +3524,117 @@ async function loadTelegramConfig() {
   if ($("tg-backend-order-chat")) $("tg-backend-order-chat").value = String(data.backend_order_chat_id || "");
   if ($("tg-backend-order-proxy")) $("tg-backend-order-proxy").value = String(data.backend_order_proxy || "");
   renderSystemCenterTelegramSummary();
+}
+
+function renderPs3838PushState(data = {}) {
+  const el = $("ps3838-tg-state");
+  if (!el) return;
+  if (data.error) {
+    el.textContent = "读取失败";
+    el.dataset.tone = "error";
+    return;
+  }
+  const enabled = !!data.enabled;
+  const configured = !!data.configured;
+  el.textContent = enabled ? (configured ? "已启用" : "缺少配置") : "已关闭";
+  el.dataset.tone = enabled ? (configured ? "ok" : "error") : "off";
+}
+
+async function loadPs3838TelegramConfig() {
+  const hint = $("ps3838-tg-hint");
+  try {
+    const data = await fetchJson("/api/ps3838-telegram-config");
+    const enabledEl = $("ps3838-tg-enabled");
+    if (enabledEl) enabledEl.checked = !!data.enabled;
+    if ($("ps3838-tg-chat")) $("ps3838-tg-chat").value = String(data.chat_id || "");
+    if ($("ps3838-tg-proxy")) $("ps3838-tg-proxy").value = String(data.proxy || "");
+    const tokenEl = $("ps3838-tg-token");
+    if (tokenEl) {
+      tokenEl.value = "";
+      tokenEl.placeholder = data.has_token ? "已配置，留空不变" : "请填写机器人 Token";
+    }
+    if ($("ps3838-tg-token-hint")) {
+      $("ps3838-tg-token-hint").textContent = data.has_token ? "Token 已设置" : "";
+    }
+    renderPs3838PushState(data);
+    if (hint) { hint.textContent = ""; hint.className = "form-hint"; }
+  } catch (err) {
+    renderPs3838PushState({ error: true });
+    if (hint) {
+      hint.textContent = `读取失败：${err && err.message ? err.message : err}`;
+      hint.className = "form-hint error";
+    }
+  }
+}
+
+function ps3838ErrorText(err) {
+  const raw = String(err && err.message ? err.message : err);
+  const start = raw.indexOf("{");
+  if (start >= 0) {
+    try {
+      const payload = JSON.parse(raw.slice(start));
+      if (payload && payload.message) return String(payload.message);
+    } catch (_error) {
+      // Fall back to the raw message below.
+    }
+  }
+  return raw;
+}
+
+async function savePs3838TelegramConfig() {
+  const hint = $("ps3838-tg-hint");
+  const payload = {
+    enabled: !!$("ps3838-tg-enabled")?.checked,
+    chat_id: ($("ps3838-tg-chat")?.value || "").trim(),
+    proxy: ($("ps3838-tg-proxy")?.value || "").trim(),
+  };
+  const token = ($("ps3838-tg-token")?.value || "").trim();
+  if (token) payload.bot_token = token;
+  if (hint) { hint.textContent = "正在保存..."; hint.className = "form-hint"; }
+  try {
+    const data = await fetchJson("/api/ps3838-telegram-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!data.ok) throw new Error(data.message || "保存失败");
+    if ($("ps3838-tg-token")) $("ps3838-tg-token").value = "";
+    await loadPs3838TelegramConfig();
+    if (hint) { hint.textContent = data.message || "PS3838 推送配置已保存"; hint.className = "form-hint success"; }
+    toast("PS3838 推送配置已保存", "success");
+    recordSystemCenterActivity("PS3838 推送配置已保存", "success");
+  } catch (err) {
+    const msg = ps3838ErrorText(err);
+    if (hint) { hint.textContent = `保存失败：${msg}`; hint.className = "form-hint error"; }
+    toast(`PS3838 推送保存失败: ${msg}`, "error");
+  }
+}
+
+async function testPs3838Telegram() {
+  const hint = $("ps3838-tg-hint");
+  const payload = {};
+  const token = ($("ps3838-tg-token")?.value || "").trim();
+  const chatId = ($("ps3838-tg-chat")?.value || "").trim();
+  const proxy = ($("ps3838-tg-proxy")?.value || "").trim();
+  if (token) payload.bot_token = token;
+  if (chatId) payload.chat_id = chatId;
+  if (proxy) payload.proxy = proxy;
+  if (hint) { hint.textContent = "正在发送测试消息..."; hint.className = "form-hint"; }
+  try {
+    const data = await fetchJson("/api/ps3838-telegram-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!data.ok) throw new Error(data.message || "发送失败");
+    if (hint) { hint.textContent = "测试消息已发送"; hint.className = "form-hint success"; }
+    toast("PS3838 推送测试发送成功", "success");
+    recordSystemCenterActivity("PS3838 推送测试发送成功", "success");
+  } catch (err) {
+    const msg = ps3838ErrorText(err);
+    if (hint) { hint.textContent = `发送失败：${msg}`; hint.className = "form-hint error"; }
+    toast(`PS3838 推送测试失败: ${msg}`, "error");
+  }
 }
 
 async function saveTelegramConfig() {
@@ -4098,6 +4390,42 @@ function buildSignalMonitorSource(item) {
   };
 }
 
+function buildLocalBridgeMonitorSource(item) {
+  const cfg = state.localBridgeConfig || {};
+  const st = cfg.status || {};
+  const enabled = !!cfg.local_bridge_enabled;
+  const online = enabled && !!st.online;
+  const target = String(cfg.local_bridge_target || "").trim() || "ps3838";
+  const received = Number(st.received_count || 0);
+  const lastSignal = st.last_signal && typeof st.last_signal === "object" ? st.last_signal : {};
+  return {
+    kind: "signal",
+    isLocalBridge: true,
+    id: "local-bridge-source",
+    label: (item && item.name) || cfg.local_bridge_name || "本地桥接",
+    title: (item && item.name) || cfg.local_bridge_name || "本地桥接",
+    typeText: "本地桥接 · 皇冠对手盘入口",
+    icon: "fa-network-wired",
+    avatarClass: "signal",
+    statusText: online ? "已接入" : enabled ? "等待信号" : "已暂停",
+    statusTone: online ? "online" : enabled ? "warning" : "offline",
+    enabled,
+    normal: enabled,
+    primaryLabel: "最后接收",
+    primaryValue: st.last_received_text || "等待桥接推送",
+    primaryMeta: `${target} · 已接收 ${received} 条 · 重复 ${Number(st.duplicate_count || 0)} 条`,
+    rows: [
+      { icon: "fa-link", label: "接收地址", value: cfg.endpoint || defaultLocalBridgeEndpoint(), mono: true },
+      { icon: "fa-bullseye", label: "订单目标", value: target, mono: true },
+      { icon: "fa-key", label: "接收 Token", value: cfg.local_bridge_token_set ? "已设置" : "未设置（仅本机）" },
+      { icon: "fa-clock", label: "最后接收", value: st.last_received_text || "等待桥接推送" },
+      { icon: "fa-scale-balanced", label: "最近对手盘", value: lastSignal.crownOpponent || lastSignal.line || "—" },
+      { icon: "fa-triangle-exclamation", label: "失败原因", value: st.last_error || "最近无异常", warning: !!st.last_error },
+    ],
+    rawItem: item,
+  };
+}
+
 function buildMonitorPoolSources() {
   const sources = [];
   for (const account of Array.isArray(state.accounts) ? state.accounts : []) {
@@ -4111,7 +4439,7 @@ function buildMonitorPoolSources() {
   const signalItems = getSignalSourceSidebarItems();
   if (signalItems.length) {
     for (const item of signalItems) {
-      const source = buildSignalMonitorSource(item);
+      const source = item.isLocalBridge ? buildLocalBridgeMonitorSource(item) : buildSignalMonitorSource(item);
       if (source) sources.push(source);
     }
   } else if (state.signalPullConfig && String(state.signalPullConfig.signal_pull_url || "").trim()) {
@@ -4202,15 +4530,19 @@ function renderLegacyMonitorSourceCard(source) {
   `;
   article.querySelector("[data-action='refresh']")?.addEventListener("click", async (ev) => {
     ev.stopPropagation();
-    if (source.kind === "signal") await loadSignalPullConfig();
-    else await loadStatuses();
+    if (source.kind === "signal") {
+      if (source.isLocalBridge) await loadLocalBridgeConfig();
+      else await loadSignalPullConfig();
+    } else await loadStatuses();
     renderMonitorPool();
     toast("监控状态已刷新", "info");
   });
   article.querySelector("[data-action='toggle']")?.addEventListener("click", async (ev) => {
     ev.stopPropagation();
-    if (source.kind === "signal") await updateSignalPullEnabled(!source.enabled);
-    else await updateAccountEnabled(source.id, source.label, !source.enabled, source.provider);
+    if (source.kind === "signal") {
+      if (source.isLocalBridge) await updateLocalBridgeEnabled(!source.enabled);
+      else await updateSignalPullEnabled(!source.enabled);
+    } else await updateAccountEnabled(source.id, source.label, !source.enabled, source.provider);
   });
   article.querySelector("[data-action='login']")?.addEventListener("click", async (ev) => {
     ev.stopPropagation();
@@ -4477,15 +4809,19 @@ function renderMonitorSourceCard(source) {
   });
   article.querySelector("[data-action='refresh']")?.addEventListener("click", async (event) => {
     event.stopPropagation();
-    if (source.kind === "signal") await loadSignalPullConfig();
-    else await loadStatuses();
+    if (source.kind === "signal") {
+      if (source.isLocalBridge) await loadLocalBridgeConfig();
+      else await loadSignalPullConfig();
+    } else await loadStatuses();
     renderPoolManagement();
     toast("监控状态已刷新", "info");
   });
   article.querySelector("[data-action='toggle']")?.addEventListener("click", async (event) => {
     event.stopPropagation();
-    if (source.kind === "signal") await updateSignalPullEnabled(!source.enabled);
-    else await updateAccountEnabled(source.id, source.label, !source.enabled, source.provider);
+    if (source.kind === "signal") {
+      if (source.isLocalBridge) await updateLocalBridgeEnabled(!source.enabled);
+      else await updateSignalPullEnabled(!source.enabled);
+    } else await updateAccountEnabled(source.id, source.label, !source.enabled, source.provider);
   });
   article.querySelector("[data-action='login']")?.addEventListener("click", async (event) => {
     event.stopPropagation();
@@ -5998,6 +6334,269 @@ function renderReportEngineWarning() {
   `;
 }
 
+// ── PS3838 companion app ───────────────────────────────────────
+function renderPs3838App() {
+  const app = state.ps3838App || {};
+  const status = app.status || {};
+  const running = !!status.running;
+  const busy = String(app.busy || "");
+  const chip = $("ps3838-app-status");
+  if (chip) {
+    let tone = "stopped";
+    let label = "未运行";
+    if (busy === "start") { tone = "pending"; label = "启动中"; }
+    else if (busy === "stop") { tone = "pending"; label = "停止中"; }
+    else if (app.error) { tone = "error"; label = "检测失败"; }
+    else if (running) { tone = "running"; label = "运行中"; }
+    else if (status.dir_exists === false) { tone = "error"; label = "目录不存在"; }
+    chip.dataset.tone = tone;
+    const icon = tone === "running" ? "fa-circle-check" : tone === "pending" ? "fa-circle-notch fa-spin" : tone === "error" ? "fa-triangle-exclamation" : "fa-circle";
+    chip.innerHTML = `<i class="fa-solid ${icon}" aria-hidden="true"></i>${escapeHtml(label)}`;
+  }
+
+  const meta = $("ps3838-app-meta");
+  if (meta) {
+    if (running) {
+      const healthTime = status.health && (status.health.serverTime || status.health.server_time);
+      meta.textContent = [status.url || "", healthTime || status.checked_at || ""].filter(Boolean).join(" · ");
+    } else if (app.error) {
+      meta.textContent = app.error;
+    } else if (status.dir_exists === false) {
+      meta.textContent = `找不到目录：${status.dir || ""}`;
+    } else {
+      meta.textContent = status.auto_start ? "PS3838 随主项目启动，打开本页会自动拉起" : "PS3838 看板未运行";
+    }
+  }
+
+  const startBtn = $("ps3838-app-start");
+  const stopBtn = $("ps3838-app-stop");
+  const openLink = $("ps3838-app-open");
+  if (startBtn) startBtn.disabled = running || busy === "start";
+  if (stopBtn) stopBtn.disabled = !running || busy === "stop";
+  if (openLink) openLink.href = status.url || "http://127.0.0.1:8787/";
+
+  const frame = $("ps3838-app-frame");
+  const empty = $("ps3838-app-empty");
+  const embedUrl = status.embed_url || status.url;
+  if (running && embedUrl) {
+    if (frame && frame.dataset.loadedUrl !== embedUrl) {
+      frame.src = embedUrl;
+      frame.dataset.loadedUrl = embedUrl;
+    }
+    if (frame) frame.hidden = false;
+    if (empty) empty.hidden = true;
+    return;
+  }
+
+  if (frame) {
+    frame.hidden = true;
+    if (frame.dataset.loadedUrl) {
+      frame.src = "about:blank";
+      frame.dataset.loadedUrl = "";
+    }
+  }
+  if (empty) empty.hidden = false;
+  const title = $("ps3838-app-empty-title");
+  const text = $("ps3838-app-empty-text");
+  const metaEl = $("ps3838-app-empty-meta");
+  const emptyStart = $("ps3838-app-empty-start");
+  if (emptyStart) emptyStart.disabled = busy === "start";
+  if (title) {
+    title.textContent = busy === "start"
+      ? "正在启动 PS38赛事"
+      : app.error ? "PS38赛事连接失败" : "PS38赛事未运行";
+  }
+  if (text) {
+    text.textContent = busy === "start"
+      ? "正在启动 PS3838（看板 + 皇冠 + 采集）；首次启动需要几秒，请稍候…"
+      : app.error
+        ? "启动或检测失败，日志见 data/ps3838_app_start.log。"
+        : "PS3838 会随主项目一起启动；打开本页也会自动拉起，无需单独启动。";
+  }
+  if (metaEl) metaEl.textContent = app.error || status.dir || "";
+}
+
+async function loadPs3838AppStatus(options = {}) {
+  const { autoStart = false } = options;
+  try {
+    const data = await fetchJson("/api/ps3838-app/status", undefined, 9000);
+    state.ps3838App.status = data;
+    state.ps3838App.error = "";
+    renderPs3838App();
+    if (
+      autoStart
+      && state.view === "ps3838"
+      && !data.running
+      && data.auto_start
+      && !state.ps3838App.autoStartAttempted
+      && !state.ps3838App.busy
+    ) {
+      state.ps3838App.autoStartAttempted = true;
+      await startPs3838App();
+    }
+    return data;
+  } catch (e) {
+    state.ps3838App.error = `检测失败：${String(e && e.message ? e.message : e)}`;
+    renderPs3838App();
+    return null;
+  }
+}
+
+// PS3838 已经并入主项目：打开 HD 页面时看板若没在跑，就直接后台拉起，
+// 不再让用户在 PS38 标签页里单独点一次“启动”。
+async function ensurePs3838AppRunning() {
+  const app = state.ps3838App;
+  if (app.busy || app.autoStartAttempted) return;
+  const data = await loadPs3838AppStatus();
+  if (!data || data.running || !data.auto_start || app.busy || app.autoStartAttempted) return;
+  app.autoStartAttempted = true;
+  await startPs3838App();
+}
+
+function schedulePs3838AppPoll(attempt = 0) {
+  const app = state.ps3838App;
+  if (app.pollTimer) window.clearTimeout(app.pollTimer);
+  app.pollTimer = window.setTimeout(async () => {
+    app.pollTimer = null;
+    const data = await loadPs3838AppStatus();
+    if (data && data.running) {
+      toast("PS38赛事已就绪", "success");
+      return;
+    }
+    if (attempt < 30) {
+      schedulePs3838AppPoll(attempt + 1);
+    } else {
+      app.error = "启动超时：PS3838 看板（127.0.0.1:8787）仍未就绪，请查看 data/ps3838_app_start.log";
+      // 下次进入本页时允许再次自动拉起，不必用户手工点“启动”。
+      app.autoStartAttempted = false;
+      renderPs3838App();
+      toast(app.error, "error", 7000);
+    }
+  }, 2000);
+}
+
+async function startPs3838App() {
+  const app = state.ps3838App;
+  if (app.busy) return;
+  app.busy = "start";
+  app.lastAutoStartAt = Date.now();
+  app.error = "";
+  renderPs3838App();
+  try {
+    const data = await fetchJson("/api/ps3838-app/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }, 15000);
+    if (!data.ok) throw new Error(data.message || "启动失败");
+    toast(data.message || "已发起 PS38赛事启动", "info", 5000);
+    schedulePs3838AppPoll();
+  } catch (e) {
+    app.error = `启动失败：${String(e && e.message ? e.message : e)}`;
+    app.autoStartAttempted = false;
+    toast(app.error, "error", 7000);
+  } finally {
+    app.busy = "";
+    renderPs3838App();
+    loadPs3838AppStatus().catch(() => {});
+  }
+}
+
+async function stopPs3838App() {
+  const app = state.ps3838App;
+  if (app.busy) return;
+  if (app.pollTimer) {
+    window.clearTimeout(app.pollTimer);
+    app.pollTimer = null;
+  }
+  app.busy = "stop";
+  app.error = "";
+  renderPs3838App();
+  try {
+    const data = await fetchJson("/api/ps3838-app/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }, 15000);
+    if (!data.ok) throw new Error(data.message || "停止失败");
+    toast(data.message || "已发起 PS38赛事停止", "info", 5000);
+    window.setTimeout(() => { loadPs3838AppStatus().catch(() => {}); }, 1200);
+    window.setTimeout(() => { loadPs3838AppStatus().catch(() => {}); }, 3500);
+  } catch (e) {
+    app.error = `停止失败：${String(e && e.message ? e.message : e)}`;
+    toast(app.error, "error", 7000);
+  } finally {
+    app.busy = "";
+    renderPs3838App();
+  }
+}
+
+function bindPs3838AppControls() {
+  const bind = (id, handler) => {
+    const el = $(id);
+    if (!el || el.dataset.ps3838Bound === "true") return;
+    el.addEventListener("click", handler);
+    el.dataset.ps3838Bound = "true";
+  };
+  bind("ps3838-app-start", () => startPs3838App());
+  bind("ps3838-app-empty-start", () => startPs3838App());
+  bind("ps3838-app-stop", () => stopPs3838App());
+  bind("ps3838-app-refresh", async () => {
+    const frame = $("ps3838-app-frame");
+    if (frame && frame.dataset.loadedUrl) {
+      frame.src = frame.dataset.loadedUrl;
+    }
+    await loadPs3838AppStatus();
+    toast("PS38赛事状态已刷新", "info");
+  });
+}
+
+// ── Local bridge config ────────────────────────────────────────
+async function loadLocalBridgeConfig() {
+  try {
+    const data = await fetchJson("/api/local-bridge-config");
+    state.localBridgeConfig = normalizeLocalBridgeConfig(data);
+    if (addNodeFormState?.mode === "bridge" && $("modal-add")?.classList.contains("show")) {
+      addNodeFormState.bridge.status = state.localBridgeConfig.status || {};
+      if ($("add-bridge-endpoint")) $("add-bridge-endpoint").value = state.localBridgeConfig.endpoint || defaultLocalBridgeEndpoint();
+      if ($("add-bridge-status")) $("add-bridge-status").innerHTML = formatLocalBridgeStatus(addNodeFormState.bridge.status);
+    }
+    renderAccountsSidebar();
+    renderAccountSelect();
+    renderTradingNodeKpi();
+    if (state.view === "arsenal") renderPoolManagement();
+  } catch { /* endpoint may not exist in older builds */ }
+}
+
+async function updateLocalBridgeEnabled(enabled) {
+  const cfg = state.localBridgeConfig || {};
+  if (!cfg.local_bridge_configured) {
+    toast("本地桥接尚未配置", "warning");
+    return;
+  }
+  try {
+    const data = await fetchJson("/api/local-bridge-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        local_bridge_enabled: !!enabled,
+        local_bridge_configured: true,
+        local_bridge_target: cfg.local_bridge_target || "ps3838",
+        local_bridge_allow_remote: !!cfg.local_bridge_allow_remote,
+      }),
+    });
+    if (!data.ok) throw new Error(data.message || "update_local_bridge_failed");
+    state.localBridgeConfig = normalizeLocalBridgeConfig(data);
+    renderAccountsSidebar();
+    renderAccountSelect();
+    renderTradingNodeKpi();
+    renderMonitorPool();
+    toast(`${enabled ? "已启用" : "已暂停"}本地桥接`, "success");
+  } catch (e) {
+    toast(`切换本地桥接失败: ${String(e && e.message ? e.message : e)}`, "error");
+  }
+}
+
 // ── Signal pull config ─────────────────────────────────────────
 async function loadSignalPullConfig() {
   try {
@@ -6025,7 +6624,9 @@ function normalizeSignalPullConfig(data) {
   return {
     signal_pull_enabled: hasEnabled ? !!cfg.signal_pull_enabled : !!cfg.enabled,
     signal_pull_url: String(cfg.signal_pull_url || cfg.url || "").trim(),
-    signal_pull_token: String(cfg.signal_pull_token || cfg.token || "").trim(),
+    signal_pull_token: "",
+    signal_pull_token_set: !!cfg.signal_pull_token_set,
+    signal_pull_token_mask: String(cfg.signal_pull_token_mask || ""),
     signal_pull_live_only: hasLiveOnly ? !!cfg.signal_pull_live_only : !!cfg.live_only,
     signal_pull_limit: Number(cfg.signal_pull_limit || cfg.limit || 50),
     signal_pull_interval_seconds: Number(cfg.signal_pull_interval_seconds || cfg.interval || cfg.interval_seconds || 30),
@@ -6083,11 +6684,14 @@ async function submitAddAccount() {
   addNodeFormState.account.monitor_members = parseListField($("add-monitor-members")?.value || "");
   addNodeFormState.account.monitor_downlines = parseListField($("add-monitor-downlines")?.value || "");
 
-  addNodeFormState.ps3838.base_url = $("add-ps3838-base-url")?.value.trim() || "https://www.ps38ag.com";
+  addNodeFormState.ps3838.base_url = $("add-ps3838-base-url")?.value.trim() || "https://www.ps38ag.com/partner/zh-cn/login";
   addNodeFormState.ps3838.username = $("add-ps3838-username")?.value.trim() || "";
   addNodeFormState.ps3838.password = $("add-ps3838-password")?.value || "";
   addNodeFormState.ps3838.interval_seconds = parseInt($("add-ps3838-interval")?.value || "15", 10) || 15;
   addNodeFormState.ps3838.telegram_chat_id = $("add-ps3838-chat-id")?.value.trim() || "";
+  addNodeFormState.ps3838.partner_sync_enabled = !!$("add-ps3838-partner-sync")?.checked;
+  addNodeFormState.ps3838.partner_agents = ($("add-ps3838-agents")?.value || "")
+    .split(",").map((item) => item.trim()).filter(Boolean);
 
   addNodeFormState.signal.url = $("add-signal-url")?.value.trim() || "";
   addNodeFormState.signal.token = $("add-signal-token")?.value.trim() || "";
@@ -6095,9 +6699,18 @@ async function submitAddAccount() {
   addNodeFormState.signal.interval_seconds = parseInt($("add-signal-interval")?.value || "1", 10) || 1;
   addNodeFormState.signal.live_only = !!$("add-signal-live-only")?.checked;
 
+  if (!addNodeFormState.bridge) {
+    addNodeFormState.bridge = { enabled: true, target: "ps3838", token: "", allow_remote: false, endpoint: "", status: {} };
+  }
+  addNodeFormState.bridge.enabled = !!$("add-bridge-enabled")?.checked;
+  addNodeFormState.bridge.target = $("add-bridge-target")?.value.trim() || "ps3838";
+  addNodeFormState.bridge.token = $("add-bridge-token")?.value.trim() || "";
+  addNodeFormState.bridge.allow_remote = !!$("add-bridge-allow-remote")?.checked;
+
   const isSignalMode = addNodeFormState.mode === "signal";
   const isPs3838Mode = addNodeFormState.mode === "ps3838";
-  const idleLabel = isSignalMode ? "保存信号源" : isPs3838Mode ? "登录并开始监控" : "立即接入";
+  const isBridgeMode = addNodeFormState.mode === "bridge";
+  const idleLabel = isSignalMode ? "保存信号源" : isPs3838Mode ? "登录并开始监控" : isBridgeMode ? "保存桥接配置" : "立即接入";
   const btn = $("add-submit");
   const submitLabel = $("add-submit-label");
   const submitIcon = btn?.querySelector("i");
@@ -6105,7 +6718,7 @@ async function submitAddAccount() {
     btn.disabled = true;
     btn.setAttribute("aria-busy", "true");
   }
-  if (submitLabel) submitLabel.textContent = isSignalMode ? "保存中..." : "接入中...";
+  if (submitLabel) submitLabel.textContent = isSignalMode ? "保存中..." : isBridgeMode ? "保存中..." : "接入中...";
   if (submitIcon) submitIcon.className = "fa-solid fa-spinner";
   try {
     const req = helper.buildAddNodeSubmitRequest(addNodeFormState);
@@ -6127,6 +6740,10 @@ async function submitAddAccount() {
       // add 接口已发起登录，不能再发一次 relogin 打断原窗口里的 2FA。
       await loadStatuses();
       toast(data.message || "请在浏览器完成登录/2FA，窗口不会自动关闭", "info", 6500);
+    } else if (req.endpoint === "/api/local-bridge-config") {
+      await loadLocalBridgeConfig();
+      const bridgeTarget = addNodeFormState?.bridge?.target || "ps3838";
+      toast(`本地桥接已保存：对手盘写入 orders/${bridgeTarget}.jsonl`, "success", 6500);
     } else {
       await loadSignalPullConfig();
       toast("远端交易信号配置已保存", "success");
@@ -6139,7 +6756,7 @@ async function submitAddAccount() {
       btn.setAttribute("aria-busy", "false");
     }
     if (submitLabel) submitLabel.textContent = idleLabel;
-    if (submitIcon) submitIcon.className = `fa-solid ${isSignalMode ? "fa-floppy-disk" : isPs3838Mode ? "fa-futbol" : "fa-plug"}`;
+    if (submitIcon) submitIcon.className = `fa-solid ${isSignalMode ? "fa-floppy-disk" : isPs3838Mode ? "fa-futbol" : isBridgeMode ? "fa-network-wired" : "fa-plug"}`;
   }
 }
 
@@ -6285,7 +6902,9 @@ async function refreshView(options = {}) {
   try {
     const since  = 0;
     const limit  = 200;
-    const target = state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET ? "" : (state.selectedTarget || "");
+    const target = (state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET || state.selectedTarget === LOCAL_BRIDGE_FILTER_TARGET)
+      ? ""
+      : (state.selectedTarget || "");
     const url = `/api/orders?since=${since}&limit=${limit}&target=${encodeURIComponent(target)}`;
     const [data, queueItems, followRows] = await Promise.all([
       fetchJson(url),
@@ -6437,6 +7056,7 @@ function bindSystemCenter() {
   });
   bindSecretToggle("tg-token-toggle", "tg-token", " Bot Token");
   bindSecretToggle("tg-backend-order-token-toggle", "tg-backend-order-token", "后台订单 Bot Token");
+  bindSecretToggle("ps3838-tg-token-toggle", "ps3838-tg-token", "PS3838 Bot Token");
   [
     "tg-token", "tg-chat", "tg-proxy", "tg-backend-order-push", "tg-backend-order-token", "tg-backend-order-chat", "tg-backend-order-proxy",
   ].forEach((id) => {
@@ -6547,12 +7167,24 @@ function bindNavigation() {
 function ensureViewData(viewName) {
   if (viewName === "system-center") {
     loadTelegramConfig().catch(() => {});
+    loadPs3838TelegramConfig().catch(() => {});
     loadFollowSettings().then(() => renderFollowForm()).catch(() => {});
     loadStatuses().catch(() => {});
     if (typeof window.loadTelegramSignalPopup === "function") window.loadTelegramSignalPopup();
   }
-  if (viewName === "telegram") loadTelegramConfig().catch(() => {});
+  if (viewName === "telegram") {
+    loadTelegramConfig().catch(() => {});
+    loadPs3838TelegramConfig().catch(() => {});
+  }
   if (viewName === "signal-pull") loadSignalPullConfig().catch(() => {});
+  if (viewName === "ps3838") {
+    const psApp = state.ps3838App;
+    // 上一次自动启动失败或超时后，重新进入本页时再自动试一次，不用手工点启动。
+    if (!psApp.busy && Date.now() - (psApp.lastAutoStartAt || 0) > 30000) {
+      psApp.autoStartAttempted = false;
+    }
+    loadPs3838AppStatus({ autoStart: true }).catch(() => {});
+  }
   if (viewName === "tg-signal" && typeof window.loadTelegramSignalPopup === "function") {
     window.loadTelegramSignalPopup();
   }
@@ -6597,6 +7229,7 @@ async function loadInitial(opts = {}) {
   bindSystemCenter();
   bindPoolTabs();
   bindAddNodeModalControls();
+  bindPs3838AppControls();
   bindMemberModalControls();
   bindAccountDeleteDialogControls();
   bindOrderDashboardControls();
@@ -6620,6 +7253,7 @@ async function loadInitial(opts = {}) {
   window.setInterval(updateTopnavClock, 1000);
   await Promise.allSettled([
     loadSignalPullConfig(),
+    loadLocalBridgeConfig(),
     loadAccounts(),
     loadStatuses(),
     loadArsenal(),
@@ -6720,6 +7354,13 @@ async function loadInitial(opts = {}) {
 
   // Telegram
   $("tg-save")?.addEventListener("click", saveTelegramConfig);
+  $("ps3838-tg-save")?.addEventListener("click", savePs3838TelegramConfig);
+  $("ps3838-tg-test")?.addEventListener("click", testPs3838Telegram);
+  $("ps3838-tg-panel")?.addEventListener("toggle", (event) => {
+    if (event.currentTarget && event.currentTarget.open) {
+      loadPs3838TelegramConfig().catch(() => {});
+    }
+  });
   $("tg-test")?.addEventListener("click", testTelegram);
   $("tg-backend-order-test")?.addEventListener("click", testBackendOrderTelegram);
   $("tg-clear")?.addEventListener("click", clearTelegramConfig);
@@ -6751,12 +7392,20 @@ async function loadInitial(opts = {}) {
     loadStatuses().catch(() => {});
   }, STATUS_AUTO_REFRESH_MS);
   setInterval(() => {
+    if (document.visibilityState === "hidden") return;
+    if (!state.localBridgeConfig || !state.localBridgeConfig.local_bridge_configured) return;
+    loadLocalBridgeConfig().catch(() => {});
+  }, STATUS_AUTO_REFRESH_MS);
+  setInterval(() => {
     if (state.view === "orders") updateVisibleMatchClocks();
   }, 1000);
 
   // Preload telegram and signal config
   loadTelegramConfig().catch(() => {});
   loadSignalPullConfig().catch(() => {});
+  loadLocalBridgeConfig().catch(() => {});
+  // PS3838 随主项目启动：页面打开时看板若没在跑，后台自动拉起。
+  ensurePs3838AppRunning().catch(() => {});
 }
 
 let initialLoadPromise = null;

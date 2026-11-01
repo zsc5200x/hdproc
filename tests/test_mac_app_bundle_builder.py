@@ -98,6 +98,37 @@ class TestMacAppBundleBuilder(unittest.TestCase):
             self.assertFalse((payload_root / "app" / ".venv").exists())
             self.assertFalse((payload_root / "app" / ".run").exists())
 
+    def test_build_mac_app_bundle_excludes_live_config_and_runtime_data(self) -> None:
+        from build_mac_app_bundle import build_mac_app_bundle
+
+        with tempfile.TemporaryDirectory() as source_td, tempfile.TemporaryDirectory() as out_td:
+            source_root = Path(source_td)
+            out_root = Path(out_td)
+            self._make_minimal_source_tree(source_root)
+            (source_root / "app" / "config.json").write_text('{"telegram_bot_token":"live"}', encoding="utf-8")
+            (source_root / "app" / "data").mkdir(parents=True, exist_ok=True)
+            (source_root / "app" / "data" / "arsenal.json").write_text('{"password":"live"}', encoding="utf-8")
+            (source_root / "ps3838").mkdir(parents=True, exist_ok=True)
+            (source_root / "ps3838" / "config.json").write_text('{"telegram_bot_token":"live"}', encoding="utf-8")
+            (source_root / "ps3838" / "var").mkdir(parents=True, exist_ok=True)
+            (source_root / "ps3838" / "var" / "db.sqlite3").write_text("runtime", encoding="utf-8")
+            (source_root / "ps3838" / "local_signal_push.py").write_text("print('ps3838')", encoding="utf-8")
+            (source_root / "ps3838" / "crown" / "data").mkdir(parents=True, exist_ok=True)
+            (source_root / "ps3838" / "crown" / "data" / "accounts.sqlite3").write_text("runtime", encoding="utf-8")
+            (source_root / "ps3838" / ".venv").mkdir(parents=True, exist_ok=True)
+            (source_root / "ps3838" / ".venv" / "marker").write_text("runtime", encoding="utf-8")
+
+            bundle_path = build_mac_app_bundle(source_root, out_root, bundle_name="AG Matrix")
+            payload_root = bundle_path / "Contents" / "Resources" / "app_payload"
+
+            self.assertFalse((payload_root / "app" / "config.json").exists())
+            self.assertFalse((payload_root / "app" / "data").exists())
+            self.assertTrue((payload_root / "ps3838" / "local_signal_push.py").is_file())
+            self.assertFalse((payload_root / "ps3838" / "config.json").exists())
+            self.assertFalse((payload_root / "ps3838" / "var").exists())
+            self.assertFalse((payload_root / "ps3838" / "crown" / "data").exists())
+            self.assertFalse((payload_root / "ps3838" / ".venv").exists())
+
     def test_launcher_uses_embedded_payload_start_script(self) -> None:
         from build_mac_app_bundle import build_mac_app_bundle
 

@@ -31,12 +31,8 @@ if BROWSERS_ARCHIVE:
     datas.append((str(Path(BROWSERS_ARCHIVE).resolve()), "."))
 else:
     datas.append((str(BROWSERS_DIR), "ms-playwright"))
-if (APP_DIR / "config.json").is_file():
-    datas.append((str(APP_DIR / "config.json"), "app"))
 if (APP_DIR / "runtime_seeds" / "ook_signal_puller_state.json").is_file():
     datas.append((str(APP_DIR / "runtime_seeds" / "ook_signal_puller_state.json"), "app/runtime_seeds"))
-if (APP_DIR / "data" / "tg_auth.json").is_file():
-    datas.append((str(APP_DIR / "data" / "tg_auth.json"), "app/data"))
 if TELEGRAM_CREDENTIALS_SEED:
     datas.append((str(Path(TELEGRAM_CREDENTIALS_SEED).resolve()), "app/runtime_seeds"))
 for preview_name in ("gdcg.jpg", "gdcc.jpg", "gdcg.jpeg", "gdcc.jpeg", "gdcg.png", "gdcc.png"):

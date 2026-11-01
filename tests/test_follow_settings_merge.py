@@ -142,7 +142,12 @@ class TestFollowSettingsMerge(unittest.TestCase):
         self.assertNotIn("max_amount", out)
         self.assertEqual(out["execution_mode"], "snapshot_direct")
         self.assertTrue(out["snapshot_direct_enabled"])
-        self.assertEqual(out["snapshot_max_age_ms"], 500)
+        self.assertEqual(out["snapshot_max_age_ms"], 8000)
+        self.assertEqual(out["snapshot_preferred_age_ms"], 8000)
+        self.assertEqual(out["snapshot_structure_max_age_ms"], 15000)
+        self.assertEqual(out["split_count"], 2)
+        self.assertEqual(out["parallel_attempts"], 8)
+        self.assertEqual(out["per_member_parallel_attempts"], 2)
         self.assertEqual(out["bet_context_mode"], "diagnostic_order_view")
         self.assertNotIn("game_more_scan_all_gids", out)
         self.assertNotIn("order_view_confirm_before_bet", out)
@@ -157,6 +162,17 @@ class TestFollowSettingsMerge(unittest.TestCase):
         self.assertIn("all", out["reverse_rules"])
         self.assertIn("total", out["reverse_rules"])
         self.assertIn("handicap", out["reverse_rules"])
+
+    def test_local_runtime_defaults_are_preserved(self) -> None:
+        from hdzz.api.webui.follow_settings import ensure_follow_settings_defaults
+
+        out = ensure_follow_settings_defaults({})
+        self.assertEqual(out["split_count"], 2)
+        self.assertEqual(out["parallel_attempts"], 8)
+        self.assertEqual(out["per_member_parallel_attempts"], 2)
+        self.assertEqual(out["snapshot_max_age_ms"], 8000)
+        self.assertEqual(out["snapshot_preferred_age_ms"], 8000)
+        self.assertEqual(out["snapshot_structure_max_age_ms"], 15000)
 
     def test_legacy_client_cannot_switch_execution_path_or_restore_fallback(self) -> None:
         from hdzz.api.webui.follow_settings import merge_follow_settings

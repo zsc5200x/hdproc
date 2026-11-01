@@ -39,6 +39,19 @@ class TestFollowReconcile(unittest.TestCase):
             )
         )
 
+    def test_does_not_match_when_expected_member_is_missing_from_history(self) -> None:
+        from hdzz.core.follower.reconcile import match_recent_wager
+
+        self.assertIsNone(
+            match_recent_wager(
+                [{"ticket_id": "90001", "gid": "12345", "gold": "1500", "ts": 1_000.0}],
+                member_id="m-1",
+                gid="12345",
+                stake=1500,
+                submitted_at=1_000.0,
+            )
+        )
+
     def test_extracts_nested_wagers_and_common_hg_field_names(self) -> None:
         from hdzz.core.follower.reconcile import extract_wagers, match_recent_wager
 

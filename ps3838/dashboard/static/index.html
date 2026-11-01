@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0f19">
+  <title>赔率数据终端</title>
+  <link rel="stylesheet" href="static/styles.css?v=20261102-ps3838-tg-2">
+</head>
+<body>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
+  <div class="app-shell">
+    <section id="myEventsPage" class="page-view my-events-page hidden" data-page-panel="my-events" aria-labelledby="myEventsTitle">
+      <header class="my-events-heading">
+        <div>
+          <div class="eyebrow">PINNACLE ORDERS</div>
+          <h1 id="myEventsTitle">我的赛事</h1>
+        </div>
+        <div class="my-events-heading-actions">
+          <span id="myEventsStatus" class="my-events-status" role="status" aria-live="polite">读取中…</span>
+          <button id="myEventsRefresh" class="button ghost" type="button" title="刷新订单">刷新</button>
+        </div>
+      </header>
+
+      <div class="my-events-overview-head">
+        <span class="my-events-scope-hint">投注总量为流水（含未结算），输赢为已结算净额</span>
+      </div>
+
+      <div class="my-events-overview">
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">投注总量</span>
+          <strong id="myEventsTotalStake">--</strong>
+          <span id="myEventsTotalOrders" class="my-events-stat-foot">-- 单</span>
+        </article>
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">已结算输赢</span>
+          <strong id="myEventsNet">--</strong>
+          <span id="myEventsWinLose" class="my-events-stat-foot">赢 -- · 输 --</span>
+        </article>
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">未结算</span>
+          <strong id="myEventsOpenCount">--</strong>
+          <span id="myEventsOpenStake" class="my-events-stat-foot">--</span>
+        </article>
+        <article class="my-events-stat">
+          <span class="my-events-stat-label">已结算</span>
+          <strong id="myEventsSettledCount">--</strong>
+          <span id="myEventsSettledStake" class="my-events-stat-foot">--</span>
+        </article>
+      </div>
+
+      <div id="myEventsAgents" class="my-events-agents" aria-label="各代理投注总量"></div>
+
+      <div class="my-events-toolbar">
+        <div class="my-events-tabs" role="group" aria-label="结算状态">
+          <button class="my-events-tab" type="button" data-my-events-status="OPEN" aria-pressed="false">未结算</button>
+          <button class="my-events-tab" type="button" data-my-events-status="SETTLED" aria-pressed="false">已结算</button>
+          <button class="my-events-tab active" type="button" data-my-events-status="ALL" aria-pressed="true">全部</button>
+        </div>
+        <label class="search-field my-events-search" for="myEventsSearch">
+          <input id="myEventsSearch" type="search" placeholder="搜索联赛、球队、会员、订单号" autocomplete="off" spellcheck="false">
+        </label>
+        <select id="myEventsAgent" class="my-events-select" aria-label="按代理筛选">
+          <option value="">全部代理</option>
+        </select>
+        <div class="my-events-dates">
+          <input id="myEventsFrom" class="my-events-date" type="date" aria-label="开始日期">
+          <span class="my-events-date-sep">至</span>
+          <input id="myEventsTo" class="my-events-date" type="date" aria-label="结束日期">
+        </div>
+        <div class="my-events-quick" role="group" aria-label="快捷日期">
+          <button class="my-events-quick-btn" type="button" data-my-events-range="today">今天</button>
+          <button class="my-events-quick-btn active" type="button" data-my-events-range="24">近24小时</button>
+          <button class="my-events-quick-btn" type="button" data-my-events-range="7">近7天</button>
+          <button class="my-events-quick-btn" type="button" data-my-events-range="30">近30天</button>
+          <button class="my-events-quick-btn" type="button" data-my-events-range="all">全部</button>
+        </div>
+        <span id="myEventsCount" class="my-events-count">-- 单</span>
+      </div>
+
+      <div class="my-events-basis-bar">
+        <span class="my-events-basis-label">统计口径</span>
+        <div class="my-events-basis" role="group" aria-label="日期口径与视角">
+          <button class="my-events-basis-btn active" type="button" data-my-events-basis="created" aria-pressed="true">下单时间</button>
+          <button class="my-events-basis-btn" type="button" data-my-events-basis="settled" aria-pressed="false">结算时间</button>
+          <button class="my-events-basis-btn" type="button" data-my-events-view="fixtures" aria-pressed="false">比赛视角</button>
+          <button class="my-events-basis-btn" type="button" data-my-events-view="pushes" aria-pressed="false">推送视角</button>
+        </div>
+        <select id="myEventsTz" class="my-events-select my-events-tz" aria-label="时区">
+          <option value="-240" selected>代理后台 GMT-4</option>
+          <option value="480">北京时间 GMT+8</option>
+        </select>
+        <button id="myEventsAlignPartner" class="my-events-align-btn" type="button" title="结算时间 + GMT-4 + 昨日（对齐代理后台盈亏报表）">一键对齐后台</button>
+        <span class="my-events-basis-hint">代理后台盈亏报表默认按「结算时间 + GMT-4」统计</span>
+      </div>
+
+      <div id="myEventsBanner" class="my-events-banner hidden" role="status" aria-live="polite"></div>
+
+      <div id="myEventsOrdersWrap" class="my-events-table-wrap hidden">
+        <table class="my-events-table">
+          <thead>
+            <tr>
+              <th>联赛</th>
+              <th>主队 vs 客队</th>
+              <th>盘口</th>
+              <th>水位</th>
+              <th>金额</th>
+              <th>输赢</th>
+              <th>订单号</th>
+              <th>代理</th>
+              <th>会员</th>
+              <th>结果</th>
+              <th id="myEventsTimeHeader">下单时间</th>
+            </tr>
+          </thead>
+          <tbody id="myEventsBody"></tbody>
+        </table>
+        <div id="myEventsEmpty" class="my-events-empty hidden">暂无订单</div>
+      </div>
+      <button id="myEventsMore" class="button ghost my-events-more hidden" type="button">加载更多</button>
+
+      <div id="myEventsFixtureWrap" class="my-events-table-wrap">
+        <table class="my-events-table my-events-fixture-table">
+          <thead>
+            <tr>
+              <th>联赛</th>
+              <th>比赛</th>
+              <th>开赛</th>
+              <th class="num">单数</th>
+              <th class="num">会员</th>
+              <th class="num center" title="该场出现过的不同盘口数量：方向或线位不同各算 1 个">盘口</th>
+              <th class="num center">金额</th>
+            </tr>
+          </thead>
+          <tbody id="myEventsFixtureBody"></tbody>
+        </table>
+        <div id="myEventsFixtureEmpty" class="my-events-empty hidden">
+          <div class="my-events-empty-hint">
+            <span id="myEventsFixtureEmptyText">当前范围内没有比赛</span>
+          </div>
+        </div>
+      </div>
+      <button id="myEventsFixtureMore" class="button ghost my-events-more hidden" type="button">加载更多</button>
+
+      <div id="myEventsPushWrap" class="my-events-table-wrap hidden">
+        <table class="my-events-table my-events-push-table">
+          <thead>
+            <tr>
+              <th>推送时间</th>
+              <th>状态</th>
+              <th>联赛</th>
+              <th>比赛</th>
+              <th>盘口</th>
+              <th>金额</th>
+              <th>订单号</th>
+              <th>代理</th>
+              <th>会员</th>
+              <th>推送内容</th>
+            </tr>
+          </thead>
+          <tbody id="myEventsPushBody"></tbody>
+        </table>
+        <div id="myEventsPushEmpty" class="my-events-empty hidden">当前范围内没有推送记录</div>
+      </div>
+    </section>
+
+    <footer class="footer-bar">
+      <div class="source-path">
+        <span class="status-dot"></span>
+        <span id="sourceText">capture.jsonl</span>
+      </div>
+      <div id="footerMeta">轮询间隔 1.4 秒 · 仅本机访问</div>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="static/app.js?v=20261102-ps3838-tg-2"></script>
+</body>
+</html>

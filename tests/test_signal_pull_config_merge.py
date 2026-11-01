@@ -62,6 +62,15 @@ class TestSignalPullConfigMerge(unittest.TestCase):
         self.assertEqual(out["signal_pull_live_only"], True)
         self.assertEqual(out["signal_pull_limit"], 200)
 
+    def test_public_payload_masks_token_and_reports_presence(self) -> None:
+        from hdzz.api.webui.signal_pull_config import signal_pull_config_payload
+
+        payload = signal_pull_config_payload({"signal_pull_url": "https://example.test", "signal_pull_token": "secret-token"})
+
+        self.assertEqual(payload["config"]["signal_pull_token"], "")
+        self.assertTrue(payload["config"]["signal_pull_token_set"])
+        self.assertNotIn("secret-token", repr(payload))
+
 
 if __name__ == "__main__":
     unittest.main()
