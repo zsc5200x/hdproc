@@ -104,7 +104,7 @@ FOLLOW_SETTINGS_DEFAULTS: Dict[str, Any] = {
     "market_limit_amount": 0,
     "follow_min_odds": None,
     "follow_max_odds": None,
-    "split_count": 1,
+    "split_count": 2,
     "split_delay_seconds": 0,
     "targets": [],
     "members": [],
@@ -114,7 +114,11 @@ FOLLOW_SETTINGS_DEFAULTS: Dict[str, Any] = {
     # 取得提交时平台认可的盘口结构/ioratio，再继续 FT_bet。
     "execution_mode": "snapshot_direct",
     "snapshot_direct_enabled": True,
-    "snapshot_max_age_ms": 500,
+    "snapshot_max_age_ms": 8000,
+    "snapshot_preferred_age_ms": 8000,
+    "snapshot_structure_max_age_ms": 15000,
+    "parallel_attempts": 8,
+    "per_member_parallel_attempts": 2,
     "bet_context_mode": "diagnostic_order_view",
     "unknown_result_reconcile_max_seconds": 120,
     "unknown_result_reconcile_max_attempts": 5,
@@ -163,9 +167,23 @@ def ensure_follow_settings_defaults(doc: Dict[str, Any]) -> Dict[str, Any]:
     # FT_order_view 上下文确认，避免再次退回 source_order_direct。
     out["bet_context_mode"] = "diagnostic_order_view"
     try:
-        out["snapshot_max_age_ms"] = max(50, min(10000, int(out.get("snapshot_max_age_ms") or 500)))
+        out["snapshot_max_age_ms"] = max(50, min(30000, int(out.get("snapshot_max_age_ms") or 8000)))
     except Exception:
-        out["snapshot_max_age_ms"] = 500
+        out["snapshot_max_age_ms"] = 8000
+    for key, default in (("snapshot_preferred_age_ms", 8000), ("snapshot_structure_max_age_ms", 15000)):
+        try:
+            out[key] = max(50, min(30000, int(out.get(key) or default)))
+        except Exception:
+            out[key] = default
+    try:
+        out["split_count"] = max(1, min(50, int(out.get("split_count") or 2)))
+    except Exception:
+        out["split_count"] = 2
+    for key, default in (("parallel_attempts", 8), ("per_member_parallel_attempts", 2)):
+        try:
+            out[key] = max(1, min(50, int(out.get(key) or default)))
+        except Exception:
+            out[key] = default
     for retired_key in (
         "snapshot_missing_policy",
         "snapshot_only_for_market",
@@ -266,9 +284,9 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
     # 分单
     if "split_count" in incoming:
         try:
-            out["split_count"] = int(incoming.get("split_count") or 1)
+            out["split_count"] = max(1, min(50, int(incoming.get("split_count") or 2)))
         except Exception:
-            out["split_count"] = 1
+            out["split_count"] = 2
     if "split_delay_seconds" in incoming:
         try:
             out["split_delay_seconds"] = float(incoming.get("split_delay_seconds") or 0)
@@ -280,9 +298,21 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
     out["snapshot_direct_enabled"] = True
     if "snapshot_max_age_ms" in incoming:
         try:
-            out["snapshot_max_age_ms"] = max(50, min(10000, int(incoming.get("snapshot_max_age_ms") or 0)))
+            out["snapshot_max_age_ms"] = max(50, min(30000, int(incoming.get("snapshot_max_age_ms") or 0)))
         except Exception:
-            out["snapshot_max_age_ms"] = int(FOLLOW_SETTINGS_DEFAULTS.get("snapshot_max_age_ms") or 500)
+            out["snapshot_max_age_ms"] = int(FOLLOW_SETTINGS_DEFAULTS.get("snapshot_max_age_ms") or 8000)
+    for key in ("snapshot_preferred_age_ms", "snapshot_structure_max_age_ms"):
+        if key in incoming:
+            try:
+                out[key] = max(50, min(30000, int(incoming.get(key) or 0)))
+            except Exception:
+                out[key] = int(FOLLOW_SETTINGS_DEFAULTS.get(key) or 8000)
+    for key in ("parallel_attempts", "per_member_parallel_attempts"):
+        if key in incoming:
+            try:
+                out[key] = max(1, min(50, int(incoming.get(key) or 0)))
+            except Exception:
+                out[key] = int(FOLLOW_SETTINGS_DEFAULTS.get(key) or (8 if key == "parallel_attempts" else 2))
     out["bet_context_mode"] = "diagnostic_order_view"
     if "unknown_result_reconcile_max_seconds" in incoming:
         try:

@@ -446,7 +446,7 @@ class SnapshotDirectTest(unittest.TestCase):
                 service, intent, settings={"snapshot_max_age_ms": 500, "bet_context_mode": "diagnostic_order_view"}, context_mode="diagnostic_order_view"
             )
             self.assertEqual(diagnostic.status, engine.SNAPSHOT_VALID)
-            self.assertEqual(diagnostic_age, 3000)
+            self.assertEqual(diagnostic_age, 15000)
             direct, direct_age = engine._lookup_snapshot_candidate(
                 service, intent, settings={"snapshot_max_age_ms": 500, "bet_context_mode": "disabled"}, context_mode="disabled"
             )

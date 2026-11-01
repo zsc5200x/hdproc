@@ -8314,7 +8314,7 @@ def main() -> int:
             "ratio_percent": 100,
             "match_limit_amount": 0,
             "market_limit_amount": 0,
-            "split_count": 1,
+            "split_count": 2,
             "split_delay_seconds": 0,
             "targets": [],
             "members": [],
