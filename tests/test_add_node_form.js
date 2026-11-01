@@ -63,11 +63,13 @@ test('builds read-only PS3838 request with the default base URL', () => {
 
   assert.equal(req.endpoint, '/api/ps3838/add');
   assert.deepEqual(req.payload, {
-    base_url: 'https://www.ps38ag.com',
+    base_url: 'https://www.ps38ag.com/partner/zh-cn/login',
     username: 'pb-demo',
     password: 'secret',
     interval_seconds: 20,
     telegram_chat_id: '-100123',
+    partner_sync_enabled: true,
+    partner_agents: [],
   });
 });
 
@@ -149,4 +151,18 @@ test('rejects unsafe local bridge target names', () => {
   form.bridge.target = '../orders';
 
   assert.throws(() => buildBridgePayload(form.bridge), /订单目标/);
+});
+
+test('includes partner backend sync settings for PS3838 nodes', () => {
+  const form = createDefaultAddNodeForm();
+  form.mode = 'ps3838';
+  form.ps3838.username = 'pb-demo';
+  form.ps3838.password = 'secret';
+  form.ps3838.partner_sync_enabled = true;
+  form.ps3838.partner_agents = ['A1', 'A2'];
+
+  const req = buildAddNodeSubmitRequest(form);
+
+  assert.equal(req.payload.partner_sync_enabled, true);
+  assert.deepEqual(req.payload.partner_agents, ['A1', 'A2']);
 });

@@ -97,7 +97,9 @@ def merge_local_bridge_config(existing: Dict[str, Any], incoming: Dict[str, Any]
     if "local_bridge_target" in patch:
         out["local_bridge_target"] = safe_target(patch.get("local_bridge_target") or "ps3838")
     if "local_bridge_token" in patch:
-        out["local_bridge_token"] = _text(patch.get("local_bridge_token"))[:256]
+        token = _text(patch.get("local_bridge_token"))[:256]
+        if token:
+            out["local_bridge_token"] = token
     if "local_bridge_configured" in patch:
         out["local_bridge_configured"] = _bool(patch.get("local_bridge_configured"))
     elif patch:
@@ -123,6 +125,12 @@ def token_matches(expected: str, provided: str) -> bool:
     if not expected_text:
         return True
     return hmac.compare_digest(expected_text, _text(provided))
+
+
+def remote_access_requires_token(config: Dict[str, Any]) -> bool:
+    """Remote bridge mode must always have an explicit shared secret."""
+    value = config if isinstance(config, dict) else {}
+    return bool(value.get("local_bridge_allow_remote")) and not _text(value.get("local_bridge_token"))
 
 
 def _beijing_now(now_ts: Optional[float] = None) -> datetime:
@@ -435,7 +443,8 @@ def config_payload(
             "local_bridge_enabled": bool(cfg.get("local_bridge_enabled")),
             "local_bridge_name": _text(cfg.get("local_bridge_name")) or "本地桥接",
             "local_bridge_target": _text(cfg.get("local_bridge_target")),
-            "local_bridge_token": token,
+            "local_bridge_token": "",
+            "local_bridge_token_set": bool(token),
             "local_bridge_allow_remote": bool(cfg.get("local_bridge_allow_remote")),
         },
         "endpoint": endpoint,

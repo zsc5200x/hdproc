@@ -61,12 +61,9 @@
   "signal_pull_push_history_on_start": false,
   "signal_pull_live_only": true,
   "signal_pull_debug": false,
-  "local_bridge_configured": false,
-  "local_bridge_enabled": false,
-  "local_bridge_name": "本地桥接",
-  "local_bridge_target": "ps3838",
-  "local_bridge_token": "",
-  "local_bridge_allow_remote": false,
+  "ps3838_app_dir": "",
+  "ps3838_app_url": "http://127.0.0.1:8787",
+  "ps3838_app_auto_start": true,
   "proxy": "http://127.0.0.1:7897",
   "targets": [
     {

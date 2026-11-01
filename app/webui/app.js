@@ -16,6 +16,14 @@ const state = {
   followSettings: null,
   signalPullConfig: {},
   localBridgeConfig: {},
+  ps3838App: {
+    status: null,
+    busy: "",
+    error: "",
+    autoStartAttempted: false,
+    lastAutoStartAt: 0,
+    pollTimer: null,
+  },
   tg: null,
   selectedTarget: "",
   search: "",
@@ -294,6 +302,7 @@ function bindFollowEngineToggle() {
 const VIEW_TITLES = {
   orders: "实时订单流",
   queue: "跟单队列",
+  ps3838: "PS38赛事",
   arsenal: "号池管理",
   "system-center": "系统中心",
   "follow-settings": "跟单策略",
@@ -1151,6 +1160,11 @@ function renderAccountsSidebar() {
     const statusMessage = String(st.status_message || "").trim();
     const statusTitle = statusMessage || (stClass === "online" ? "在线" : stClass === "relogin" ? "正在登录" : "离线");
     const loginWaiting = !!st.relogin_in_progress;
+    const partner = st.partner_sync && typeof st.partner_sync === "object" ? st.partner_sync : {};
+    const partnerLabel = partner.enabled
+      ? (partner.last_error ? "后台同步异常" : `后台代理 ${Array.isArray(partner.agents) ? partner.agents.length : 0}`)
+      : "";
+    const statusMeta = `平博 · ${statusTitle}${partnerLabel ? ` · ${partnerLabel}` : ""}`;
     const dotClass = stClass === "online" ? "st-online" : stClass === "relogin" ? "st-relogin" : "st-offline";
     div.className = ["account-item", "ps3838-account-item", isActive ? "active" : "", stClass === "relogin" ? "is-relogin" : "", stClass !== "online" ? "needs-login" : ""].filter(Boolean).join(" ");
     div.innerHTML = `
@@ -1158,7 +1172,7 @@ function renderAccountsSidebar() {
         <div class="account-status-dot ${dotClass}" title="${escapeHtml(statusTitle)}"></div>
         <div class="account-copy">
           <div class="account-name" title="${escapeHtml(accountLabel(a))}">${escapeHtml(accountLabel(a))}</div>
-          <div class="account-status-meta" title="${escapeHtml(statusTitle)}">平博 · ${escapeHtml(statusTitle)}</div>
+          <div class="account-status-meta" title="${escapeHtml(statusMeta)}">${escapeHtml(statusMeta)}</div>
         </div>
       </div>
       <div class="acct-actions" style="opacity:0; transition:0.15s">
@@ -1173,7 +1187,11 @@ function renderAccountsSidebar() {
       div.querySelector(".acct-actions").style.opacity = 1;
       state.selectedTarget = String(a.name || "");
       const sel = $("account"); if (sel) sel.value = state.selectedTarget;
-      refreshView();
+      if (typeof window.activateView === "function") {
+        window.activateView("ps3838", { syncNav: true, updateTitle: true });
+      } else {
+        refreshView();
+      }
     });
     div.querySelector("[data-action='login']").addEventListener("click", async (ev) => {
       ev.stopPropagation();
@@ -2906,7 +2924,7 @@ function normalizeLocalBridgeConfig(data) {
     local_bridge_enabled: !!cfg.local_bridge_enabled,
     local_bridge_name: String(cfg.local_bridge_name || "本地桥接"),
     local_bridge_target: String(cfg.local_bridge_target || ""),
-    local_bridge_token: String(cfg.local_bridge_token || ""),
+    local_bridge_token_set: !!cfg.local_bridge_token_set,
     local_bridge_allow_remote: !!cfg.local_bridge_allow_remote,
     endpoint: String(root.endpoint || cfg.endpoint || ""),
     status: (root.status && typeof root.status === "object" ? root.status : (cfg.status || {})),
@@ -2926,7 +2944,7 @@ function applyLocalBridgeConfigToForm() {
   addNodeFormState.bridge = {
     enabled: lb.local_bridge_configured ? lb.local_bridge_enabled : true,
     target: lb.local_bridge_target || "ps3838",
-    token: lb.local_bridge_token || "",
+    token: "",
     allow_remote: lb.local_bridge_allow_remote,
     endpoint: lb.endpoint || defaultLocalBridgeEndpoint(),
     status: lb.status || {},
@@ -2941,7 +2959,7 @@ function openAddModal() {
         mode: "account",
         account: { base_url: "", username: "", password: "", login_tab: 3, relogin_min_interval_seconds: 5, security_code: "", monitor_members: [], monitor_downlines: [] },
         signal: { enabled: true, url: "", token: "", live_only: true, limit: 200, interval_seconds: 1 },
-        ps3838: { base_url: "https://www.ps38ag.com", username: "", password: "", interval_seconds: 15, telegram_chat_id: "" },
+        ps3838: { base_url: "https://www.ps38ag.com/partner/zh-cn/login", username: "", password: "", interval_seconds: 15, telegram_chat_id: "" },
         bridge: { enabled: true, target: "ps3838", token: "", allow_remote: false, endpoint: "", status: {} },
       };
   if (!addNodeFormState.bridge) {
@@ -3279,6 +3297,8 @@ function renderAddNodeModal() {
   if ($("add-ps3838-password")) $("add-ps3838-password").value = String(addNodeFormState.ps3838?.password || "");
   if ($("add-ps3838-interval")) $("add-ps3838-interval").value = String(addNodeFormState.ps3838?.interval_seconds ?? 15);
   if ($("add-ps3838-chat-id")) $("add-ps3838-chat-id").value = String(addNodeFormState.ps3838?.telegram_chat_id || "");
+  if ($("add-ps3838-partner-sync")) $("add-ps3838-partner-sync").checked = !!addNodeFormState.ps3838?.partner_sync_enabled;
+  if ($("add-ps3838-agents")) $("add-ps3838-agents").value = (Array.isArray(addNodeFormState.ps3838?.partner_agents) ? addNodeFormState.ps3838.partner_agents : []).join(",");
 
   if ($("add-signal-url")) $("add-signal-url").value = String(addNodeFormState.signal?.url || "");
   if ($("add-signal-token")) $("add-signal-token").value = String(addNodeFormState.signal?.token || "");
@@ -3504,6 +3524,117 @@ async function loadTelegramConfig() {
   if ($("tg-backend-order-chat")) $("tg-backend-order-chat").value = String(data.backend_order_chat_id || "");
   if ($("tg-backend-order-proxy")) $("tg-backend-order-proxy").value = String(data.backend_order_proxy || "");
   renderSystemCenterTelegramSummary();
+}
+
+function renderPs3838PushState(data = {}) {
+  const el = $("ps3838-tg-state");
+  if (!el) return;
+  if (data.error) {
+    el.textContent = "读取失败";
+    el.dataset.tone = "error";
+    return;
+  }
+  const enabled = !!data.enabled;
+  const configured = !!data.configured;
+  el.textContent = enabled ? (configured ? "已启用" : "缺少配置") : "已关闭";
+  el.dataset.tone = enabled ? (configured ? "ok" : "error") : "off";
+}
+
+async function loadPs3838TelegramConfig() {
+  const hint = $("ps3838-tg-hint");
+  try {
+    const data = await fetchJson("/api/ps3838-telegram-config");
+    const enabledEl = $("ps3838-tg-enabled");
+    if (enabledEl) enabledEl.checked = !!data.enabled;
+    if ($("ps3838-tg-chat")) $("ps3838-tg-chat").value = String(data.chat_id || "");
+    if ($("ps3838-tg-proxy")) $("ps3838-tg-proxy").value = String(data.proxy || "");
+    const tokenEl = $("ps3838-tg-token");
+    if (tokenEl) {
+      tokenEl.value = "";
+      tokenEl.placeholder = data.has_token ? "已配置，留空不变" : "请填写机器人 Token";
+    }
+    if ($("ps3838-tg-token-hint")) {
+      $("ps3838-tg-token-hint").textContent = data.has_token ? "Token 已设置" : "";
+    }
+    renderPs3838PushState(data);
+    if (hint) { hint.textContent = ""; hint.className = "form-hint"; }
+  } catch (err) {
+    renderPs3838PushState({ error: true });
+    if (hint) {
+      hint.textContent = `读取失败：${err && err.message ? err.message : err}`;
+      hint.className = "form-hint error";
+    }
+  }
+}
+
+function ps3838ErrorText(err) {
+  const raw = String(err && err.message ? err.message : err);
+  const start = raw.indexOf("{");
+  if (start >= 0) {
+    try {
+      const payload = JSON.parse(raw.slice(start));
+      if (payload && payload.message) return String(payload.message);
+    } catch (_error) {
+      // Fall back to the raw message below.
+    }
+  }
+  return raw;
+}
+
+async function savePs3838TelegramConfig() {
+  const hint = $("ps3838-tg-hint");
+  const payload = {
+    enabled: !!$("ps3838-tg-enabled")?.checked,
+    chat_id: ($("ps3838-tg-chat")?.value || "").trim(),
+    proxy: ($("ps3838-tg-proxy")?.value || "").trim(),
+  };
+  const token = ($("ps3838-tg-token")?.value || "").trim();
+  if (token) payload.bot_token = token;
+  if (hint) { hint.textContent = "正在保存..."; hint.className = "form-hint"; }
+  try {
+    const data = await fetchJson("/api/ps3838-telegram-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!data.ok) throw new Error(data.message || "保存失败");
+    if ($("ps3838-tg-token")) $("ps3838-tg-token").value = "";
+    await loadPs3838TelegramConfig();
+    if (hint) { hint.textContent = data.message || "PS3838 推送配置已保存"; hint.className = "form-hint success"; }
+    toast("PS3838 推送配置已保存", "success");
+    recordSystemCenterActivity("PS3838 推送配置已保存", "success");
+  } catch (err) {
+    const msg = ps3838ErrorText(err);
+    if (hint) { hint.textContent = `保存失败：${msg}`; hint.className = "form-hint error"; }
+    toast(`PS3838 推送保存失败: ${msg}`, "error");
+  }
+}
+
+async function testPs3838Telegram() {
+  const hint = $("ps3838-tg-hint");
+  const payload = {};
+  const token = ($("ps3838-tg-token")?.value || "").trim();
+  const chatId = ($("ps3838-tg-chat")?.value || "").trim();
+  const proxy = ($("ps3838-tg-proxy")?.value || "").trim();
+  if (token) payload.bot_token = token;
+  if (chatId) payload.chat_id = chatId;
+  if (proxy) payload.proxy = proxy;
+  if (hint) { hint.textContent = "正在发送测试消息..."; hint.className = "form-hint"; }
+  try {
+    const data = await fetchJson("/api/ps3838-telegram-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!data.ok) throw new Error(data.message || "发送失败");
+    if (hint) { hint.textContent = "测试消息已发送"; hint.className = "form-hint success"; }
+    toast("PS3838 推送测试发送成功", "success");
+    recordSystemCenterActivity("PS3838 推送测试发送成功", "success");
+  } catch (err) {
+    const msg = ps3838ErrorText(err);
+    if (hint) { hint.textContent = `发送失败：${msg}`; hint.className = "form-hint error"; }
+    toast(`PS3838 推送测试失败: ${msg}`, "error");
+  }
 }
 
 async function saveTelegramConfig() {
@@ -4286,7 +4417,7 @@ function buildLocalBridgeMonitorSource(item) {
     rows: [
       { icon: "fa-link", label: "接收地址", value: cfg.endpoint || defaultLocalBridgeEndpoint(), mono: true },
       { icon: "fa-bullseye", label: "订单目标", value: target, mono: true },
-      { icon: "fa-key", label: "接收 Token", value: cfg.local_bridge_token ? "已设置" : "未设置（仅本机）" },
+      { icon: "fa-key", label: "接收 Token", value: cfg.local_bridge_token_set ? "已设置" : "未设置（仅本机）" },
       { icon: "fa-clock", label: "最后接收", value: st.last_received_text || "等待桥接推送" },
       { icon: "fa-scale-balanced", label: "最近对手盘", value: lastSignal.crownOpponent || lastSignal.line || "—" },
       { icon: "fa-triangle-exclamation", label: "失败原因", value: st.last_error || "最近无异常", warning: !!st.last_error },
@@ -6203,6 +6334,223 @@ function renderReportEngineWarning() {
   `;
 }
 
+// ── PS3838 companion app ───────────────────────────────────────
+function renderPs3838App() {
+  const app = state.ps3838App || {};
+  const status = app.status || {};
+  const running = !!status.running;
+  const busy = String(app.busy || "");
+  const chip = $("ps3838-app-status");
+  if (chip) {
+    let tone = "stopped";
+    let label = "未运行";
+    if (busy === "start") { tone = "pending"; label = "启动中"; }
+    else if (busy === "stop") { tone = "pending"; label = "停止中"; }
+    else if (app.error) { tone = "error"; label = "检测失败"; }
+    else if (running) { tone = "running"; label = "运行中"; }
+    else if (status.dir_exists === false) { tone = "error"; label = "目录不存在"; }
+    chip.dataset.tone = tone;
+    const icon = tone === "running" ? "fa-circle-check" : tone === "pending" ? "fa-circle-notch fa-spin" : tone === "error" ? "fa-triangle-exclamation" : "fa-circle";
+    chip.innerHTML = `<i class="fa-solid ${icon}" aria-hidden="true"></i>${escapeHtml(label)}`;
+  }
+
+  const meta = $("ps3838-app-meta");
+  if (meta) {
+    if (running) {
+      const healthTime = status.health && (status.health.serverTime || status.health.server_time);
+      meta.textContent = [status.url || "", healthTime || status.checked_at || ""].filter(Boolean).join(" · ");
+    } else if (app.error) {
+      meta.textContent = app.error;
+    } else if (status.dir_exists === false) {
+      meta.textContent = `找不到目录：${status.dir || ""}`;
+    } else {
+      meta.textContent = status.auto_start ? "PS3838 随主项目启动，打开本页会自动拉起" : "PS3838 看板未运行";
+    }
+  }
+
+  const startBtn = $("ps3838-app-start");
+  const stopBtn = $("ps3838-app-stop");
+  const openLink = $("ps3838-app-open");
+  if (startBtn) startBtn.disabled = running || busy === "start";
+  if (stopBtn) stopBtn.disabled = !running || busy === "stop";
+  if (openLink) openLink.href = status.url || "http://127.0.0.1:8787/";
+
+  const frame = $("ps3838-app-frame");
+  const empty = $("ps3838-app-empty");
+  const embedUrl = status.embed_url || status.url;
+  if (running && embedUrl) {
+    if (frame && frame.dataset.loadedUrl !== embedUrl) {
+      frame.src = embedUrl;
+      frame.dataset.loadedUrl = embedUrl;
+    }
+    if (frame) frame.hidden = false;
+    if (empty) empty.hidden = true;
+    return;
+  }
+
+  if (frame) {
+    frame.hidden = true;
+    if (frame.dataset.loadedUrl) {
+      frame.src = "about:blank";
+      frame.dataset.loadedUrl = "";
+    }
+  }
+  if (empty) empty.hidden = false;
+  const title = $("ps3838-app-empty-title");
+  const text = $("ps3838-app-empty-text");
+  const metaEl = $("ps3838-app-empty-meta");
+  const emptyStart = $("ps3838-app-empty-start");
+  if (emptyStart) emptyStart.disabled = busy === "start";
+  if (title) {
+    title.textContent = busy === "start"
+      ? "正在启动 PS38赛事"
+      : app.error ? "PS38赛事连接失败" : "PS38赛事未运行";
+  }
+  if (text) {
+    text.textContent = busy === "start"
+      ? "正在启动 PS3838（看板 + 皇冠 + 采集）；首次启动需要几秒，请稍候…"
+      : app.error
+        ? "启动或检测失败，日志见 data/ps3838_app_start.log。"
+        : "PS3838 会随主项目一起启动；打开本页也会自动拉起，无需单独启动。";
+  }
+  if (metaEl) metaEl.textContent = app.error || status.dir || "";
+}
+
+async function loadPs3838AppStatus(options = {}) {
+  const { autoStart = false } = options;
+  try {
+    const data = await fetchJson("/api/ps3838-app/status", undefined, 9000);
+    state.ps3838App.status = data;
+    state.ps3838App.error = "";
+    renderPs3838App();
+    if (
+      autoStart
+      && state.view === "ps3838"
+      && !data.running
+      && data.auto_start
+      && !state.ps3838App.autoStartAttempted
+      && !state.ps3838App.busy
+    ) {
+      state.ps3838App.autoStartAttempted = true;
+      await startPs3838App();
+    }
+    return data;
+  } catch (e) {
+    state.ps3838App.error = `检测失败：${String(e && e.message ? e.message : e)}`;
+    renderPs3838App();
+    return null;
+  }
+}
+
+// PS3838 已经并入主项目：打开 HD 页面时看板若没在跑，就直接后台拉起，
+// 不再让用户在 PS38 标签页里单独点一次“启动”。
+async function ensurePs3838AppRunning() {
+  const app = state.ps3838App;
+  if (app.busy || app.autoStartAttempted) return;
+  const data = await loadPs3838AppStatus();
+  if (!data || data.running || !data.auto_start || app.busy || app.autoStartAttempted) return;
+  app.autoStartAttempted = true;
+  await startPs3838App();
+}
+
+function schedulePs3838AppPoll(attempt = 0) {
+  const app = state.ps3838App;
+  if (app.pollTimer) window.clearTimeout(app.pollTimer);
+  app.pollTimer = window.setTimeout(async () => {
+    app.pollTimer = null;
+    const data = await loadPs3838AppStatus();
+    if (data && data.running) {
+      toast("PS38赛事已就绪", "success");
+      return;
+    }
+    if (attempt < 30) {
+      schedulePs3838AppPoll(attempt + 1);
+    } else {
+      app.error = "启动超时：PS3838 看板（127.0.0.1:8787）仍未就绪，请查看 data/ps3838_app_start.log";
+      // 下次进入本页时允许再次自动拉起，不必用户手工点“启动”。
+      app.autoStartAttempted = false;
+      renderPs3838App();
+      toast(app.error, "error", 7000);
+    }
+  }, 2000);
+}
+
+async function startPs3838App() {
+  const app = state.ps3838App;
+  if (app.busy) return;
+  app.busy = "start";
+  app.lastAutoStartAt = Date.now();
+  app.error = "";
+  renderPs3838App();
+  try {
+    const data = await fetchJson("/api/ps3838-app/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }, 15000);
+    if (!data.ok) throw new Error(data.message || "启动失败");
+    toast(data.message || "已发起 PS38赛事启动", "info", 5000);
+    schedulePs3838AppPoll();
+  } catch (e) {
+    app.error = `启动失败：${String(e && e.message ? e.message : e)}`;
+    app.autoStartAttempted = false;
+    toast(app.error, "error", 7000);
+  } finally {
+    app.busy = "";
+    renderPs3838App();
+    loadPs3838AppStatus().catch(() => {});
+  }
+}
+
+async function stopPs3838App() {
+  const app = state.ps3838App;
+  if (app.busy) return;
+  if (app.pollTimer) {
+    window.clearTimeout(app.pollTimer);
+    app.pollTimer = null;
+  }
+  app.busy = "stop";
+  app.error = "";
+  renderPs3838App();
+  try {
+    const data = await fetchJson("/api/ps3838-app/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }, 15000);
+    if (!data.ok) throw new Error(data.message || "停止失败");
+    toast(data.message || "已发起 PS38赛事停止", "info", 5000);
+    window.setTimeout(() => { loadPs3838AppStatus().catch(() => {}); }, 1200);
+    window.setTimeout(() => { loadPs3838AppStatus().catch(() => {}); }, 3500);
+  } catch (e) {
+    app.error = `停止失败：${String(e && e.message ? e.message : e)}`;
+    toast(app.error, "error", 7000);
+  } finally {
+    app.busy = "";
+    renderPs3838App();
+  }
+}
+
+function bindPs3838AppControls() {
+  const bind = (id, handler) => {
+    const el = $(id);
+    if (!el || el.dataset.ps3838Bound === "true") return;
+    el.addEventListener("click", handler);
+    el.dataset.ps3838Bound = "true";
+  };
+  bind("ps3838-app-start", () => startPs3838App());
+  bind("ps3838-app-empty-start", () => startPs3838App());
+  bind("ps3838-app-stop", () => stopPs3838App());
+  bind("ps3838-app-refresh", async () => {
+    const frame = $("ps3838-app-frame");
+    if (frame && frame.dataset.loadedUrl) {
+      frame.src = frame.dataset.loadedUrl;
+    }
+    await loadPs3838AppStatus();
+    toast("PS38赛事状态已刷新", "info");
+  });
+}
+
 // ── Local bridge config ────────────────────────────────────────
 async function loadLocalBridgeConfig() {
   try {
@@ -6234,7 +6582,6 @@ async function updateLocalBridgeEnabled(enabled) {
         local_bridge_enabled: !!enabled,
         local_bridge_configured: true,
         local_bridge_target: cfg.local_bridge_target || "ps3838",
-        local_bridge_token: cfg.local_bridge_token || "",
         local_bridge_allow_remote: !!cfg.local_bridge_allow_remote,
       }),
     });
@@ -6277,7 +6624,9 @@ function normalizeSignalPullConfig(data) {
   return {
     signal_pull_enabled: hasEnabled ? !!cfg.signal_pull_enabled : !!cfg.enabled,
     signal_pull_url: String(cfg.signal_pull_url || cfg.url || "").trim(),
-    signal_pull_token: String(cfg.signal_pull_token || cfg.token || "").trim(),
+    signal_pull_token: "",
+    signal_pull_token_set: !!cfg.signal_pull_token_set,
+    signal_pull_token_mask: String(cfg.signal_pull_token_mask || ""),
     signal_pull_live_only: hasLiveOnly ? !!cfg.signal_pull_live_only : !!cfg.live_only,
     signal_pull_limit: Number(cfg.signal_pull_limit || cfg.limit || 50),
     signal_pull_interval_seconds: Number(cfg.signal_pull_interval_seconds || cfg.interval || cfg.interval_seconds || 30),
@@ -6335,11 +6684,14 @@ async function submitAddAccount() {
   addNodeFormState.account.monitor_members = parseListField($("add-monitor-members")?.value || "");
   addNodeFormState.account.monitor_downlines = parseListField($("add-monitor-downlines")?.value || "");
 
-  addNodeFormState.ps3838.base_url = $("add-ps3838-base-url")?.value.trim() || "https://www.ps38ag.com";
+  addNodeFormState.ps3838.base_url = $("add-ps3838-base-url")?.value.trim() || "https://www.ps38ag.com/partner/zh-cn/login";
   addNodeFormState.ps3838.username = $("add-ps3838-username")?.value.trim() || "";
   addNodeFormState.ps3838.password = $("add-ps3838-password")?.value || "";
   addNodeFormState.ps3838.interval_seconds = parseInt($("add-ps3838-interval")?.value || "15", 10) || 15;
   addNodeFormState.ps3838.telegram_chat_id = $("add-ps3838-chat-id")?.value.trim() || "";
+  addNodeFormState.ps3838.partner_sync_enabled = !!$("add-ps3838-partner-sync")?.checked;
+  addNodeFormState.ps3838.partner_agents = ($("add-ps3838-agents")?.value || "")
+    .split(",").map((item) => item.trim()).filter(Boolean);
 
   addNodeFormState.signal.url = $("add-signal-url")?.value.trim() || "";
   addNodeFormState.signal.token = $("add-signal-token")?.value.trim() || "";
@@ -6704,6 +7056,7 @@ function bindSystemCenter() {
   });
   bindSecretToggle("tg-token-toggle", "tg-token", " Bot Token");
   bindSecretToggle("tg-backend-order-token-toggle", "tg-backend-order-token", "后台订单 Bot Token");
+  bindSecretToggle("ps3838-tg-token-toggle", "ps3838-tg-token", "PS3838 Bot Token");
   [
     "tg-token", "tg-chat", "tg-proxy", "tg-backend-order-push", "tg-backend-order-token", "tg-backend-order-chat", "tg-backend-order-proxy",
   ].forEach((id) => {
@@ -6814,12 +7167,24 @@ function bindNavigation() {
 function ensureViewData(viewName) {
   if (viewName === "system-center") {
     loadTelegramConfig().catch(() => {});
+    loadPs3838TelegramConfig().catch(() => {});
     loadFollowSettings().then(() => renderFollowForm()).catch(() => {});
     loadStatuses().catch(() => {});
     if (typeof window.loadTelegramSignalPopup === "function") window.loadTelegramSignalPopup();
   }
-  if (viewName === "telegram") loadTelegramConfig().catch(() => {});
+  if (viewName === "telegram") {
+    loadTelegramConfig().catch(() => {});
+    loadPs3838TelegramConfig().catch(() => {});
+  }
   if (viewName === "signal-pull") loadSignalPullConfig().catch(() => {});
+  if (viewName === "ps3838") {
+    const psApp = state.ps3838App;
+    // 上一次自动启动失败或超时后，重新进入本页时再自动试一次，不用手工点启动。
+    if (!psApp.busy && Date.now() - (psApp.lastAutoStartAt || 0) > 30000) {
+      psApp.autoStartAttempted = false;
+    }
+    loadPs3838AppStatus({ autoStart: true }).catch(() => {});
+  }
   if (viewName === "tg-signal" && typeof window.loadTelegramSignalPopup === "function") {
     window.loadTelegramSignalPopup();
   }
@@ -6864,6 +7229,7 @@ async function loadInitial(opts = {}) {
   bindSystemCenter();
   bindPoolTabs();
   bindAddNodeModalControls();
+  bindPs3838AppControls();
   bindMemberModalControls();
   bindAccountDeleteDialogControls();
   bindOrderDashboardControls();
@@ -6988,6 +7354,13 @@ async function loadInitial(opts = {}) {
 
   // Telegram
   $("tg-save")?.addEventListener("click", saveTelegramConfig);
+  $("ps3838-tg-save")?.addEventListener("click", savePs3838TelegramConfig);
+  $("ps3838-tg-test")?.addEventListener("click", testPs3838Telegram);
+  $("ps3838-tg-panel")?.addEventListener("toggle", (event) => {
+    if (event.currentTarget && event.currentTarget.open) {
+      loadPs3838TelegramConfig().catch(() => {});
+    }
+  });
   $("tg-test")?.addEventListener("click", testTelegram);
   $("tg-backend-order-test")?.addEventListener("click", testBackendOrderTelegram);
   $("tg-clear")?.addEventListener("click", clearTelegramConfig);
@@ -7031,6 +7404,8 @@ async function loadInitial(opts = {}) {
   loadTelegramConfig().catch(() => {});
   loadSignalPullConfig().catch(() => {});
   loadLocalBridgeConfig().catch(() => {});
+  // PS3838 随主项目启动：页面打开时看板若没在跑，后台自动拉起。
+  ensurePs3838AppRunning().catch(() => {});
 }
 
 let initialLoadPromise = null;

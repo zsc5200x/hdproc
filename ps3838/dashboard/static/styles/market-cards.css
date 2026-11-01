@@ -1,0 +1,545 @@
+.score-pill.live,
+.clock-pill.live {
+  color: #9df7ce;
+  border-color: rgba(66, 230, 164, 0.22);
+  background: var(--accent-soft);
+}
+
+.selected-stats strong.aged,
+.market-overview-item strong.aged {
+  color: var(--warning);
+}
+
+.odds-title {
+  min-width: 0;
+}
+
+.odds-title-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.market-live-badge {
+  display: inline-flex;
+  min-height: 21px;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  color: #9df7ce;
+  border: 1px solid rgba(66, 230, 164, 0.17);
+  border-radius: 999px;
+  background: rgba(66, 230, 164, 0.07);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.market-live-badge > span {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(66, 230, 164, 0.8);
+  animation: livePulse 1.6s ease-in-out infinite;
+}
+
+.section-subtitle {
+  margin-top: 4px;
+  color: var(--muted-2);
+  font-size: 0.62rem;
+  line-height: 1.45;
+}
+
+.market-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 12px 0 10px;
+}
+
+.market-overview-item {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.105);
+  border-radius: 8px;
+  background: rgba(6, 11, 19, 0.32);
+}
+
+.market-overview-item span {
+  overflow: hidden;
+  color: var(--muted-2);
+  font-size: 0.55rem;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-overview-item strong {
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.market-board {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.market-block {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: rgba(5, 9, 16, 0.25);
+}
+
+.market-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px 9px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.11);
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.035), rgba(66, 230, 164, 0.018));
+}
+
+.market-block-copy {
+  min-width: 0;
+}
+
+.market-block-title {
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.market-block-detail {
+  margin-top: 1px;
+  color: var(--muted-2);
+  font-size: 0.57rem;
+}
+
+.market-block-status {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.market-status-badge,
+.market-payout {
+  display: inline-flex;
+  min-height: 21px;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.54rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.market-status-badge {
+  color: var(--muted);
+  border: 1px solid var(--border);
+  background: rgba(130, 144, 167, 0.055);
+}
+
+.market-payout {
+  color: #9df7ce;
+  border: 1px solid rgba(66, 230, 164, 0.14);
+  background: var(--accent-soft);
+}
+
+.market-payout.muted {
+  color: var(--muted-2);
+  border-color: var(--border);
+  background: transparent;
+}
+
+.quote-grid,
+.market-line-head,
+.market-line-row {
+  display: grid;
+}
+
+.quote-grid.three-way {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.quote-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.105);
+  border-radius: 9px;
+  background: rgba(12, 20, 33, 0.72);
+}
+
+.quote-grid.three-way {
+  gap: 7px;
+  padding: 8px;
+}
+
+.quote-grid.three-way .quote-card {
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.quote-card:hover {
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(18, 29, 46, 0.82);
+}
+
+.quote-card-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.quote-label {
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.quote-detail {
+  overflow: hidden;
+  color: var(--muted-2);
+  font-size: 0.56rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quote-price-row {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.quote-price {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 1.12rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  line-height: 1.08;
+}
+
+.quote-hk {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.quote-price-row .delta-pill {
+  min-height: 19px;
+  margin-left: auto;
+  padding: 2px 5px;
+  font-size: 0.56rem;
+}
+
+.quote-metrics {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 7px;
+  color: var(--muted-2);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.quote-implied {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-soft);
+}
+
+.quote-implied em {
+  color: var(--muted-2);
+  font-family: var(--font-sans);
+  font-style: normal;
+}
+
+.quote-age {
+  white-space: nowrap;
+}
+
+.quote-age.live {
+  color: #8fecc3;
+}
+
+.quote-age.recent {
+  color: var(--muted);
+}
+
+.quote-age.aged {
+  color: var(--warning);
+}
+
+.quote-card.suspended {
+  border-color: rgba(244, 191, 95, 0.11);
+  background: rgba(20, 21, 24, 0.42);
+}
+
+.quote-card.suspended .quote-price {
+  color: var(--muted-2);
+}
+
+.quote-card.missing {
+  border-style: dashed;
+  background: rgba(9, 14, 23, 0.3);
+}
+
+.delta-pill.suspended {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.quote-card.flash-up {
+  animation: quoteFlashUp 1.1s ease-out;
+}
+
+.quote-card.flash-down {
+  animation: quoteFlashDown 1.1s ease-out;
+}
+
+.market-line-table {
+  width: 100%;
+}
+
+.market-line-head,
+.market-line-row {
+  grid-template-columns: 92px minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.market-line-head {
+  min-height: 30px;
+  align-items: center;
+  color: var(--muted-2);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.09);
+  background: rgba(8, 13, 22, 0.34);
+  font-size: 0.54rem;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+}
+
+.market-line-head span {
+  padding: 5px 9px;
+}
+
+.market-line-head span:not(:first-child) {
+  text-align: center;
+}
+
+.market-line-row {
+  align-items: stretch;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.07);
+}
+
+.market-line-row:last-child {
+  border-bottom: 0;
+}
+
+.market-line-row .quote-card {
+  padding: 9px;
+  border: 0;
+  border-left: 1px solid rgba(148, 163, 184, 0.075);
+  border-radius: 0;
+  background: transparent;
+}
+
+.market-line-row .quote-card:hover {
+  background: rgba(255, 255, 255, 0.022);
+}
+
+.market-line-row .quote-price {
+  font-size: 0.94rem;
+}
+
+.market-line-row .quote-price-row {
+  gap: 5px;
+}
+
+.market-line-row .quote-metrics {
+  margin-top: 4px;
+}
+
+.line-label,
+.line-payout {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 9px;
+}
+
+.line-label {
+  border-right: 1px solid rgba(148, 163, 184, 0.055);
+}
+
+.line-label strong {
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.line-label span,
+.line-payout span {
+  color: var(--muted-2);
+  font-size: 0.53rem;
+  white-space: nowrap;
+}
+
+.line-payout {
+  align-items: flex-end;
+  border-left: 1px solid rgba(148, 163, 184, 0.075);
+  text-align: right;
+}
+
+.line-payout strong {
+  color: #9df7ce;
+  font-family: var(--font-mono);
+  font-size: 0.73rem;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes quoteFlashUp {
+  0% { background: rgba(66, 230, 164, 0.18); }
+  100% { background: transparent; }
+}
+
+@keyframes quoteFlashDown {
+  0% { background: rgba(255, 100, 124, 0.17); }
+  100% { background: transparent; }
+}
+
+@media (max-width: 680px) {
+  .odds-title-line {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .market-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .market-block-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .market-block-status {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .quote-grid.three-way {
+    grid-template-columns: 1fr;
+  }
+
+  .market-line-head,
+  .market-line-row {
+    grid-template-columns: 74px minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .market-line-head span:last-child {
+    display: none;
+  }
+
+  .market-line-row .quote-card {
+    padding: 8px 7px;
+  }
+
+  .market-line-row .quote-price-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .market-line-row .quote-price-row .delta-pill {
+    margin-left: 0;
+  }
+
+  .line-payout {
+    grid-column: 1 / -1;
+    align-items: center;
+    flex-direction: row;
+    justify-content: space-between;
+    border-top: 1px solid rgba(148, 163, 184, 0.065);
+    border-left: 0;
+    text-align: left;
+  }
+}
+
+@media (max-width: 920px) {
+  .primary-nav {
+    order: 3;
+    width: 100%;
+  }
+
+  .page-nav-button {
+    flex: 1;
+  }
+
+}
+
+@media (max-width: 680px) {
+  .primary-nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2px;
+  }
+
+  .page-nav-button {
+    min-height: 40px;
+    padding-inline: 7px;
+  }
+
+  .crown-page {
+    min-height: calc(100vh - 140px);
+  }
+
+  .crown-frame {
+    height: calc(100vh - 140px);
+    min-height: 640px;
+    border-radius: 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+

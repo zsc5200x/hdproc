@@ -1,0 +1,26 @@
+# 本地配置、账号会话与运行数据
+.env
+.env.*
+!.env.example
+/data/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.enc
+*.key
+*.tmp
+
+# 本地环境、运行目录与缓存
+.venv/
+venv/
+.run/
+__pycache__/
+*.py[cod]
+.DS_Store
+/.playwright-mcp/
+
+# 编辑器备份
+*.backup*
+*.bak*
+*.orig

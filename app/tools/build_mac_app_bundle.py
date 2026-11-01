@@ -14,12 +14,21 @@ DEFAULT_BUNDLE_NAME = "HD跟单系统v1.0"
 DEFAULT_BUNDLE_ID = "com.hdproc.agmatrix"
 DEFAULT_VERSION = "1.0.0"
 PAYLOAD_DIRNAME = "app_payload"
-INCLUDED_TOP_LEVEL = ("app", "scripts", "src", "ook", "README_PORTABLE.txt")
+INCLUDED_TOP_LEVEL = ("app", "scripts", "src", "ook", "ps3838", "README_PORTABLE.txt")
 EXCLUDED_RELATIVE_PREFIXES = (
     Path("app/.venv"),
     Path("app/.run"),
     Path("app/orders"),
     Path("app/state"),
+    Path("ps3838/.venv"),
+    Path("ps3838/venv"),
+    Path("ps3838/.run"),
+    Path("ps3838/data"),
+    Path("ps3838/var"),
+    Path("ps3838/crown/data"),
+    Path("ps3838/crown/.run"),
+    Path("ps3838/crown/.venv"),
+    Path("ps3838/crown/venv"),
 )
 EXCLUDED_NAMES = {
     ".DS_Store",
@@ -52,6 +61,12 @@ def should_exclude(rel_path: Path) -> bool:
     if any(_is_relative_to(rel_path, prefix) for prefix in EXCLUDED_RELATIVE_PREFIXES):
         return True
 
+    # Release bundles must never carry live credentials or runtime state.
+    if rel_path == Path("app/config.json") or rel_path == Path("ps3838/config.json"):
+        return True
+    if _is_relative_to(rel_path, Path("app/data")):
+        return True
+
     if rel_path.parts[:2] == ("cc", "node_modules"):
         return True
 
@@ -59,9 +74,6 @@ def should_exclude(rel_path: Path) -> bool:
         return True
 
     name = rel_path.name
-    if _is_relative_to(rel_path, Path("app/data")) and (name.endswith(".lock") or ".tmp." in name):
-        return True
-
     return False
 
 

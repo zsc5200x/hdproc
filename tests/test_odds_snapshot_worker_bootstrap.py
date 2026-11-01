@@ -77,7 +77,9 @@ class TestOddsSnapshotWorkerBootstrap(unittest.TestCase):
                 module, "write_snapshot_watch_pid_info", side_effect=snapshot_pid_writes.append
             ), patch.object(
                 module, "write_follow_engine_pid_info", side_effect=follow_pid_writes.append
-            ), patch.object(module, "apply_playwright_browsers_path"):
+            ), patch.object(module, "apply_playwright_browsers_path"), patch.object(
+                module, "ps3838_enabled", return_value=False
+            ):
                 rc = module.start_all("127.0.0.1", 9999, 10, 5)
 
         self.assertEqual(rc, 0)
@@ -126,7 +128,9 @@ class TestOddsSnapshotWorkerBootstrap(unittest.TestCase):
                 module, "write_snapshot_watch_pid_info", side_effect=snapshot_pid_writes.append
             ), patch.object(
                 module, "write_follow_engine_pid_info", side_effect=follow_pid_writes.append
-            ), patch.object(module, "apply_playwright_browsers_path"):
+            ), patch.object(module, "apply_playwright_browsers_path"), patch.object(
+                module, "ps3838_enabled", return_value=False
+            ):
                 rc = module.start_all("127.0.0.1", 9999, 10, 5)
 
         self.assertEqual(rc, 0)

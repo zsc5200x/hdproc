@@ -29,11 +29,13 @@
         interval_seconds: 1,
       },
       ps3838: {
-        base_url: 'https://www.ps38ag.com',
+        base_url: 'https://www.ps38ag.com/partner/zh-cn/login',
         username: '',
         password: '',
         interval_seconds: 15,
         telegram_chat_id: '',
+        partner_sync_enabled: true,
+        partner_agents: [],
       },
       bridge: {
         enabled: true,
@@ -119,11 +121,15 @@
     if (current.mode === 'ps3838') {
       const ps = current.ps3838 || {};
       const payload = {
-        base_url: toTrimmedString(ps.base_url) || 'https://www.ps38ag.com',
+        base_url: toTrimmedString(ps.base_url) || 'https://www.ps38ag.com/partner/zh-cn/login',
         username: toTrimmedString(ps.username),
         password: String(ps.password || ''),
         interval_seconds: Number(ps.interval_seconds || 15),
         telegram_chat_id: toTrimmedString(ps.telegram_chat_id),
+        partner_sync_enabled: !!ps.partner_sync_enabled,
+        partner_agents: (Array.isArray(ps.partner_agents) ? ps.partner_agents : String(ps.partner_agents || '').split(','))
+          .map((item) => String(item || '').trim())
+          .filter(Boolean),
       };
       if (!payload.username || !payload.password) {
         throw new Error('请填写：平博账号 / 登录密码');

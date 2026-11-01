@@ -32,10 +32,12 @@ except Exception:  # pragma: no cover - runtime dependency is optional in unit t
 
 
 DEFAULT_BASE_URL = "https://www.ps38ag.com"
+DEFAULT_LOGIN_URL = "https://www.ps38ag.com/partner/zh-cn/login"
 LOGIN_PATH = "/partner/login"
 AUTH_PATH = "/partner/login/authentication"
 BET_MONITOR_PATH = "/partner-reporting/ddd/total-bets/bet-monitor"
 KEEPALIVE_PATH = "/partner-account/keepAlive"
+PARTNER_PROFILE_PATH = "/partner-account/ddd/user-info/login-user/profile"
 DEFAULT_INTERVAL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 30.0
 TELEGRAM_TEMPLATE_VERSION = "2026-10-07-custom-emoji-zh"
@@ -55,8 +57,12 @@ class Ps3838LoginWindowClosed(RuntimeError):
 
 
 def safe_name(value: Any) -> str:
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
-    return text.strip("._") or "ps3838"
+    original = str(value or "").strip()
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", original).strip("._") or "ps3838"
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", original):
+        return slug
+    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()[:10]
+    return f"{slug[:80]}-{digest}"
 
 
 def now_iso() -> str:
@@ -298,7 +304,15 @@ class Ps3838Client:
         self.account = account
         self.profile_dir = profile_dir
         self.debug = debug
-        self.base_url = _text(account.get("base_url")) or DEFAULT_BASE_URL
+        raw_base = _text(account.get("base_url")) or DEFAULT_BASE_URL
+        parsed_base = urlparse(raw_base)
+        self.base_url = (
+            f"{parsed_base.scheme}://{parsed_base.netloc}"
+            if parsed_base.scheme and parsed_base.netloc else DEFAULT_BASE_URL
+        )
+        account["base_url"] = self.base_url
+        self.login_url = _text(account.get("login_url")) or DEFAULT_LOGIN_URL
+        self.storage_state_path = self.profile_dir / "storage_state.json"
         self.secret = _text(account.get("x_intellifend_secret"))
         self._pw = None
         self.ctx = None
@@ -335,9 +349,60 @@ class Ps3838Client:
         )
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
         self.page.on("request", self._capture_request)
+        self._restore_session_state()
+
+    def _restore_session_state(self) -> None:
+        """Restore cookies from a prior login; persistent profiles alone do not
+        keep session cookies across a browser restart on this site."""
+        if not self.storage_state_path.exists() or self.ctx is None:
+            return
+        try:
+            payload = json.loads(self.storage_state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        cookies = payload.get("cookies") if isinstance(payload, dict) else None
+        if isinstance(cookies, list) and cookies:
+            try:
+                self.ctx.add_cookies(cookies)
+            except Exception:
+                pass
+        origins = payload.get("origins") if isinstance(payload, dict) else None
+        if not isinstance(origins, list):
+            return
+        for entry in origins:
+            if not isinstance(entry, dict):
+                continue
+            origin = _text(entry.get("origin"))
+            items = entry.get("localStorage")
+            if not origin.startswith("http") or not isinstance(items, list) or not items:
+                continue
+            page = None
+            try:
+                page = self.ctx.new_page()
+                page.goto(origin, wait_until="domcontentloaded", timeout=15_000)
+                page.evaluate(
+                    "items => { for (const item of items) localStorage.setItem(item.name, item.value); }",
+                    [item for item in items if isinstance(item, dict) and "name" in item],
+                )
+                page.close()
+            except Exception:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+
+    def save_session_state(self) -> None:
+        if self.ctx is None:
+            return
+        try:
+            self.storage_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.ctx.storage_state(path=str(self.storage_state_path))
+        except Exception:
+            pass
 
     def close(self) -> None:
         try:
+            self.save_session_state()
             if self.ctx is not None:
                 self.ctx.close()
         finally:
@@ -357,8 +422,15 @@ class Ps3838Client:
         assert page is not None
         user = _text(self.account.get("username"))
         password = str(self.account.get("password") or "")
-        selectors_user = "input[name='username'], input[name='userName'], input[id*='user'], input[id*='account'], input[type='text']"
-        selectors_pwd = "input[name='password'], input[name='pwd'], input[id*='password'], input[id*='pwd'], input[type='password']"
+        selectors_user = (
+            "input[placeholder*='用户名'], input[placeholder*='账号'], "
+            "input[name='username'], input[name='userName'], input[name='userid'], "
+            "input[id*='user'], input[id*='account'], input[type='text']"
+        )
+        selectors_pwd = (
+            "input[placeholder*='密码'], input[name='password'], input[name='pwd'], "
+            "input[id*='password'], input[id*='pwd'], input[type='password']"
+        )
         password_input = page.locator(selectors_pwd).first
         password_input.wait_for(state="visible", timeout=10_000)
         page.locator(selectors_user).first.fill(user, timeout=10_000)
@@ -386,7 +458,7 @@ class Ps3838Client:
                 pass
             self.secret = ""
             self.account["x_intellifend_secret"] = ""
-        page.goto(self.base_url.rstrip("/") + LOGIN_PATH, wait_until="domcontentloaded", timeout=60_000)
+        page.goto(self.login_url, wait_until="domcontentloaded", timeout=60_000)
         if should_continue is not None and not should_continue():
             raise Ps3838LoginInterrupted()
         try:
@@ -408,6 +480,24 @@ class Ps3838Client:
         except Exception:
             pass
         return "等待你在浏览器完成登录/2FA，窗口不会自动关闭"
+
+    def login_debug(self) -> Dict[str, Any]:
+        page = self.page
+        if page is None:
+            return {"url": "", "title": "", "text": "页面未建立"}
+        try:
+            text = page.locator("body").inner_text(timeout=1_000)
+        except Exception:
+            text = ""
+        try:
+            title = page.title()
+        except Exception:
+            title = ""
+        return {
+            "url": str(page.url),
+            "title": str(title)[:200],
+            "text": str(text)[:500],
+        }
 
     def _can_verify_session(self) -> bool:
         page = self.page
@@ -432,6 +522,7 @@ class Ps3838Client:
         self.session_ready = False
         self.restore_window()
         next_check = 0.0
+        next_status = 0.0
         last_message = ""
         while True:
             if should_continue is not None and not should_continue():
@@ -440,25 +531,82 @@ class Ps3838Client:
             if page is None or page.is_closed():
                 raise Ps3838LoginWindowClosed("登录窗口已关闭；已暂停自动登录，请点击重新登录继续")
             message = self._login_pending_message()
-            if on_wait is not None and message != last_message:
+            if on_wait is not None and (message != last_message or time.monotonic() >= next_status):
                 on_wait(message)
                 last_message = message
+                next_status = time.monotonic() + 5.0
             if self.secret:
                 self.account["x_intellifend_secret"] = self.secret
             try:
                 if "账号暂时锁定" not in message and self._can_verify_session() and time.monotonic() >= next_check:
                     next_check = time.monotonic() + 5.0
+                    if self.account.get("partner_sync_enabled") and self.partner_profile_ready():
+                        self.last_auth_at = time.time()
+                        self.session_ready = True
+                        self.save_session_state()
+                        return
                     payload = self._evaluate_fetch(BET_MONITOR_PATH, build_poll_body())
                     if not has_order_list(payload):
                         raise Ps3838SessionError("订单接口尚未返回有效订单列表")
                     self.last_auth_at = time.time()
                     self.session_ready = True
+                    self.save_session_state()
                     return
             except Exception:
                 # 包括 403、页面跳转和网络错误；不关闭窗口，也不重填账号密码。
                 pass
             # Playwright 的等待保持浏览器事件可处理，不设置自动关窗的登录超时。
             page.wait_for_timeout(1_000)
+
+    def partner_profile_ready(self) -> bool:
+        """A logged-in partner parent can be verified via the profile endpoint."""
+        try:
+            response = self.fetch_partner_json(PARTNER_PROFILE_PATH)
+            if int(response.get("httpStatus") or 0) != 200:
+                return False
+            payload = response.get("json") or {}
+            profile = payload.get("profile") if isinstance(payload, dict) else None
+            user_id = profile.get("userId") if isinstance(profile, dict) else None
+            return isinstance(user_id, int) and not isinstance(user_id, bool) and user_id > 0
+        except Exception:
+            return False
+
+    def fetch_partner_json(self, path: str,
+                           body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Read a partner-backend JSON endpoint through the logged-in page."""
+        page = self.page
+        if page is None:
+            raise Ps3838SessionError("平博会话尚未建立")
+        url = self.base_url.rstrip("/") + path
+        script = """
+        async ({url, body}) => {
+          const options = {
+            credentials: 'include',
+            headers: {'Accept': 'application/json, text/plain, */*'},
+          };
+          if (body !== null) {
+            options.method = 'POST';
+            options.headers['content-type'] = 'application/json';
+            options.body = JSON.stringify(body);
+          }
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 20000);
+          let res;
+          try {
+            res = await fetch(url, {...options, signal: controller.signal});
+          } finally {
+            clearTimeout(timer);
+          }
+          const text = await res.text();
+          let json = null;
+          try { json = JSON.parse(text); } catch (error) { json = null; }
+          return {httpStatus: res.status, json};
+        }
+        """
+        result = page.evaluate(script, {"url": url, "body": body})
+        if not isinstance(result, dict):
+            raise Ps3838SessionError("平博后台接口返回格式无效")
+        return result
 
     def _evaluate_fetch(self, path: str, body: Optional[Dict[str, Any]] = None) -> Any:
         if path not in {KEEPALIVE_PATH, BET_MONITOR_PATH}:
@@ -729,6 +877,75 @@ def process_account(account: Dict[str, Any], raw_cfg: Dict[str, Any], data_dir: 
     delivery_path = data_dir / "ps3838" / "telegram_delivery" / f"{safe_name(name)}.jsonl"
     force_login_request = 0.0
     client = Ps3838Client(account, data_dir / "ps3838" / "profiles" / safe_name(name), debug=debug)
+    partner_sync = None
+    partner_sync_error = ""
+
+    def close_partner_sync() -> None:
+        nonlocal partner_sync
+        if partner_sync is not None:
+            try:
+                partner_sync.close()
+            except Exception:
+                pass
+            partner_sync = None
+
+    def ensure_partner_sync():
+        nonlocal partner_sync, partner_sync_error
+        if not bool(account.get("partner_sync_enabled", False)):
+            close_partner_sync()
+            try:
+                from hdzz.core.watcher.ps3838_partner import PS3838_DIR
+                (PS3838_DIR / "var" / "run" / "hd_partner_sync.enabled").unlink(missing_ok=True)
+            except (OSError, ImportError):
+                pass
+            return None
+        if partner_sync is not None:
+            return partner_sync
+        try:
+            from hdzz.core.watcher.ps3838_partner import PS3838_DIR, PartnerSync, default_db_path
+            partner_sync = PartnerSync(client, account, default_db_path())
+            try:
+                flag = PS3838_DIR / "var" / "run" / "hd_partner_sync.enabled"
+                flag.parent.mkdir(parents=True, exist_ok=True)
+                flag.touch()
+            except OSError:
+                pass
+            partner_sync_error = ""
+        except Exception as exc:
+            partner_sync_error = str(exc)[:500]
+            partner_sync = None
+        return partner_sync
+
+    def sync_partner_due() -> None:
+        if not bool(account.get("partner_sync_enabled", False)):
+            return
+        sync = ensure_partner_sync()
+        if sync is None:
+            state["partner_sync"] = {"enabled": True, "last_error": partner_sync_error}
+            return
+        try:
+            result = sync.poll_due()
+            state["partner_sync"] = sync.status()
+            if result is not None:
+                state["partner_sync"]["last_result"] = result
+            if time.time() - float(state.get("partner_sync_saved_at") or 0) > 10:
+                state["partner_sync_saved_at"] = time.time()
+                save_state()
+        except Exception as exc:
+            state["partner_sync"] = {"enabled": True, "last_error": str(exc)[:500]}
+            if time.time() - float(state.get("partner_sync_saved_at") or 0) > 10:
+                state["partner_sync_saved_at"] = time.time()
+                save_state()
+
+    def wait_between_scans(seconds: float) -> None:
+        if not bool(account.get("partner_sync_enabled", False)):
+            time.sleep(seconds)
+            return
+        deadline = time.monotonic() + max(0.0, seconds)
+        while time.monotonic() < deadline:
+            if client.session_ready:
+                sync_partner_due()
+            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
 
     def refresh_config() -> bool:
         if config_path is not None:
@@ -754,11 +971,29 @@ def process_account(account: Dict[str, Any], raw_cfg: Dict[str, Any], data_dir: 
     def should_continue_login() -> bool:
         return refresh_config() and manual_request() <= float(state.get("last_relogin_requested_at") or 0)
 
+    last_login_debug_at = 0.0
+
     def publish_login_wait(message: str) -> None:
+        nonlocal last_login_debug_at
         state.update({
             "status": "relogin", "status_message": message,
             "relogin_in_progress": True, "session_ready": False,
         })
+        now = time.time()
+        if now - last_login_debug_at >= 5.0:
+            last_login_debug_at = now
+            try:
+                state["login_debug"] = client.login_debug()
+                state["login_debug"]["at"] = now
+            except Exception as exc:
+                state["login_debug"] = {"error": str(exc)[:200], "at": now}
+            try:
+                shot = data_dir.parent / ".run" / "ps3838-login.png"
+                shot.parent.mkdir(parents=True, exist_ok=True)
+                if client.page is not None:
+                    client.page.screenshot(path=str(shot), full_page=False)
+            except Exception:
+                pass
         save_state()
 
     try:
@@ -766,6 +1001,7 @@ def process_account(account: Dict[str, Any], raw_cfg: Dict[str, Any], data_dir: 
             _flush_telegram_outbox(raw_cfg, account, state, save_state, delivery_path)
             requested = manual_request()
             if requested > float(state.get("last_relogin_requested_at") or 0):
+                close_partner_sync()
                 client.close()
                 state["last_relogin_requested_at"] = requested
                 force_login_request = requested
@@ -786,7 +1022,27 @@ def process_account(account: Dict[str, Any], raw_cfg: Dict[str, Any], data_dir: 
                     else:
                         client.wait_for_login(should_continue=should_continue_login, on_wait=publish_login_wait)
                     force_login_request = 0.0
-                keepalive, payload = client.poll()
+                try:
+                    keepalive, payload = client.poll()
+                except Ps3838SessionError:
+                    if not (account.get("partner_sync_enabled") and client.partner_profile_ready()):
+                        raise
+                    state.update({
+                        "status": "online",
+                        "status_message": "在线（后台来单）",
+                        "last_ok_at": time.time(),
+                        "last_poll_at": time.time(),
+                        "session_ready": True,
+                        "relogin_in_progress": False,
+                        "login_required": False,
+                        "last_error": "",
+                    })
+                    client.save_session_state()
+                    save_state()
+                    sync_partner_due()
+                    wait_between_scans(max(5.0, float(account.get("interval_seconds") or DEFAULT_INTERVAL_SECONDS)))
+                    continue
+                client.save_session_state()
                 client.minimize_window()
                 orders = extract_orders(payload, name)
                 current = {str(o["orderId"]): o for o in orders if o.get("orderId")}
@@ -829,7 +1085,8 @@ def process_account(account: Dict[str, Any], raw_cfg: Dict[str, Any], data_dir: 
                 save_state()
                 _flush_telegram_outbox(raw_cfg, account, state, save_state, delivery_path)
                 account["x_intellifend_secret"] = client.secret
-                time.sleep(max(5.0, float(account.get("interval_seconds") or DEFAULT_INTERVAL_SECONDS)))
+                sync_partner_due()
+                wait_between_scans(max(5.0, float(account.get("interval_seconds") or DEFAULT_INTERVAL_SECONDS)))
             except Ps3838LoginInterrupted:
                 continue
             except Ps3838SessionError as exc:
@@ -854,6 +1111,7 @@ def process_account(account: Dict[str, Any], raw_cfg: Dict[str, Any], data_dir: 
                 # 保留窗口；普通网络错误仍可重试读取，但绝不重新提交登录。
                 time.sleep(3.0)
     finally:
+        close_partner_sync()
         client.close()
         state.update({"status": "offline", "status_message": "已停止登录和扫描", "session_ready": False, "relogin_in_progress": False})
         save_state()

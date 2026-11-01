@@ -83,7 +83,7 @@ def match_recent_wager(
         if not ticket:
             continue
         actual_member = _text(_first(raw, ("member_id", "memberId", "member", "username", "uid", "UID")))
-        if expected_member and actual_member and actual_member != expected_member:
+        if expected_member and actual_member != expected_member:
             continue
         actual_gid = _text(_first(raw, ("gid", "GID", "game_id", "gameId", "event_id", "eventId")))
         if expected_gid and actual_gid != expected_gid:

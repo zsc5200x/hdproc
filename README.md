@@ -13,6 +13,8 @@ python app.py status
 
 WebUI 默认地址：<http://127.0.0.1:9999/>
 
+PS3838 数据终端已合并进本仓库（`ps3838/`），入口在 HD 顶部导航 `PS38赛事`，同源地址 <http://127.0.0.1:9999/ps3838/>。`app.py start/stop/restart` 会同时管理 PS3838 后台订单轮询、皇冠和看板；也可用 HD 的「平博 / PS3838」节点会话直接同步代理后台来单。
+
 停止服务：
 
 ```bash
@@ -34,6 +36,10 @@ python -m pytest -q tests
 - 主配置文件：`app/config.json`（仅保存在本机）
 - 付费机器人环境变量模板：`app/.env.example`
 - 运行数据：`app/data/`、`app/orders/`、`app/state/`
+- PS3838 配置：`ps3838/config.json`（仅本机）
+- PS3838 运行数据：`ps3838/var/`（数据库、采集、日志、PID，已忽略）
+
+PS3838 主进程使用 HD 的 Python 3.9 环境；皇冠服务固定使用 `ps3838/crown/.venv` 的 Python 3.14 环境。`ps3838/crown/.venv` 不提交，新电脑按 `ps3838/README.md` 的 Python 3.14 步骤创建。
 
 新电脑克隆仓库后，需要重新创建本机配置和安装依赖，不能从 Git 仓库恢复真实账号及运行数据。
 

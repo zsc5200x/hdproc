@@ -678,7 +678,7 @@ body[data-view="system-center"] .sc-notify-content {
   padding: 10px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
   gap: 8px;
   overflow: hidden;
 }
@@ -686,9 +686,101 @@ body[data-view="system-center"] .sc-notify-content {
 body[data-view="system-center"] .sc-notify-content > .panel:nth-child(1) { grid-column: 1; grid-row: 1; }
 body[data-view="system-center"] .sc-notify-content > .panel:nth-child(2) { grid-column: 2; grid-row: 1; }
 body[data-view="system-center"] .sc-notify-content > .panel:nth-child(2) .form-2 { grid-template-columns: 1fr; gap: 5px !important; }
+body[data-view="system-center"] .sc-notify-content > .sc-ps3838 { grid-column: 1 / -1; grid-row: 3; }
 body[data-view="system-center"] .sc-notify-actions { grid-column: 1 / -1; grid-row: 2; margin: 0 !important; }
 body[data-view="system-center"] .sc-notify-actions .btn { min-width: 0; flex: 1 1 0; padding: 0 7px; justify-content: center; white-space: nowrap; font-size: 9px; }
 body[data-view="system-center"] .sc-notify-content > #tg-hint { grid-column: 1 / -1; grid-row: 2; align-self: end; margin: 0 !important; pointer-events: none; transform: translateY(14px); text-align: center; }
+
+/* PS3838 push settings sit in the notification column as a compact
+   disclosure: the two bot panels stay side by side until it is expanded. */
+.sc-ps3838 {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid rgba(21, 65, 94, .72);
+  border-radius: 6px;
+  background: rgba(5, 21, 35, .55);
+}
+
+.sc-ps3838 > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 9px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sc-ps3838 > summary::-webkit-details-marker { display: none; }
+.sc-ps3838 > summary:hover { background: rgba(10, 32, 52, .5); }
+.sc-ps3838 > summary:focus-visible { outline: 1px solid var(--ops-cyan); outline-offset: -1px; }
+
+.sc-ps3838-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ops-text);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.sc-ps3838-title .panel-dot { margin: 0; }
+
+.sc-ps3838-state {
+  padding: 1px 5px;
+  border: 1px solid rgba(22, 68, 98, .58);
+  border-radius: 999px;
+  color: #6f8da3;
+  font-size: 8px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.sc-ps3838-state[data-tone="ok"] { color: #7ee2b8; border-color: rgba(126, 226, 184, .35); background: rgba(126, 226, 184, .08); }
+.sc-ps3838-state[data-tone="error"] { color: #ff9aa4; border-color: rgba(255, 154, 164, .32); background: rgba(255, 154, 164, .08); }
+.sc-ps3838-state[data-tone="off"] { color: #7c93a6; }
+
+.sc-ps3838-hint {
+  margin-left: auto;
+  color: var(--ops-text-3);
+  font-size: 8px;
+  white-space: nowrap;
+}
+
+.sc-ps3838-hint::before { content: "展开配置"; }
+.sc-ps3838[open] .sc-ps3838-hint::before { content: "收起"; }
+.sc-ps3838-hint::after { content: " ▾"; }
+.sc-ps3838[open] .sc-ps3838-hint::after { content: " ▴"; }
+
+.sc-ps3838-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 0 9px 9px;
+}
+
+.sc-ps3838-fields {
+  grid-template-columns: minmax(0, .95fr) minmax(0, .95fr) minmax(0, 1.1fr);
+  gap: 8px !important;
+}
+
+.sc-ps3838-fields .form-group { margin-bottom: 0; min-width: 0; }
+.sc-ps3838-fields .form-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sc-ps3838-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.sc-ps3838-toggle-label { color: var(--ops-text-3); font-size: 8px; }
+.sc-ps3838-actions .form-hint { margin: 0 0 0 auto; }
 
 .sc-secret-field { position: relative; }
 .sc-secret-field .form-input { padding-right: 31px !important; }
@@ -711,7 +803,7 @@ body[data-view="system-center"] .sc-notify-content > #tg-hint { grid-column: 1 /
 
 .sc-notify-summary {
   grid-column: 1 / -1;
-  grid-row: 3;
+  grid-row: 4;
   min-width: 0;
   padding: 9px;
   border: 1px solid rgba(21, 65, 94, .72);
@@ -755,7 +847,7 @@ body[data-view="system-center"] .sc-notify-content > #tg-hint { grid-column: 1 /
 
 .sc-notify-activity {
   grid-column: 1 / -1;
-  grid-row: 4;
+  grid-row: 5;
   min-width: 0;
   min-height: 0;
   padding: 9px;

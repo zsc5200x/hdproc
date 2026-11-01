@@ -37,6 +37,9 @@ class TestLocalBridge(unittest.TestCase):
         self.assertEqual(out["local_bridge_target"], "ps3838-bridge")
         self.assertEqual(out["local_bridge_token"], "abc123")
 
+        out = merge_local_bridge_config(out, {"local_bridge_enabled": False, "local_bridge_token": ""})
+        self.assertEqual(out["local_bridge_token"], "abc123")
+
         out = reset_local_bridge_config(out)
         self.assertFalse(out["local_bridge_configured"])
         self.assertFalse(out["local_bridge_enabled"])
@@ -132,18 +135,38 @@ class TestLocalBridge(unittest.TestCase):
             self.assertEqual(state["last_signal"]["crownOpponent"], "大 3.5")
 
     def test_token_matching(self) -> None:
-        from hdzz.api.webui.local_bridge import token_matches
+        from hdzz.api.webui.local_bridge import remote_access_requires_token, token_matches
 
         self.assertTrue(token_matches("", "anything"))
         self.assertTrue(token_matches("secret", "secret"))
         self.assertFalse(token_matches("secret", "wrong"))
+        self.assertTrue(remote_access_requires_token({"local_bridge_allow_remote": True, "local_bridge_token": ""}))
+        self.assertFalse(remote_access_requires_token({"local_bridge_allow_remote": True, "local_bridge_token": "secret"}))
+        self.assertFalse(remote_access_requires_token({"local_bridge_allow_remote": False, "local_bridge_token": ""}))
+
+    def test_config_payload_never_returns_local_bridge_token(self) -> None:
+        from hdzz.api.webui.local_bridge import config_payload
+
+        payload = config_payload(
+            {"local_bridge_configured": True, "local_bridge_token": "secret-token"},
+            {},
+            endpoint="http://127.0.0.1:9999/api/local-signal/push",
+        )
+
+        self.assertEqual(payload["config"]["local_bridge_token"], "")
+        self.assertTrue(payload["config"]["local_bridge_token_set"])
+        self.assertNotIn("secret-token", repr(payload))
 
     def test_webui_exposes_local_bridge_entry_and_receiver(self) -> None:
         page = (ROOT / "app" / "webui" / "index.html").read_text(encoding="utf-8")
+        app_js = (ROOT / "app" / "webui" / "app.js").read_text(encoding="utf-8")
+        sidebar = (ROOT / "app" / "webui" / "sidebar_items.js").read_text(encoding="utf-8")
         server = (ROOT / "src" / "hdzz" / "api" / "webui" / "server.py").read_text(encoding="utf-8")
-        self.assertIn("本地桥接", page)
-        self.assertIn('id="add-mode-bridge"', page)
-        self.assertIn('id="add-bridge-fields"', page)
+        self.assertIn("本地桥接", app_js + sidebar)
+        self.assertNotIn('id="add-mode-bridge"', page)
+        self.assertNotIn('id="add-bridge-fields"', page)
+        self.assertIn("loadLocalBridgeConfig", app_js)
+        self.assertNotIn("local_bridge_token: cfg.local_bridge_token", app_js)
         self.assertIn('"/api/local-signal/push"', server)
         self.assertIn('"/api/local-bridge-config"', server)
 

@@ -54,12 +54,20 @@ from hdzz.api.webui.local_bridge import (
     ensure_local_bridge_defaults,
     load_state as load_local_bridge_state,
     merge_local_bridge_config,
+    remote_access_requires_token,
     receive_local_bridge_signal,
     record_rejection as record_local_bridge_rejection,
     reset_local_bridge_config,
     token_matches as local_bridge_token_matches,
 )
-from hdzz.api.webui.signal_pull_config import ensure_signal_pull_config_defaults, merge_signal_pull_config, reset_signal_pull_config
+from hdzz.api.webui.signal_pull_config import ensure_signal_pull_config_defaults, merge_signal_pull_config, reset_signal_pull_config, signal_pull_config_payload
+from hdzz.api.webui.ps3838_app import (
+    read_telegram_config as read_ps3838_telegram_config,
+    save_telegram_config as save_ps3838_telegram_config,
+    start as start_ps3838_app,
+    status as ps3838_app_status,
+    stop as stop_ps3838_app,
+)
 from hdzz.api.webui.chashui_quote_pool import (
     list_readonly_quote_candidates as _list_readonly_quote_candidates,
     load_readonly_quote_pool,
@@ -127,6 +135,8 @@ FOLLOW_RESULTS_HTTP_CACHE_LOCK = threading.Lock()
 FOLLOW_QUEUE_HTTP_CACHE: Dict[Tuple[str, int, int, bool, int], Tuple[float, bytes]] = {}
 FOLLOW_QUEUE_HTTP_CACHE_LOCK = threading.Lock()
 FOLLOW_HTTP_CACHE_TTL_S = 0.75
+PS3838_PROXY_PREFIX = "/ps3838"
+PS3838_PROXY_UPSTREAM = (os.environ.get("HDZZ_PS3838_UPSTREAM") or "http://127.0.0.1:8787").rstrip("/")
 
 
 def _as_float(value: Any) -> float:
@@ -1032,6 +1042,7 @@ def read_ps3838_status(data_dir: Path, name: str, *, enabled: bool = True) -> Di
         "order_count": int(state.get("order_count") or 0),
         "new_count": int(state.get("new_count") or 0),
         "update_count": int(state.get("update_count") or 0),
+        "partner_sync": dict(state.get("partner_sync") or {}),
     }
 
 def _prepare_stop_all_without_killing_self() -> Tuple[bool, str]:
@@ -1144,6 +1155,19 @@ def mask_secret(s: str, keep: int = 3) -> str:
     if len(s) <= keep:
         return "*" * len(s)
     return ("*" * (len(s) - keep)) + s[-keep:]
+
+
+def ps3838_telegram_payload(info: Dict[str, Any]) -> Dict[str, Any]:
+    token = str((info or {}).get("token") or "")
+    chat_id = str((info or {}).get("chat_id") or "")
+    return {
+        "configured": bool(token and chat_id),
+        "enabled": bool((info or {}).get("enabled")),
+        "has_token": bool(token),
+        "token_mask": mask_secret(token, keep=4) if token else "",
+        "chat_id": chat_id,
+        "proxy": str((info or {}).get("proxy") or ""),
+    }
 
 
 def redact_secret_in_text(text: str, secret: str) -> str:
@@ -5523,6 +5547,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         u = urlparse(self.path)
+        if self._proxy_ps3838("GET", u):
+            return
         if u.path == "/api/telegram-signal/status":
             settings = load_telegram_signal_settings(self._data_dir / "telegram_signal.json")
             secret_status = sanitize_telegram_signal_secret_status(
@@ -5988,28 +6014,30 @@ class Handler(SimpleHTTPRequestHandler):
             )
             return
 
+        if u.path == "/api/ps3838-telegram-config":
+            try:
+                info = read_ps3838_telegram_config(self._read_config())
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "message": f"读取 PS3838 推送配置失败: {exc}"})
+                return
+            payload = ps3838_telegram_payload(info)
+            payload.update({"ok": True, "server_time": now_iso()})
+            self._send_json(200, payload)
+            return
+
         if u.path == "/api/signal-pull-config":
             cfg = ensure_signal_pull_config_defaults(self._read_config())
-            self._send_json(
-                200,
-                {
-                    "ok": True,
-                    "config": {
-                        "signal_pull_enabled": bool(cfg.get("signal_pull_enabled")),
-                        "signal_pull_url": str(cfg.get("signal_pull_url") or "").strip(),
-                        "signal_pull_token": str(cfg.get("signal_pull_token") or "").strip(),
-                        "signal_pull_live_only": bool(cfg.get("signal_pull_live_only")),
-                        "signal_pull_limit": int(cfg.get("signal_pull_limit") or 200),
-                        "signal_pull_interval_seconds": float(cfg.get("signal_pull_interval_seconds") or 1.0),
-                    },
-                    "configured": bool(str(cfg.get("signal_pull_url") or "").strip()),
-                    "server_time": now_iso(),
-                },
-            )
+            payload = signal_pull_config_payload(cfg)
+            payload["server_time"] = now_iso()
+            self._send_json(200, payload)
             return
 
         if u.path == "/api/local-bridge-config":
             self._send_json(200, self._local_bridge_response())
+            return
+
+        if u.path == "/api/ps3838-app/status":
+            self._send_json(200, ps3838_app_status(self._read_config()))
             return
 
         if u.path == "/api/telegram-status-log":
@@ -6670,17 +6698,6 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/status":
             cfg = self._read_config()
             targets = cfg.get("targets") or []
-            # WebUI 可能在 app.py 重启后先收到状态请求；确保已保存的平博账号
-            # 仍有独立只读 worker，不需要用户重新点击“接入节点”。
-            ps_accounts = [
-                item for item in (cfg.get("ps3838_accounts") or [])
-                if isinstance(item, dict) and bool(item.get("enabled", True))
-            ]
-            if ps_accounts:
-                try:
-                    ensure_ps3838_watch_running(self._config_path, self._data_dir)
-                except Exception:
-                    pass
             now = time.time()
             platform_state = read_platform_state(self._data_dir)
             statuses: Dict[str, Any] = {}
@@ -6739,6 +6756,98 @@ class Handler(SimpleHTTPRequestHandler):
 
         return super().do_GET()
 
+    @staticmethod
+    def _ps3838_upstream_path(path: str) -> Optional[str]:
+        text = str(path or "")
+        if text == PS3838_PROXY_PREFIX:
+            return "/"
+        if text.startswith(PS3838_PROXY_PREFIX + "/"):
+            return text[len(PS3838_PROXY_PREFIX):] or "/"
+        if text == "/crown" or text.startswith("/crown/"):
+            return text
+        if text == "/api/crown" or text.startswith("/api/crown/"):
+            return text
+        if text == "/api/merge" or text.startswith("/api/merge/"):
+            return text
+        return None
+
+    def _proxy_ps3838(self, method: str, parsed) -> bool:
+        path = str(parsed.path or "")
+        upstream_path = self._ps3838_upstream_path(path)
+        if upstream_path is None:
+            return False
+        if path == PS3838_PROXY_PREFIX:
+            location = PS3838_PROXY_PREFIX + "/"
+            if parsed.query:
+                location += "?" + parsed.query
+            self.send_response(301)
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+
+        query = ("?" + parsed.query) if parsed.query else ""
+        url = f"{PS3838_PROXY_UPSTREAM}{upstream_path}{query}"
+        body = None
+        if method in {"POST", "PUT", "DELETE"}:
+            try:
+                length = int(self.headers.get("content-length") or "0")
+            except Exception:
+                length = 0
+            if length > 0:
+                body = self.rfile.read(length)
+            else:
+                body = b""
+        skip_headers = {
+            "host", "content-length", "connection", "keep-alive", "proxy-authenticate",
+            "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
+            "accept-encoding",
+        }
+        headers = {
+            str(key): str(value)
+            for key, value in self.headers.items()
+            if str(key).lower() not in skip_headers
+        }
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            upstream = session.request(
+                method,
+                url,
+                data=body,
+                headers=headers,
+                timeout=60,
+                allow_redirects=False,
+            )
+        except Exception as exc:
+            if upstream_path.startswith("/api/"):
+                self._send_json(502, {"ok": False, "message": f"ps3838 upstream unavailable: {exc}"})
+            else:
+                self.send_error(502, f"ps3838 upstream unavailable: {exc}")
+            return True
+        finally:
+            session.close()
+
+        content = upstream.content or b""
+        skip_response = {
+            "content-length", "content-encoding", "transfer-encoding", "connection",
+            "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
+            "upgrade",
+        }
+        try:
+            self.send_response(int(upstream.status_code))
+            for key, value in upstream.headers.items():
+                if str(key).lower() in skip_response:
+                    continue
+                self.send_header(str(key), str(value))
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            if method != "HEAD":
+                self.wfile.write(content)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
+        return True
+
     def _local_bridge_endpoint(self) -> str:
         host = str(self.headers.get("Host") or "").strip()
         if not host:
@@ -6768,6 +6877,10 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if not bool(cfg.get("local_bridge_allow_remote")) and not self._is_loopback_client(remote):
             self._send_json(403, {"ok": False, "message": "local_bridge_remote_not_allowed"})
+            return
+        if remote_access_requires_token(cfg):
+            record_local_bridge_rejection(self._data_dir, "local_bridge_token_required", remote=remote)
+            self._send_json(503, {"ok": False, "message": "local_bridge_token_required"})
             return
         provided = (
             str(self.headers.get("X-HDZZ-Signal-Token") or "").strip()
@@ -6841,6 +6954,18 @@ class Handler(SimpleHTTPRequestHandler):
         state = load_local_bridge_state(self._data_dir)
         return build_local_bridge_config_payload(cfg, state, endpoint=self._local_bridge_endpoint())
 
+    def do_PUT(self) -> None:
+        u = urlparse(self.path)
+        if self._proxy_ps3838("PUT", u):
+            return
+        self.send_error(404)
+
+    def do_DELETE(self) -> None:
+        u = urlparse(self.path)
+        if self._proxy_ps3838("DELETE", u):
+            return
+        self.send_error(404)
+
     def _read_config(self) -> Dict[str, Any]:
         try:
             raw = self._config_path.read_text(encoding="utf-8-sig")
@@ -6911,6 +7036,8 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
         global WATCH_PROCESS
         u = urlparse(self.path)
+        if self._proxy_ps3838("POST", u):
+            return
         if u.path not in (
             "/api/accounts",
             "/api/accounts/relogin",
@@ -6928,12 +7055,16 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/telegram-config",
             "/api/telegram-test",
             "/api/telegram-backend-order-test",
+            "/api/ps3838-telegram-config",
+            "/api/ps3838-telegram-test",
             "/api/signal-pull-config",
             "/api/signal-pull-config/delete",
             "/api/local-bridge-config",
             "/api/local-bridge-config/delete",
             "/api/local-signal/push",
             "/api/local-bridge/push",
+            "/api/ps3838-app/start",
+            "/api/ps3838-app/stop",
             "/api/manual-signal/login",
             "/api/manual-signal/preview",
             "/api/manual-signal/push",
@@ -7208,7 +7339,17 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if u.path == "/api/ps3838/add":
-            base_url = str(data.get("base_url") or "https://www.ps38ag.com").strip().rstrip("/")
+            raw_base = str(data.get("base_url") or "https://www.ps38ag.com/partner/zh-cn/login").strip()
+            parsed_base = urlparse(raw_base)
+            base_url = (
+                f"{parsed_base.scheme}://{parsed_base.netloc}".rstrip("/")
+                if parsed_base.scheme and parsed_base.netloc else "https://www.ps38ag.com"
+            )
+            login_url = (
+                raw_base
+                if "/login" in (parsed_base.path or "").lower()
+                else "https://www.ps38ag.com/partner/zh-cn/login"
+            )
             username = str(data.get("username") or "").strip()
             password = str(data.get("password") or "")
             if not username or not password:
@@ -7234,6 +7375,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "name": name,
                 "provider": "ps3838",
                 "base_url": base_url or "https://www.ps38ag.com",
+                "login_url": login_url,
                 "username": username,
                 "password": password,
                 "enabled": True,
@@ -7241,6 +7383,16 @@ class Handler(SimpleHTTPRequestHandler):
                 "headless": bool(data.get("headless", False)),
                 "login_timeout_seconds": 0,
                 "telegram_chat_id": str(data.get("telegram_chat_id") or "").strip(),
+                "partner_sync_enabled": bool(data.get("partner_sync_enabled", True)),
+                "partner_agents": [
+                    str(item).strip()
+                    for item in (data.get("partner_agents") or [])
+                    if str(item).strip()
+                ] if isinstance(data.get("partner_agents"), (list, tuple)) else [
+                    part.strip()
+                    for part in str(data.get("partner_agents") or "").replace("\n", ",").split(",")
+                    if part.strip()
+                ],
                 "x_intellifend_secret": "",
             }
             accounts.append(account)
@@ -7296,15 +7448,33 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/api/ps3838/update":
             name = str(data.get("name") or "").strip()
             patch = data.get("patch")
-            if not isinstance(patch, dict) or not isinstance(patch.get("enabled"), bool):
-                self._send_json(400, {"ok": False, "message": "请提供 enabled 布尔值"})
+            if not isinstance(patch, dict):
+                self._send_json(400, {"ok": False, "message": "请提供 patch 对象"})
+                return
+            if "enabled" in patch and not isinstance(patch.get("enabled"), bool):
+                self._send_json(400, {"ok": False, "message": "enabled 必须是布尔值"})
+                return
+            if not any(key in patch for key in ("enabled", "partner_sync_enabled", "partner_agents")):
+                self._send_json(400, {"ok": False, "message": "没有可更新的平博节点字段"})
                 return
             cfg = self._read_config()
             account = next((item for item in cfg.get("ps3838_accounts") or [] if isinstance(item, dict) and str(item.get("name") or "") == name), None)
             if account is None:
                 self._send_json(404, {"ok": False, "message": "未找到平博账号"})
                 return
-            account["enabled"] = patch["enabled"]
+            if "enabled" in patch:
+                account["enabled"] = patch["enabled"]
+            if "partner_sync_enabled" in patch:
+                account["partner_sync_enabled"] = bool(patch["partner_sync_enabled"])
+            if "partner_agents" in patch:
+                raw_agents = patch.get("partner_agents")
+                if isinstance(raw_agents, str):
+                    parts = raw_agents.replace("\n", ",").split(",")
+                elif isinstance(raw_agents, (list, tuple)):
+                    parts = raw_agents
+                else:
+                    parts = []
+                account["partner_agents"] = [str(item).strip() for item in parts if str(item).strip()]
             try:
                 atomic_write_json(self._config_path, cfg)
                 if account["enabled"]:
@@ -8197,6 +8367,57 @@ class Handler(SimpleHTTPRequestHandler):
             )
             return
 
+        if u.path == "/api/ps3838-telegram-config":
+            try:
+                info = save_ps3838_telegram_config(self._read_config(), data)
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "message": str(exc)})
+                return
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "message": f"保存 PS3838 推送配置失败: {exc}"})
+                return
+            payload = ps3838_telegram_payload(info)
+            payload.update(
+                {
+                    "ok": True,
+                    "message": "PS3838 推送配置已保存",
+                    "server_time": now_iso(),
+                }
+            )
+            self._send_json(200, payload)
+            return
+
+        if u.path == "/api/ps3838-telegram-test":
+            try:
+                saved = read_ps3838_telegram_config(self._read_config())
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "message": f"读取 PS3838 推送配置失败: {exc}"})
+                return
+            bot_token = str(data.get("bot_token") or saved.get("token") or "").strip()
+            chat_id = str((data["chat_id"] if "chat_id" in data else saved.get("chat_id")) or "").strip()
+            proxy = str((data["proxy"] if "proxy" in data else saved.get("proxy")) or "").strip()
+            if not (bot_token and chat_id):
+                self._send_json(400, {"ok": False, "message": "请先配置 PS3838 机器人 Token 和 Chat ID"})
+                return
+            res = tg_send_message(
+                bot_token=bot_token,
+                chat_id=chat_id,
+                text="<b>PS3838 新单推送</b>\n测试消息：配置正常。",
+                proxy=proxy,
+                timeout_s=15,
+            )
+            if not res.get("ok"):
+                self._send_json(
+                    500,
+                    {
+                        "ok": False,
+                        "message": f"发送失败: {redact_secret_in_text(str(res.get('error') or ''), bot_token)}",
+                    },
+                )
+                return
+            self._send_json(200, {"ok": True, "message": "测试消息已发送"})
+            return
+
         if u.path == "/api/signal-pull-config":
             cfg = self._read_config()
             cfg = merge_signal_pull_config(cfg, data)
@@ -8207,22 +8428,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return
 
             cfg = ensure_signal_pull_config_defaults(cfg)
-            self._send_json(
-                200,
-                {
-                    "ok": True,
-                    "config": {
-                        "signal_pull_enabled": bool(cfg.get("signal_pull_enabled")),
-                        "signal_pull_url": str(cfg.get("signal_pull_url") or "").strip(),
-                        "signal_pull_token": str(cfg.get("signal_pull_token") or "").strip(),
-                        "signal_pull_live_only": bool(cfg.get("signal_pull_live_only")),
-                        "signal_pull_limit": int(cfg.get("signal_pull_limit") or 200),
-                        "signal_pull_interval_seconds": float(cfg.get("signal_pull_interval_seconds") or 1.0),
-                    },
-                    "configured": bool(str(cfg.get("signal_pull_url") or "").strip()),
-                    "server_time": now_iso(),
-                },
-            )
+            payload = signal_pull_config_payload(cfg)
+            payload["server_time"] = now_iso()
+            self._send_json(200, payload)
             return
 
         if u.path == "/api/local-bridge-config":
@@ -8274,6 +8482,32 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, self._local_bridge_response())
             return
 
+        if u.path == "/api/ps3838-app/start":
+            try:
+                result = start_ps3838_app(self._read_config(), data_dir=self._data_dir)
+            except FileNotFoundError as e:
+                self._send_json(400, {"ok": False, "message": str(e)})
+                return
+            except Exception as e:
+                self._send_json(500, {"ok": False, "message": f"启动 ps3838-wss 失败: {e}"})
+                return
+            result["server_time"] = now_iso()
+            self._send_json(200, result)
+            return
+
+        if u.path == "/api/ps3838-app/stop":
+            try:
+                result = stop_ps3838_app(self._read_config(), data_dir=self._data_dir)
+            except FileNotFoundError as e:
+                self._send_json(400, {"ok": False, "message": str(e)})
+                return
+            except Exception as e:
+                self._send_json(500, {"ok": False, "message": f"停止 ps3838-wss 失败: {e}"})
+                return
+            result["server_time"] = now_iso()
+            self._send_json(200, result)
+            return
+
         if u.path == "/api/signal-pull-config/delete":
             cfg = self._read_config()
             cfg = reset_signal_pull_config(cfg)
@@ -8284,22 +8518,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return
 
             cfg = ensure_signal_pull_config_defaults(cfg)
-            self._send_json(
-                200,
-                {
-                    "ok": True,
-                    "config": {
-                        "signal_pull_enabled": bool(cfg.get("signal_pull_enabled")),
-                        "signal_pull_url": str(cfg.get("signal_pull_url") or "").strip(),
-                        "signal_pull_token": str(cfg.get("signal_pull_token") or "").strip(),
-                        "signal_pull_live_only": bool(cfg.get("signal_pull_live_only")),
-                        "signal_pull_limit": int(cfg.get("signal_pull_limit") or 200),
-                        "signal_pull_interval_seconds": float(cfg.get("signal_pull_interval_seconds") or 1.0),
-                    },
-                    "configured": bool(str(cfg.get("signal_pull_url") or "").strip()),
-                    "server_time": now_iso(),
-                },
-            )
+            payload = signal_pull_config_payload(cfg)
+            payload["server_time"] = now_iso()
+            self._send_json(200, payload)
             return
 
         if u.path == "/api/telegram-backend-order-test":

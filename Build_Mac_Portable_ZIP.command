@@ -28,8 +28,14 @@ zip -rq "${ZIP_PATH}" . \
      "app/.run/*" \
      "app/orders/*" \
      "app/state/*" \
+     "app/config.json" \
+     "app/data/*" \
      "app/data/*.lock" \
      "app/data/*.tmp.*" \
+     "ps3838/config.json" \
+     "ps3838/var/*" \
+     "ps3838/crown/data/*" \
+     "ps3838/crown/.run/*" \
      "data/logs/*" \
      "__pycache__/*" \
      "*.pyc"

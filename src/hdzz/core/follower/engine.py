@@ -3869,6 +3869,8 @@ def evaluate_follow_odds_limit(
         "current_odds": current_odds,
     }
     if current_odds is None:
+        if min_odds is not None or max_odds is not None:
+            return (True, "已按水位策略跳过：当前注单缺少有效水位，无法核对限制。", meta)
         return (False, "", meta)
     if min_odds is not None and current_odds < min_odds:
         return (True, f"已按水位策略跳过：当前水位 {current_odds:g} 低于最低跟单水位 {min_odds:g}。", meta)
