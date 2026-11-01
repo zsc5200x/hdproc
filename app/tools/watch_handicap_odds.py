@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -15,12 +16,13 @@ warnings.filterwarnings("ignore", message=r"urllib3 v2 only supports OpenSSL.*")
 
 # 允许从 app/tools 直接运行：把 app 目录加到 sys.path
 APP_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_RUNTIME_NAME = "HD跟单系统"
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from follow_engine import (  # noqa: E402
     fetch_game_list_game_context,
-    fetch_game_more_game,
+    fetch_game_more_xml_text,
     make_member_session,
     member_warmup_sport_menu,
     now_iso,
@@ -351,6 +353,107 @@ def _parse_total_markets_from_game_more(gm_game: ET.Element) -> Dict[str, Any]:
     return {"markets": markets}
 
 
+def _parse_game_more_ft_group(root: ET.Element, *, requested_gid: str) -> List[Dict[str, Any]]:
+    """Return every FT board in FT_gid order, including master=N boards."""
+
+    gid2 = str(requested_gid or "").strip()
+    ft_gids: List[Dict[str, str]] = []
+    for node in list(root):
+        if str(node.tag or "").strip().lower() != "ft_gid":
+            continue
+        for item in list(node):
+            if str(item.tag or "").strip().lower() != "gid":
+                continue
+            child_gid = str(item.get("id") or item.get("ID") or "").strip()
+            if not child_gid:
+                continue
+            ft_gids.append(
+                {
+                    "gid": child_gid,
+                    "master": str(item.get("master") or item.get("MASTER") or "").strip().upper(),
+                }
+            )
+        break
+
+    games_by_gid: Dict[str, ET.Element] = {}
+    for game in root.iter("game"):
+        game_gid = str((game.findtext("gid") or game.findtext("GID") or "")).strip()
+        if not game_gid:
+            continue
+        games_by_gid.setdefault(game_gid, game)
+
+    if ft_gids:
+        ft_gid_values = {item["gid"] for item in ft_gids}
+        if gid2 and gid2 not in ft_gid_values:
+            return []
+        out: List[Dict[str, Any]] = []
+        for item in ft_gids:
+            game = games_by_gid.get(item["gid"])
+            if game is None:
+                continue
+            out.append({"gid": item["gid"], "master": item["master"] or str(game.get("master") or ""), "game": game})
+        return out
+
+    # Older/simplified responses may omit FT_gid. Preserve the exact-board
+    # behavior instead of accidentally mixing corner/extra-time boards.
+    exact = games_by_gid.get(gid2) if gid2 else None
+    if exact is None:
+        return []
+    return [
+        {
+            "gid": gid2,
+            "master": str(exact.get("master") or "").strip().upper(),
+            "game": exact,
+        }
+    ]
+
+
+def _parse_handicap_market_group(ft_group: List[Dict[str, Any]]) -> Dict[str, Any]:
+    markets: List[Dict[str, Any]] = []
+    for board in ft_group:
+        game = board.get("game")
+        if not isinstance(game, ET.Element):
+            continue
+        parsed = _parse_handicap_markets_from_game_more(game)
+        for market in parsed.get("markets") or []:
+            if not isinstance(market, dict):
+                continue
+            row = dict(market)
+            row["gid"] = str(board.get("gid") or "")
+            row["master"] = str(board.get("master") or "").upper()
+            markets.append(row)
+    return {
+        "ft_gids": [
+            {"gid": str(board.get("gid") or ""), "master": str(board.get("master") or "").upper()}
+            for board in ft_group
+        ],
+        "markets": markets,
+    }
+
+
+def _parse_total_market_group(ft_group: List[Dict[str, Any]]) -> Dict[str, Any]:
+    markets: List[Dict[str, Any]] = []
+    for board in ft_group:
+        game = board.get("game")
+        if not isinstance(game, ET.Element):
+            continue
+        parsed = _parse_total_markets_from_game_more(game)
+        for market in parsed.get("markets") or []:
+            if not isinstance(market, dict):
+                continue
+            row = dict(market)
+            row["gid"] = str(board.get("gid") or "")
+            row["master"] = str(board.get("master") or "").upper()
+            markets.append(row)
+    return {
+        "ft_gids": [
+            {"gid": str(board.get("gid") or ""), "master": str(board.get("master") or "").upper()}
+            for board in ft_group
+        ],
+        "markets": markets,
+    }
+
+
 def _curl_transform_post(
     *,
     base_url: str,
@@ -490,7 +593,7 @@ def _fetch_game_list_game_context_curl(
     return None, "", "", "game_not_found"
 
 
-def _fetch_game_more_game_curl(
+def _fetch_game_more_root_curl(
     *,
     base_url: str,
     ver: str,
@@ -502,7 +605,6 @@ def _fetch_game_more_game_curl(
     lid: str,
     ecid_num: str,
     timeout_s: int,
-    gid: str,
     filter: str = "Main",
 ) -> Tuple[Optional[ET.Element], str]:
     ts_ms = str(int(time.time() * 1000))
@@ -536,12 +638,64 @@ def _fetch_game_more_game_curl(
     except Exception as e:
         return None, f"game_more_xml_parse_failed: {type(e).__name__}: {e}"
 
-    gid2 = str(gid or "").strip()
-    for g in root.iter("game"):
-        gid_text = str((g.findtext("gid") or g.findtext("GID") or "")).strip()
-        if gid_text == gid2:
-            return g, "ok"
-    return None, "game_not_found"
+    return root, "ok"
+
+
+def _default_arsenal_candidates() -> List[Path]:
+    """Return arsenal locations from the active runtime down to source data."""
+
+    candidates: List[Path] = []
+    env_path = str(os.environ.get("HDZZ_ARSENAL_PATH") or "").strip()
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+
+    runtime_root = str(os.environ.get("HDZZ_RUNTIME_ROOT") or "").strip()
+    if runtime_root:
+        candidates.append(Path(runtime_root).expanduser() / "data" / "arsenal.json")
+
+    # On macOS the desktop runtime owns the live sessions. Source data remains
+    # a last-resort fallback; development callers can select it explicitly.
+    if sys.platform == "darwin":
+        candidates.append(
+            Path.home() / "Library" / "Application Support" / DEFAULT_RUNTIME_NAME / "data" / "arsenal.json"
+        )
+    candidates.append(APP_DIR / "data" / "arsenal.json")
+
+    unique: List[Path] = []
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate.expanduser().resolve(strict=False))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate.expanduser())
+    return unique
+
+
+def _resolve_arsenal_path(raw_path: str, *, default_candidates: Optional[List[Path]] = None) -> Path:
+    explicit = str(raw_path or "").strip()
+    if explicit:
+        path = Path(explicit).expanduser()
+        if not path.is_file():
+            raise SystemExit(f"指定的号池文件不存在：{path}")
+        return path.resolve()
+
+    candidates = list(default_candidates) if default_candidates is not None else _default_arsenal_candidates()
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if path.is_file():
+            return path.resolve()
+
+    checked = "\n  - ".join(str(Path(p).expanduser()) for p in candidates) or "(无候选路径)"
+    raise SystemExit(f"未找到号池文件，已检查：\n  - {checked}\n请使用 --arsenal 指定当前运行号池。")
+
+
+def _member_label(member: Dict[str, Any]) -> str:
+    return str(member.get("label") or member.get("username") or member.get("id") or "-").strip() or "-"
+
+
+def _member_session_complete(member: Dict[str, Any]) -> bool:
+    return all(str(member.get(key) or "").strip() for key in ("base_url", "ver", "uid", "cookie"))
 
 
 def _load_first_online_member(arsenal_path: Path, *, member_query: str = "") -> Dict[str, Any]:
@@ -550,32 +704,59 @@ def _load_first_online_member(arsenal_path: Path, *, member_query: str = "") -> 
     if not isinstance(members, list) or not members:
         raise SystemExit(f"未找到 members：{arsenal_path}")
 
+    member_rows = [m for m in members if isinstance(m, dict)]
+    online = [m for m in member_rows if str(m.get("status") or "").strip().lower() == "online"]
+
     q = str(member_query or "").strip().lower()
     if q:
-        hits = []
-        for m in members:
-            if not isinstance(m, dict):
-                continue
-            s = " ".join(
-                [
-                    str(m.get("id") or ""),
-                    str(m.get("label") or ""),
-                    str(m.get("username") or ""),
-                    str(m.get("base_url") or ""),
-                ]
-            ).lower()
-            if q in s:
-                hits.append(m)
-        if hits:
-            for m in hits:
-                if str(m.get("status") or "").strip().lower() == "online":
-                    return m
-            return hits[0]
+        exact_hits = [
+            m
+            for m in member_rows
+            if q
+            in {
+                str(m.get("id") or "").strip().lower(),
+                str(m.get("label") or "").strip().lower(),
+                str(m.get("username") or "").strip().lower(),
+            }
+        ]
+        hits = exact_hits
+        if not hits:
+            hits = [
+                m
+                for m in member_rows
+                if q
+                in " ".join(
+                    [
+                        str(m.get("id") or ""),
+                        str(m.get("label") or ""),
+                        str(m.get("username") or ""),
+                        str(m.get("base_url") or ""),
+                    ]
+                ).lower()
+            ]
+        if not hits:
+            available = "、".join(_member_label(m) for m in online) or "无"
+            raise SystemExit(f"指定会员不存在：{member_query}；当前在线会员：{available}")
 
-    for m in members:
-        if isinstance(m, dict) and str(m.get("status") or "").strip().lower() == "online":
-            return m
-    return members[0] if isinstance(members[0], dict) else {}
+        online_hits = [m for m in hits if str(m.get("status") or "").strip().lower() == "online"]
+        if not online_hits:
+            matched = "、".join(f"{_member_label(m)}({m.get('status') or '-'})" for m in hits)
+            raise SystemExit(f"指定会员当前不是 online，拒绝使用：{matched}")
+        if len(online_hits) > 1:
+            matched = "、".join(_member_label(m) for m in online_hits)
+            raise SystemExit(f"指定会员匹配不唯一：{member_query} -> {matched}；请填写完整 id、标签或用户名。")
+        selected = online_hits[0]
+        if not _member_session_complete(selected):
+            raise SystemExit(f"指定会员会话不完整，拒绝使用：{_member_label(selected)}")
+        return selected
+
+    ready_online = [m for m in online if _member_session_complete(m)]
+    if ready_online:
+        return ready_online[0]
+    if online:
+        labels = "、".join(_member_label(m) for m in online)
+        raise SystemExit(f"在线会员均缺少有效会话字段，拒绝回退到其他状态会员：{labels}")
+    raise SystemExit(f"号池中没有 online 会员，拒绝使用离线或已失效账号：{arsenal_path}")
 
 
 def _resolve_lid_ecid(
@@ -715,11 +896,11 @@ def _fetch_game_more_best_effort(
         for rb_flag in rb_flags:
             rb_tag = "rb" if bool(rb_flag) else "r"
             for flt in filter_candidates:
-                gm_game = None
+                gm_root = None
                 gm_msg = ""
                 if tr in {"auto", "requests"}:
                     try:
-                        gm_game, gm_msg = fetch_game_more_game(
+                        xml_text, gm_msg = fetch_game_more_xml_text(
                             session=session,
                             base_url=base_url,
                             ver=ver,
@@ -730,11 +911,12 @@ def _fetch_game_more_best_effort(
                             lid=lid,
                             ecid_num=ecid_num,
                             timeout_s=timeout_s,
-                            gid=gid,
                             filter=flt,
                         )
+                        if xml_text:
+                            gm_root = ET.fromstring(str(xml_text).strip())
                     except Exception as e:
-                        gm_game, gm_msg = None, f"game_more_request_failed: {type(e).__name__}: {e}"
+                        gm_root, gm_msg = None, f"game_more_request_failed: {type(e).__name__}: {e}"
 
                 need_curl = tr == "curl"
                 if tr == "auto":
@@ -742,7 +924,7 @@ def _fetch_game_more_best_effort(
                     if ("request_failed" in low) or ("ssl" in low) or ("eof" in low):
                         need_curl = True
                 if need_curl:
-                    gm2, msg2 = _fetch_game_more_game_curl(
+                    gm2, msg2 = _fetch_game_more_root_curl(
                         base_url=base_url,
                         ver=ver,
                         uid=uid,
@@ -753,15 +935,16 @@ def _fetch_game_more_best_effort(
                         lid=lid,
                         ecid_num=ecid_num,
                         timeout_s=timeout_s,
-                        gid=gid,
                         filter=flt,
                     )
-                    if (gm_game is None) or (str(gm_msg or "").startswith("game_more_request_failed")):
-                        gm_game, gm_msg = gm2, msg2
+                    if (gm_root is None) or (str(gm_msg or "").startswith("game_more_request_failed")):
+                        gm_root, gm_msg = gm2, msg2
 
                 last_msg = gm_msg
-                if gm_game is not None:
-                    return gm_game, {"showtype": st, "rb": rb_tag, "filter": str(flt), "msg": str(gm_msg)}
+                if gm_root is not None and _parse_game_more_ft_group(gm_root, requested_gid=gid):
+                    return gm_root, {"showtype": st, "rb": rb_tag, "filter": str(flt), "msg": str(gm_msg)}
+                if gm_root is not None:
+                    last_msg = "game_not_found"
     return None, {"showtype": "", "rb": "", "filter": "", "msg": str(last_msg)}
 
 
@@ -791,12 +974,13 @@ def _print_snapshot(
 
     if mk in {"handicap", "both"}:
         snap = handicap_snap or {}
-        strong = str(snap.get("strong") or "").strip().upper()
-        hstrong = str(snap.get("hstrong") or "").strip().upper()
-        if strong or hstrong:
-            print(f"  【让球盘】 strong={strong or '-'} hstrong={hstrong or '-'}", flush=True)
-        else:
-            print("  【让球盘】", flush=True)
+        ft_gids = snap.get("ft_gids") or []
+        group_text = ", ".join(
+            f"{str(item.get('gid') or '-')}({str(item.get('master') or '-')})"
+            for item in ft_gids
+            if isinstance(item, dict)
+        )
+        print(f"  【让球盘】FT盘口组={group_text or '-'}", flush=True)
 
         markets = snap.get("markets") or []
         if not markets:
@@ -804,13 +988,20 @@ def _print_snapshot(
         else:
             for m in markets:
                 wt = str(m.get("wtype") or "")
+                market_gid = str(m.get("gid") or "-")
+                master = str(m.get("master") or "-").upper()
+                board_label = "主盘" if master == "Y" else "附加盘"
                 ratio_raw = str(m.get("ratio_raw") or "")
                 st = str(m.get("strong") or "")
                 hl = _format_line(m.get("home_line"))
                 al = _format_line(m.get("away_line"))
                 iH = str(m.get("ior_H") or "").strip() or "-"
                 iC = str(m.get("ior_C") or "").strip() or "-"
-                print(f"    - {wt:<4} ratio={ratio_raw:<8} st={st or '-'}  主({hl})@{iH}  客({al})@{iC}", flush=True)
+                print(
+                    f"    - [{board_label}] gid={market_gid} master={master} {wt:<4} "
+                    f"ratio={ratio_raw:<8} st={st or '-'}  主({hl})@{iH}  客({al})@{iC}",
+                    flush=True,
+                )
 
     if mk in {"total", "both"}:
         snap2 = total_snap or {}
@@ -821,6 +1012,9 @@ def _print_snapshot(
             return
         for m in markets2:
             wt = str(m.get("wtype") or "")
+            market_gid = str(m.get("gid") or "-")
+            master = str(m.get("master") or "-").upper()
+            board_label = "主盘" if master == "Y" else "附加盘"
             desc = str(m.get("wtype_desc") or "").strip() or "-"
             fam = str(m.get("family_label") or "").strip() or "-"
             ratio_raw = str(m.get("ratio_raw") or "")
@@ -831,7 +1025,11 @@ def _print_snapshot(
                 line_txt = "-"
             iO = str(m.get("ior_O") or "").strip() or "-"
             iU = str(m.get("ior_U") or "").strip() or "-"
-            print(f"    - {wt:<5} {fam:<5} 线={ratio_raw}({line_txt})  大@{iO}  小@{iU}  [{desc}]", flush=True)
+            print(
+                f"    - [{board_label}] gid={market_gid} master={master} {wt:<5} {fam:<5} "
+                f"线={ratio_raw}({line_txt})  大@{iO}  小@{iU}  [{desc}]",
+                flush=True,
+            )
 
 
 def main() -> int:
@@ -844,8 +1042,12 @@ def main() -> int:
     ap.add_argument("--no-cache", action="store_true", help="禁用内部短TTL缓存（更实时，但请求更频繁）")
     ap.add_argument("--base-url", default="", help="覆盖会员 base_url（例如 https://mos077.com；默认使用弹药库内的 base_url）")
     ap.add_argument("--transport", default="auto", choices=["auto", "requests", "curl"], help="接口请求方式：auto/requests/curl（默认 auto）")
-    ap.add_argument("--arsenal", default="", help="arsenal.json 路径（默认使用 app/data/arsenal.json）")
-    ap.add_argument("--member", default="", help="指定使用哪个会员（模糊匹配 id/label/username/base_url）")
+    ap.add_argument(
+        "--arsenal",
+        default="",
+        help="arsenal.json 路径（默认优先使用 HDZZ_RUNTIME_ROOT 或桌面应用当前运行号池）",
+    )
+    ap.add_argument("--member", default="", help="指定在线会员（匹配 id/label/username；不存在或离线时立即退出）")
     ap.add_argument("--market", default="handicap", choices=["handicap", "total", "both"], help="监控玩法：handicap(让球)/total(大小)/both(两者)")
     ap.add_argument("--print-every", action="store_true", help="每次轮询都打印（默认仅变化时打印）")
     ap.add_argument("--debug", action="store_true", help="输出更详细的失败原因（定位 gid/lid/ecid 为什么拿不到）")
@@ -866,7 +1068,7 @@ def main() -> int:
         except Exception:
             pass
 
-    arsenal_path = Path(args.arsenal).expanduser() if str(args.arsenal or "").strip() else (APP_DIR / "data" / "arsenal.json")
+    arsenal_path = _resolve_arsenal_path(str(args.arsenal or ""))
     m = _load_first_online_member(arsenal_path, member_query=str(args.member or ""))
 
     base_url = str(args.base_url or "").strip() or str(m.get("base_url") or "").strip()
@@ -880,6 +1082,7 @@ def main() -> int:
         raise SystemExit("会员缺少 base_url/ver/uid/cookie，无法抓取；请先确保 member_arsenal_watch 已登录并把该会员置为 online。")
 
     transport = str(args.transport or "auto").strip().lower()
+    print(f"[{now_iso()}] 会员号池：{arsenal_path}", flush=True)
     print(f"[{now_iso()}] 使用会员：{label} base_url={base_url} transport={transport}", flush=True)
 
     session = None
@@ -916,7 +1119,7 @@ def main() -> int:
                     continue
                 print(f"[{now_iso()}] 已获取上下文：showtype={showtype} lid={lid} ecid={ecid_num}", flush=True)
 
-            gm_game, meta = _fetch_game_more_best_effort(
+            gm_root, meta = _fetch_game_more_best_effort(
                 session=session,
                 base_url=base_url,
                 ver=ver,
@@ -930,7 +1133,7 @@ def main() -> int:
                 prefer_showtype=str(showtype or ""),
                 transport=transport,
             )
-            if gm_game is None:
+            if gm_root is None:
                 print(f"[{now_iso()}] get_game_more 拉取失败：{meta.get('msg')}", flush=True)
                 # 可能是上下文变了（比赛从 live 掉到 today/hot/early）
                 lid, ecid_num = "", ""
@@ -939,8 +1142,9 @@ def main() -> int:
 
             showtype = str(meta.get("showtype") or showtype).strip().lower() or showtype
             mk = str(args.market or "handicap").strip().lower()
-            handicap_snap = _parse_handicap_markets_from_game_more(gm_game) if mk in {"handicap", "both"} else None
-            total_snap = _parse_total_markets_from_game_more(gm_game) if mk in {"total", "both"} else None
+            ft_group = _parse_game_more_ft_group(gm_root, requested_gid=gid)
+            handicap_snap = _parse_handicap_market_group(ft_group) if mk in {"handicap", "both"} else None
+            total_snap = _parse_total_market_group(ft_group) if mk in {"total", "both"} else None
             key = json.dumps({"meta": meta, "mk": mk, "handicap": handicap_snap, "total": total_snap}, ensure_ascii=False, sort_keys=True)
             if args.print_every or (key != last_key):
                 _print_snapshot(gid=gid, meta=meta, market=mk, handicap_snap=handicap_snap, total_snap=total_snap)

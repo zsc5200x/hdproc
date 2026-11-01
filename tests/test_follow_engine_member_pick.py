@@ -15,7 +15,7 @@ if str(APP) not in sys.path:
 
 
 class TestFollowEngineMemberPick(unittest.TestCase):
-    def test_member_transient_detects_cooldown(self) -> None:
+    def test_member_transient_fields_never_create_cooldown(self) -> None:
         from hdzz.core.follower import engine
 
         m = {"last_error": "", "request_cooldown_until": 120}
@@ -32,7 +32,7 @@ class TestFollowEngineMemberPick(unittest.TestCase):
         }
         self.assertFalse(engine._member_has_transient_network_issue(m, now_s=100))
 
-    def test_member_transient_detects_network_route_cooldown(self) -> None:
+    def test_network_route_cooldown_field_is_diagnostic_only(self) -> None:
         from hdzz.core.follower import engine
 
         self.assertFalse(

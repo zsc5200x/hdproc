@@ -29,6 +29,41 @@ class TestOddsSnapshotWorkerBootstrap(unittest.TestCase):
         self.assertIn("odds_snapshot_watch.py", worker.args)
         self.assertIn("--data-dir", worker.args)
         self.assertIn("--orders-dir", worker.args)
+        deadline_index = worker.args.index("--market-deadline-ms") + 1
+        self.assertGreaterEqual(float(worker.args[deadline_index]) / 1000.0, 5.5)
+
+    def test_standalone_follow_launcher_starts_missing_snapshot_worker(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        app_dir = root / "app"
+        if str(app_dir) not in sys.path:
+            sys.path.insert(0, str(app_dir))
+        spec = importlib.util.spec_from_file_location("hdzz_app_snapshot_dependency", app_dir / "app.py")
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            log_dir = runtime / "logs"
+            log_dir.mkdir()
+            pid_file = runtime / "odds_snapshot_watch.pid.json"
+            with patch.object(module, "ROOT", runtime), patch.object(
+                module, "LOG_DIR", log_dir
+            ), patch.object(module, "SNAPSHOT_WATCH_PID_FILE", pid_file), patch.object(
+                module, "ensure_dirs", return_value=None
+            ), patch.object(module, "apply_playwright_browsers_path"), patch.object(
+                module, "_alive_snapshot_watch_pids", side_effect=[[], []]
+            ), patch.object(module, "_alive_global_worker_pids", return_value=[]), patch.object(
+                module, "build_worker_process_command", return_value=["python3", "odds_snapshot_watch.py"]
+            ), patch.object(module, "is_pid_running", return_value=True), patch.object(
+                module.subprocess, "Popen", return_value=_FakeProc(42001)
+            ):
+                rc = module.start_snapshot_watch()
+
+            payload = json.loads(pid_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["pids"], [42001])
 
     def test_full_launcher_records_snapshot_worker_dedicated_pid(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -160,6 +195,20 @@ class TestOddsSnapshotWorkerBootstrap(unittest.TestCase):
         self.assertTrue(running)
         self.assertEqual(pid, 40001)
         self.assertEqual(payload["pids"], [40001])
+
+    def test_webui_snapshot_deadline_covers_two_phase_fetch(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        app_dir = root / "app"
+        src_dir = root / "src"
+        for path in (app_dir, src_dir):
+            if str(path) not in sys.path:
+                sys.path.insert(0, str(path))
+        from hdzz.api.webui import server
+
+        # Context resolution (2s) and game_more retrieval (2.5s) are
+        # sequential; the launcher must leave scheduling margin for both.
+        deadline_s = float(server.DEFAULT_SNAPSHOT_MARKET_DEADLINE_MS) / 1000.0
+        self.assertGreaterEqual(deadline_s, 5.5)
 
     def test_stop_lifecycle_merges_follow_and_snapshot_dedicated_pids(self) -> None:
         root = Path(__file__).resolve().parents[1]

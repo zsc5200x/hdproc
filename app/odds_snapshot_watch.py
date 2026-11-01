@@ -26,6 +26,7 @@ from hdzz.core.follower.snapshot_metrics import (  # noqa: E402
     record_snapshot_publish_event,
     record_snapshot_watch_event,
 )
+from hdzz.common.route_traffic_gate import configure_route_traffic_gate  # noqa: E402
 
 
 _RESOLVED_CACHE: Dict[Tuple[str, str, str], Tuple[float, Dict[str, Any]]] = {}
@@ -1650,6 +1651,7 @@ def main() -> int:
     args = parser.parse_args()
     data_dir = Path(args.data_dir)
     orders_dir = Path(args.orders_dir)
+    configure_route_traffic_gate(data_dir)
     instance_lock = SingleInstanceFileLock(data_dir / ".odds_snapshot_watch.lock")
     if not instance_lock.acquire():
         print("odds_snapshot_watch already running for this data directory", flush=True)

@@ -771,7 +771,7 @@ class TestMemberKeeperStability(unittest.TestCase):
         final_patch = patch_member_mock.call_args_list[-1][0][2]
         self.assertEqual(final_patch.get("status"), "online")
 
-    def test_adspower_transient_request_uses_short_cooldown(self) -> None:
+    def test_adspower_transient_request_does_not_create_cooldown(self) -> None:
         from hdzz.core.member import keeper
 
         member = keeper.ensure_member_defaults(
@@ -811,7 +811,7 @@ class TestMemberKeeperStability(unittest.TestCase):
         final_patch = patch_member_mock.call_args_list[-1][0][2]
         self.assertEqual(final_patch.get("status"), "online")
         cooldown_until = float(final_patch.get("request_cooldown_until") or 0.0)
-        self.assertLessEqual(cooldown_until, 1003.1)
+        self.assertEqual(cooldown_until, 0.0)
 
     def test_adspower_online_member_does_not_force_sync_when_session_valid(self) -> None:
         from hdzz.core.member import keeper

@@ -31,6 +31,25 @@ def _find_text_ci(node: ET.Element, tag: str) -> str:
     return ""
 
 
+def _find_text_ci_allow_zero(node: ET.Element, tag: str) -> str:
+    """Case-insensitive tag lookup for values where literal zero is valid."""
+
+    k = str(tag or "").strip()
+    if not k:
+        return ""
+    for kk in (k, k.upper(), k.lower()):
+        try:
+            value = node.findtext(kk)  # type: ignore[arg-type]
+        except Exception:
+            value = None
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text != "":
+            return text
+    return ""
+
+
 def _parse_split_line_avg(text: Any) -> float:
     """
     盘口线可能形如：
@@ -147,12 +166,16 @@ def match_handicap_from_game_more_parsed(
             ratio_txt = ""
             used_ratio_tag = ""
             for rt in _handicap_ratio_tags(wt_up):
-                txt = _find_text_ci(gm_game, rt)
-                if txt:
+                # Handicap 0 is a real line (draw-no-bet). Generic field
+                # lookup rejects literal "0" because that is correct for
+                # odds, but applying that rule to ratio_* loses zero lines,
+                # especially when they move from the master to master=N.
+                txt = _find_text_ci_allow_zero(gm_game, rt)
+                if txt != "":
                     ratio_txt = txt
                     used_ratio_tag = rt
                     break
-            if not ratio_txt:
+            if ratio_txt == "":
                 continue
 
             ratio_abs = abs(_parse_split_line_avg(ratio_txt))
@@ -336,4 +359,3 @@ def match_total_from_game_more_parsed(
                 "matched_ior_tag": used_ior_tag,
             }
     return None
-

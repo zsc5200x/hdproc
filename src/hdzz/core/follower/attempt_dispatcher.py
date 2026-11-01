@@ -31,6 +31,7 @@ class AttemptDispatcher:
         member_id: str,
         fn: Callable[..., Any],
         *args: Any,
+        member_parallel_limit: int = 1,
         **kwargs: Any,
     ) -> Optional[Future]:
         job_key = str(key or "").strip()
@@ -38,10 +39,13 @@ class AttemptDispatcher:
         if not (job_key and mid):
             return None
 
+        per_member_limit = max(1, int(member_parallel_limit or 1))
         with self._lock:
             if job_key in self._keys or self._busy_members.get(mid, 0) >= self.per_member_limit:
                 return None
             if len(self._active) >= self.max_workers:
+                return None
+            if int(self._member_active_counts.get(mid, 0)) >= per_member_limit:
                 return None
             self._keys.add(job_key)
             self._busy_members[mid] = self._busy_members.get(mid, 0) + 1
@@ -90,13 +94,16 @@ class AttemptDispatcher:
     def busy_member_ids(self) -> set:
         """Return members with at least one active network attempt.
 
-        The scheduler uses this snapshot before picking a member.  Previously it
-        picked a busy member first and only discovered the conflict in
-        ``submit()``, which made the caller fall through to the synchronous
-        execution path and block the whole queue.
+        Members below the limit remain eligible, which lets separate fresh HTTP
+        sessions use the same logged-in account concurrently.
         """
+        limit = max(1, int(member_parallel_limit or 1))
         with self._lock:
-            return set(self._busy_members)
+            return {
+                member_id
+                for member_id, count in self._member_active_counts.items()
+                if int(count) >= limit
+            }
 
     def saturated_member_ids(self) -> set:
         """Return members that cannot accept another attempt."""

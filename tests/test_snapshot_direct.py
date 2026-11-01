@@ -866,6 +866,53 @@ class SnapshotDirectTest(unittest.TestCase):
         self.assertTrue(session.closed)
         self.assertEqual(result["bet_context_raw_response"], "<serverresponse><code>501</code><gid>wrong-gid</gid></serverresponse>")
 
+    def test_diagnostic_context_502_records_issue_without_ft_bet(self):
+        from hdzz.core.follower import engine
+        from hdzz.core.follower.snapshot_direct import CONTEXT_RETRYABLE, BetContextResult
+
+        class FakeSession:
+            def __init__(self):
+                self.cookies = []
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        session = FakeSession()
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self._store_handicap(data_dir / "odds_snapshot_cache.json")
+            with patch.object(engine, "make_member_session", return_value=session), \
+                patch.object(engine, "BetContext") as context_cls, \
+                patch.object(engine, "_record_member_network_issue") as record_issue, \
+                patch.object(engine, "MemberExecutor") as executor:
+                context_cls.prepare.return_value = BetContextResult(
+                    request={"p": "FT_order_view"},
+                    response={"http_status": 502},
+                    raw_response="Blocked",
+                    http_status=502,
+                    elapsed_ms=2,
+                    error=CONTEXT_RETRYABLE,
+                    matches_market_row=False,
+                )
+                result = engine.place_bet(
+                    data_dir=data_dir,
+                    settings={"snapshot_max_age_ms": 5000, "bet_context_mode": "diagnostic_order_view"},
+                    member=self._member(), order=self._order(), stake=50,
+                    timeout_s=2, debug=False,
+                )
+
+        executor.assert_not_called()
+        record_issue.assert_called_once_with(
+            data_dir=data_dir,
+            member_id="member-1",
+            error_class="UPSTREAM_502",
+        )
+        self.assertEqual(result["snapshot_direct_status"], CONTEXT_RETRYABLE)
+        self.assertEqual(result["real_submission"], "none")
+        self.assertEqual(result["network_error_class"], "UPSTREAM_502")
+        self.assertTrue(session.closed)
+
     def test_diagnostic_double_login_context_never_reaches_ft_bet(self):
         from hdzz.core.follower import engine
         from hdzz.core.follower.snapshot_direct import BetContextResult
@@ -1215,7 +1262,7 @@ class SnapshotDirectTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["result_status"], UNKNOWN_RESULT)
         self.assertTrue(result["reconcile_pending"])
-        self.assertEqual(result["network_health"], "cooldown")
+        self.assertEqual(result["network_health"], "degraded")
         self.assertEqual(result["network_error_class"], "READ_TIMEOUT")
 
     def test_reconcile_only_path_does_not_construct_member_executor(self):

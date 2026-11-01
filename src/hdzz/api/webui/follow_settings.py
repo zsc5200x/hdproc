@@ -124,7 +124,10 @@ FOLLOW_SETTINGS_DEFAULTS: Dict[str, Any] = {
     "unknown_result_reconcile_max_attempts": 5,
     "market_reject_max_attempts": 3,
     "market_reject_retry_delay_seconds": 0.5,
-    "member_error_cooldown_seconds": 30,
+    "member_error_cooldown_seconds": 0,
+    "queue_max_per_tick": 8,
+    "parallel_attempts": 8,
+    "per_member_parallel_attempts": 2,
     # 会员角色
     "allow_quote_members": False,
     # 盘口策略（让球/大小球分开控制禁跟与比例）
@@ -225,10 +228,19 @@ def ensure_follow_settings_defaults(doc: Dict[str, Any]) -> Dict[str, Any]:
         )
     except Exception:
         out["market_reject_retry_delay_seconds"] = 0.5
+    out["member_error_cooldown_seconds"] = 0
     try:
-        out["member_error_cooldown_seconds"] = max(0, min(600, int(out.get("member_error_cooldown_seconds") or 30)))
+        out["queue_max_per_tick"] = max(1, min(50, int(out.get("queue_max_per_tick") or 8)))
     except Exception:
-        out["member_error_cooldown_seconds"] = 30
+        out["queue_max_per_tick"] = 8
+    try:
+        out["parallel_attempts"] = max(1, min(50, int(out.get("parallel_attempts") or 8)))
+    except Exception:
+        out["parallel_attempts"] = 8
+    try:
+        out["per_member_parallel_attempts"] = max(1, min(8, int(out.get("per_member_parallel_attempts") or 2)))
+    except Exception:
+        out["per_member_parallel_attempts"] = 2
     out["market_rules"] = _sanitize_market_rules(out.get("market_rules"))
     out["reverse_rules"] = _sanitize_reverse_rules(out.get("reverse_rules"))
     return out
@@ -336,11 +348,18 @@ def merge_follow_settings(existing: Dict[str, Any], incoming: Dict[str, Any]) ->
             )
         except Exception:
             out["market_reject_retry_delay_seconds"] = 0.5
-    if "member_error_cooldown_seconds" in incoming:
+    out["member_error_cooldown_seconds"] = 0
+    for key, default, upper in (
+        ("queue_max_per_tick", 8, 50),
+        ("parallel_attempts", 8, 50),
+        ("per_member_parallel_attempts", 2, 8),
+    ):
+        if key not in incoming:
+            continue
         try:
-            out["member_error_cooldown_seconds"] = max(0, min(600, int(incoming.get("member_error_cooldown_seconds") or 0)))
+            out[key] = max(1, min(upper, int(incoming.get(key) or default)))
         except Exception:
-            out["member_error_cooldown_seconds"] = 30
+            out[key] = default
 
     # quote 会员
     if "allow_quote_members" in incoming:

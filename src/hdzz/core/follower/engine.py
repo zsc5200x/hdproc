@@ -40,6 +40,7 @@ from member_arsenal_watch import (
 from hdzz.common.http import HardTimeout, hard_timeout as _hard_timeout
 from hdzz.common.http import requests_timeout as _requests_timeout
 from hdzz.common.parse import parse_cookie_header, parse_xml_flat, parse_xml_kv
+from hdzz.common.route_traffic_gate import configure_route_traffic_gate
 from hdzz.core.order_display import parse_bet_display
 from .models import BetParams, RetryJob
 from .snapshot_direct import (
@@ -146,7 +147,6 @@ def now_cn() -> str:
 _TG_FAIL_LAST: Dict[str, float] = {}
 _ENGINE_LOCK_FH = None
 _ENGINE_GLOBAL_LOCK_FH = None
-_MEMBER_COOLDOWN_UNTIL: Dict[str, float] = {}
 _MARKET_RETRY_ERRORS = frozenset({
     "1X001",
     "1X003",
@@ -164,7 +164,6 @@ _MARKET_RETRY_ERRORS = frozenset({
 STAKE_EXCEEDS_MAX_ERR = "STAKE_EXCEEDS_MAX"
 _TG_ORDER_CB_PREFIX = "odr"
 _JSON_FILE_CACHE = JsonFileCache()
-NETWORK_COOLDOWN_SECONDS = 30
 _TG_ORDER_BUTTON_SPECS: Dict[str, Dict[str, str]] = {
     "res": {"text": "跟单结果", "style": "primary"},
     "log": {"text": "跟单日志", "style": "primary"},
@@ -4368,7 +4367,7 @@ def load_settings(data_dir: Path) -> Dict[str, Any]:
             # 上限防止通用 retry_max_attempts=0 时无限提交。
             "market_reject_max_attempts": 3,
             "market_reject_retry_delay_seconds": 0.5,
-            "member_error_cooldown_seconds": 30,
+            "member_error_cooldown_seconds": 0,
             # 会员登录失效（1X014）冷却；设为 0 表示不做额外冷却（失效会话仍会标记离线并重登）。
             "member_cooldown_1X014_seconds": 0,
             # 目标盘口线暂时找不到（常见于变盘瞬间/主盘↔附加盘切换）：短暂探测窗口
@@ -4983,19 +4982,6 @@ def _clear_unknown_result_state(job: RetryJob) -> None:
         job.order.pop(key, None)
 
 
-def _flag_enabled(value: Any, default: bool = True) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return bool(default)
-    text = str(value).strip().lower()
-    if text in {"0", "false", "no", "off"}:
-        return False
-    if text in {"1", "true", "yes", "on"}:
-        return True
-    return bool(default)
-
-
 def load_arsenal(data_dir: Path) -> Dict[str, Any]:
     doc = _JSON_FILE_CACHE.read_dict(data_dir / "arsenal.json", {"members": []})
     doc["request_cooldown_enabled"] = False
@@ -5011,7 +4997,7 @@ def _load_current_members(data_dir: Path) -> List[Dict[str, Any]]:
     """Load a fresh member snapshot for the final acquire/dispatch gate.
 
     The scheduler keeps a per-tick snapshot for cheap candidate probing, but
-    cooldown/status patches may be written by another worker between probing
+    status/session patches may be written by another worker between probing
     and dispatch.  This helper deliberately bypasses that stale in-memory
     list while retaining the normal member-default normalization.
     """
@@ -5074,13 +5060,28 @@ def _network_error_class(result: Dict[str, Any]) -> str:
     return ""
 
 
-def _mark_member_network_cooldown(*, data_dir: Path, member_id: str, error_class: str) -> None:
-    """Cool a member's route after an ambiguous transport result.
+def _context_network_error_class(*, http_status: Any = None, error: Any = "") -> str:
+    """Classify a pre-submit FT_order_view transport failure."""
+    try:
+        status = int(http_status or 0)
+    except Exception:
+        status = 0
+    message = str(error or "").strip().lower()
+    if status == 502 or "bad gateway" in message:
+        return "UPSTREAM_502"
+    if status in {503, 504}:
+        return f"UPSTREAM_{status}"
+    if "readtimeout" in message or "read timed out" in message:
+        return "READ_TIMEOUT"
+    if "ssl" in message or "ssl eof" in message:
+        return "SSL_EOF"
+    if any(token in message for token in ("connectionerror", "proxyerror", "connecttimeout", "chunkedencoding", "connection aborted", "connection reset", "remote end closed")):
+        return "CONNECTION_ERROR"
+    return ""
 
-    This never changes status/session fields and never schedules another FT_bet
-    for the current UNKNOWN_RESULT job. It only keeps unrelated new jobs from
-    immediately selecting the same unhealthy route.
-    """
+
+def _record_member_network_issue(*, data_dir: Path, member_id: str, error_class: str) -> None:
+    """Record a transport error without making the member unavailable."""
 
     if not member_id or not error_class:
         return
@@ -5229,7 +5230,7 @@ def pick_random_member_for_stake(
 ) -> Optional[Dict[str, Any]]:
     # 规则：
     # 1) 先做资格过滤（余额、映射、avoid_ids）
-    # 2) 只允许 ONLINE + Session 完整 + 无网络冷却的健康会员
+    # 2) 只允许 ONLINE + Session 完整的会员；网络错误不会触发时间冷却
     # 3) IDLE 由 AttemptDispatcher 的会员租约保证
     # 4) 在同一资格池内随机选择
     stake = float(stake or 0)
@@ -5639,7 +5640,7 @@ def _snapshot_status_message(status: str, message: str = "") -> str:
         MEMBER_IORATIO_INVALID: "执行会员水位与目标盘口行不一致，禁止提交。",
         BET_CONTEXT_MISMATCH: "FT_order_view 确认盘口已变化，正在等待目标盘口更新。",
         MARKET_CHANGED_DURING_CONTEXT: "FT_order_view 返回期间盘口已变化，正在等待最新盘口。",
-        CONTEXT_RETRYABLE: "FT_order_view 传输失败，正在快速更换会员重试。",
+        CONTEXT_RETRYABLE: "FT_order_view 传输失败，正在刷新会话后快速重试。",
     }
     base = messages.get(str(status or "").strip(), "盘口快照暂不可用，正在重试。")
     detail = str(message or "").strip()
@@ -6320,10 +6321,10 @@ def _place_bet_source_order_direct(
         }
 
         network_error_class = _network_error_class(result)
-        result["network_health"] = "cooldown" if network_error_class else "healthy"
+        result["network_health"] = "degraded" if network_error_class else "healthy"
         result["network_error_class"] = network_error_class
         if execution.status == UNKNOWN_RESULT and network_error_class:
-            _mark_member_network_cooldown(
+            _record_member_network_issue(
                 data_dir=data_dir,
                 member_id=str(current_member.get("id") or ""),
                 error_class=network_error_class,
@@ -6783,6 +6784,18 @@ def _place_bet_snapshot_direct(
                         if context.error == CONTEXT_RETRYABLE
                         else "BET_CONTEXT_FAILED"
                     )
+                    context_network_error = _context_network_error_class(
+                        http_status=context.http_status,
+                        error=context.error,
+                    )
+                    if status == CONTEXT_RETRYABLE and context_network_error:
+                        # FT_order_view 尚未提交下注；记录错误后立即关闭本次
+                        # Session，调度器会用新的 Session 快速重试。
+                        _record_member_network_issue(
+                            data_dir=Path(data_dir),
+                            member_id=str(member.get("id") or ""),
+                            error_class=context_network_error,
+                        )
                     waiting = _snapshot_waiting_result(
                         status=status,
                         message=(
@@ -6796,6 +6809,9 @@ def _place_bet_snapshot_direct(
                         intent=intent,
                     )
                     waiting.update(context_meta)
+                    if context_network_error:
+                        waiting["network_health"] = "degraded"
+                        waiting["network_error_class"] = context_network_error
                     waiting.update(execution_session_meta)
                     close_member_session(execution_session)
                     execution_session = None
@@ -6818,6 +6834,16 @@ def _place_bet_snapshot_direct(
                         "timeout",
                     )
                 )
+                context_network_error = _context_network_error_class(
+                    http_status=context_meta.get("bet_context_http_status"),
+                    error=context_meta.get("bet_context_error"),
+                )
+                if context_retryable and context_network_error:
+                    _record_member_network_issue(
+                        data_dir=Path(data_dir),
+                        member_id=str(member.get("id") or ""),
+                        error_class=context_network_error,
+                    )
                 waiting = _snapshot_waiting_result(
                     status=CONTEXT_RETRYABLE if context_retryable else "BET_CONTEXT_FAILED",
                     message=f"BetContext.prepare 失败：{context_meta['bet_context_error']}",
@@ -6827,6 +6853,9 @@ def _place_bet_snapshot_direct(
                     intent=intent,
                 )
                 waiting.update(context_meta)
+                if context_network_error:
+                    waiting["network_health"] = "degraded"
+                    waiting["network_error_class"] = context_network_error
                 waiting.update(execution_session_meta)
                 close_member_session(execution_session)
                 execution_session = None
@@ -7087,12 +7116,12 @@ def _place_bet_snapshot_direct(
         result["session_ready"] = True
         result["session_ready_reason"] = "SESSION_READY"
         network_error_class = _network_error_class(result)
-        result["network_health"] = "cooldown" if network_error_class else "healthy"
+        result["network_health"] = "degraded" if network_error_class else "healthy"
         result["network_error_class"] = network_error_class
         if execution_session_meta:
             result.update(execution_session_meta)
         if execution.status == UNKNOWN_RESULT and network_error_class:
-            _mark_member_network_cooldown(
+            _record_member_network_issue(
                 data_dir=data_dir,
                 member_id=str(member.get("id") or ""),
                 error_class=network_error_class,
@@ -7703,6 +7732,7 @@ def main() -> int:
     orders_dir = Path(args.orders_dir)
     data_dir = Path(args.data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
+    configure_route_traffic_gate(data_dir)
 
     state_path = data_dir / "follow_state.json"
     results_path = data_dir / "follow_results.jsonl"
@@ -7729,6 +7759,10 @@ def main() -> int:
                 jobs.pop(key, None)
 
     print(f"[{now_iso()}] follow_engine 启动 orders_dir={orders_dir} data_dir={data_dir}", flush=True)
+    print(
+        f"[{now_iso()}] 线路闸门已启用 read并发=2 context并发=2 FT_bet最小间隔=500ms 502退避=1000ms",
+        flush=True,
+    )
     print(
         f"[{now_iso()}] follow_state 加载完成 offsets={len(offsets)} done={len(done)} pending={len(pending_orders)} jobs={len(jobs)}",
         flush=True,
@@ -7883,7 +7917,10 @@ def main() -> int:
         result["runnable_queue_wait_ms"] = round(max(0.0, queue_entered_at - runnable_at) * 1000.0, 3) if runnable_at and queue_entered_at else None
         result["dispatcher_wait_ms"] = round(max(0.0, dispatcher_selected_at - queue_entered_at) * 1000.0, 3) if dispatcher_selected_at and queue_entered_at else None
         result["member_acquire_ms"] = round(max(0.0, member_acquired_at - dispatcher_selected_at) * 1000.0, 3) if member_acquired_at and dispatcher_selected_at else None
-        member_released_at = _to_float(meta.get("member_released_at"), 0.0)
+        # ``_to_float`` already supplies a zero fallback.  Keep this telemetry
+        # path tolerant of missing release timestamps without passing a
+        # second positional default to the helper.
+        member_released_at = _to_float(meta.get("member_released_at"))
         if member_released_at > 0.0:
             result["member_released_at"] = member_released_at
             if ft_finished := _to_float(result.get("ft_bet_finished_at"), 0.0):
@@ -8133,12 +8170,6 @@ def main() -> int:
         job.attempts = attempt_no
         job.last_message = str(result.get("message") or "")
         job.last_err = extract_err_from_result(result)
-        if job.last_err == MEMBER_ERROR:
-            try:
-                cooldown_s = float(_setting_or_default(settings, "member_error_cooldown_seconds", 30))
-                _cooldown_member(str(job.member_id or ""), max(0.0, min(600.0, cooldown_s)))
-            except Exception:
-                pass
         if _schedule_explicit_market_rejection_retry(job, result, now=float(now_ts())):
             _append_trace_jsonl(
                 trace_path,
@@ -8583,11 +8614,11 @@ def main() -> int:
         wait_line_not_found_max = float(settings.get("wait_line_not_found_max_seconds") or 30)
         market_reject_max_attempts = int(_setting_or_default(settings, "market_reject_max_attempts", 3))
         market_reject_retry_delay = float(_setting_or_default(settings, "market_reject_retry_delay_seconds", 0.5))
-        member_cooldown_1x014 = float(_setting_or_default(settings, "member_cooldown_1X014_seconds", 0))
         retry_max_attempts_on_1x001 = int(_setting_or_default(settings, "retry_max_attempts_on_1X001", 5))
         retry_max_seconds_on_1x001 = float(_setting_or_default(settings, "retry_max_seconds_on_1X001", 0))
         queue_max_per_tick = int(settings.get("queue_max_per_tick") or 3)
         parallel_attempts = int(settings.get("parallel_attempts") or 1)
+        per_member_parallel_attempts = int(settings.get("per_member_parallel_attempts") or 1)
         allow_line_change = bool(settings.get("allow_line_change") or False)
         split_count_cfg = int(settings.get("split_count") or 1)
         split_delay_seconds_cfg = float(settings.get("split_delay_seconds") or 0)
@@ -8603,11 +8634,11 @@ def main() -> int:
         wait_line_not_found_max = max(0.0, min(600.0, float(wait_line_not_found_max)))
         market_reject_max_attempts = max(1, min(20, int(market_reject_max_attempts)))
         market_reject_retry_delay = max(0.0, min(30.0, float(market_reject_retry_delay)))
-        member_cooldown_1x014 = max(0.0, min(600.0, float(member_cooldown_1x014)))
         retry_max_attempts_on_1x001 = max(0, min(5000, retry_max_attempts_on_1x001))
         retry_max_seconds_on_1x001 = max(0.0, float(retry_max_seconds_on_1x001))
         split_count_cfg = max(1, min(50, int(split_count_cfg)))
         parallel_attempts = effective_parallel_attempts(parallel_attempts, split_count_cfg)
+        per_member_parallel_attempts = max(1, min(8, int(per_member_parallel_attempts)))
         queue_max_per_tick = effective_parallel_attempts(queue_max_per_tick, split_count_cfg)
         split_delay_seconds_cfg = max(0.0, min(600.0, float(split_delay_seconds_cfg)))
         split_min_stake_cfg = max(1.0, min(100000.0, float(split_min_stake_cfg)))
@@ -9219,14 +9250,6 @@ def main() -> int:
                 avoid.add(str(job.member_id))
             for mid in (job.used_member_ids or []):
                 avoid.add(str(mid))
-            # 避免反复撞到刚刚 1X014/doubleLogin 的会员（短时间内大概率仍失效）
-            try:
-                for mm in members:
-                    mid2 = str((mm or {}).get("id") or "").strip()
-                    if mid2 and _is_member_in_cooldown(mid2):
-                        avoid.add(mid2)
-            except Exception:
-                pass
             if not m:
                 m = pick_random_member_for_stake(
                     members,
@@ -9237,17 +9260,12 @@ def main() -> int:
                     allow_quote_members=bool(allow_quote_members),
                 )
             # 分单场景优先不重复会员；如果实在找不到可用会员，则允许复用已用过的会员继续分单
-            if (not m) and (job.used_member_ids or []):
-                avoid2 = set(used_member_ids) | set(busy_member_ids)
+            if (not m) and ((job.used_member_ids or []) or used_member_ids):
+                # 第一轮优先把任务铺到不同会员；没有新会员时放宽本轮
+                # 去重，只保留真正达到并发上限的会员。
+                avoid2 = set(busy_member_ids)
                 if job.member_id and (not in_pinned_wait) and (not in_member_quote_wait):
                     avoid2.add(str(job.member_id))
-                try:
-                    for mm in members:
-                        mid2 = str((mm or {}).get("id") or "").strip()
-                        if mid2 and _is_member_in_cooldown(mid2):
-                            avoid2.add(mid2)
-                except Exception:
-                    pass
                 m = pick_random_member_for_stake(
                     members,
                     float(cur_stake),
@@ -9276,10 +9294,10 @@ def main() -> int:
                     m = None
 
             # 最终 dispatch gate：候选池是在本轮开始时读取的，而 member
-            # watcher/上一笔 FT_bet 可能刚刚把会员写入 cooldown、离线或
+            # watcher/上一笔 FT_bet 可能刚刚把会员写成离线或
             # busy。此处必须重新读取持久化快照，禁止沿用旧 member dict。
             # UNKNOWN_RESULT 是固定原会员核验，允许使用原会员的最新会话
-            # 信息，但绝不会因为 cooldown 而重新 FT_bet。
+            # 信息，但绝不会重新 FT_bet。
             latest_members = _load_current_members(data_dir)
             members = latest_members
             selected_id = str((m or {}).get("id") or "").strip()
@@ -9308,9 +9326,8 @@ def main() -> int:
                 if fresh_selected_ok:
                     m = fresh_selected
                 else:
-                    # 候选在 acquire 与 dispatch 之间进入 cooldown 或
-                    # 变为不可用时，从同一份最新快照重选。不能放宽
-                    # cooldown 过滤，也不能退回旧 members 列表。
+                    # 候选在 acquire 与 dispatch 之间变为不可用时，从
+                    # 同一份最新快照重选，不能退回旧 members 列表。
                     fresh_avoid = set(avoid) | set(busy_member_ids)
                     if selected_id:
                         fresh_avoid.add(selected_id)
@@ -9323,8 +9340,7 @@ def main() -> int:
                         allow_quote_members=bool(allow_quote_members),
                     )
                     if not m and job.member_id:
-                        # 只有当原会员在最新快照中仍健康时才允许
-                        # 重试复用；cooldown 会员绝不能走 fallback。
+                        # 只有当原会员在最新快照中仍可用时才允许重试复用。
                         fresh_previous = latest_by_id.get(str(job.member_id or "").strip())
                         if fresh_previous and _member_eligible_for_stake(
                             fresh_previous,
@@ -9336,7 +9352,7 @@ def main() -> int:
                             m = fresh_previous
 
             # 再做一次极窄的持久化状态检查，覆盖 member watcher 恰好在
-            # 上一份快照之后写入 cooldown 的竞态。若无健康替代会员，
+            # 上一份快照之后更新状态的竞态。若无健康替代会员，
             # 明确进入 MEMBER_WAIT，绝不把旧候选送入 Context。
             if m and not in_pinned_wait:
                 dispatch_members = _load_current_members(data_dir)
@@ -9376,7 +9392,7 @@ def main() -> int:
                                 "orderId": job.order_id,
                                 "rejected_member": rejected_id,
                                 "replacement_member": str(m.get("id") or ""),
-                                "reason": "cooldown_or_unavailable_before_dispatch",
+                                "reason": "unavailable_before_dispatch",
                             },
                         )
             if not m:
@@ -9468,6 +9484,7 @@ def main() -> int:
                     job.key,
                     str(m2.get("id") or ""),
                     _run_parallel_place_bet,
+                    member_parallel_limit=per_member_parallel_attempts,
                     data_dir=data_dir,
                     settings=settings_async,
                     member=m2,
@@ -9814,12 +9831,6 @@ def main() -> int:
                 job.job_marked_runnable_at = retry_now
                 job.member_id = str(result.get("member_id") or result.get("execution_member") or job.member_id or "")
                 context_retry_scheduled = True
-            if err_now == MEMBER_ERROR:
-                try:
-                    cooldown_s = float(_setting_or_default(settings, "member_error_cooldown_seconds", 30))
-                    _cooldown_member(str(job.member_id or ""), max(0.0, min(600.0, cooldown_s)))
-                except Exception:
-                    pass
             if err_now != "1X001" and prev_err == "1X001":
                 job.market_closed_wait_started_at = 0.0
                 job.market_closed_wait_deadline_at = 0.0
