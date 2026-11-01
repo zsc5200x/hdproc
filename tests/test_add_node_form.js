@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   createDefaultAddNodeForm,
+  buildBridgePayload,
   buildAddNodeSubmitRequest,
 } = require('../app/webui/add_node_form.js');
 
@@ -120,4 +121,32 @@ test('builds login3 account request with order-source downlines', () => {
     relogin_min_interval_seconds: 18,
     login2_watch_downlines: ['9025869', 'zk1115'],
   });
+});
+
+test('builds local bridge request in bridge mode', () => {
+  const form = createDefaultAddNodeForm();
+  form.mode = 'bridge';
+  form.bridge.enabled = true;
+  form.bridge.target = 'ps3838';
+  form.bridge.token = 'abc123';
+  form.bridge.allow_remote = false;
+
+  const req = buildAddNodeSubmitRequest(form);
+
+  assert.equal(req.endpoint, '/api/local-bridge-config');
+  assert.deepEqual(req.payload, {
+    local_bridge_enabled: true,
+    local_bridge_configured: true,
+    local_bridge_target: 'ps3838',
+    local_bridge_token: 'abc123',
+    local_bridge_allow_remote: false,
+  });
+});
+
+test('rejects unsafe local bridge target names', () => {
+  const form = createDefaultAddNodeForm();
+  form.mode = 'bridge';
+  form.bridge.target = '../orders';
+
+  assert.throws(() => buildBridgePayload(form.bridge), /订单目标/);
 });

@@ -128,3 +128,53 @@ test('counts online trading nodes including enabled remote signal source', () =>
     label: '3 / 3',
   });
 });
+
+test('adds a local bridge node and filters its orders separately from remote signals', () => {
+  const items = buildSidebarItems({
+    accounts: [],
+    statuses: {},
+    signalPullConfig: {
+      config: {
+        signal_pull_enabled: true,
+        signal_pull_url: 'http://168.93.214.95:8021/signals/json',
+      },
+    },
+    localBridgeConfig: {
+      config: {
+        local_bridge_configured: true,
+        local_bridge_enabled: true,
+        local_bridge_target: 'ps3838',
+      },
+      status: { online: true, last_received_at: 1710000999 },
+    },
+    orders: [
+      { target: 'ps3838', ts: 1710000100, _signal_origin: 'remote_signal_pull' },
+      { target: 'ps3838', ts: 1710000200, _signal_origin: 'local_bridge' },
+      { target: 'ps3838', ts: 1710000300, _signal_origin: 'local_bridge' },
+    ],
+  });
+
+  assert.equal(items.length, 2);
+  assert.deepEqual(items[1], {
+    key: 'local-bridge:ps3838',
+    kind: 'signal-source',
+    isLocalBridge: true,
+    filterTarget: '__local_bridge__',
+    canDelete: true,
+    deleteEndpoint: '/api/local-bridge-config/delete',
+    name: '本地桥接',
+    badge: '本地桥接',
+    statusClass: 'bg-cyan-400 animate-pulse',
+    statusText: '已接入',
+    metaText: 'ps3838 · 2 条对手盘',
+    latestTs: 1710000999,
+  });
+
+  const status = computeTradingNodeStatus({
+    accounts: [{ name: 'acc-01' }],
+    statuses: { 'acc-01': { status: 'online' } },
+    signalPullConfig: { signal_pull_enabled: true, signal_pull_url: 'http://x/signals/json' },
+    localBridgeConfig: { local_bridge_configured: true, local_bridge_enabled: true },
+  });
+  assert.deepEqual(status, { online: 3, total: 3, label: '3 / 3' });
+});

@@ -15,6 +15,7 @@ const state = {
   members: [],
   followSettings: null,
   signalPullConfig: {},
+  localBridgeConfig: {},
   tg: null,
   selectedTarget: "",
   search: "",
@@ -86,6 +87,7 @@ const state = {
 if (typeof window !== "undefined") window.state = state;
 
 const REMOTE_SIGNAL_FILTER_TARGET = "__remote_signal_pull__";
+const LOCAL_BRIDGE_FILTER_TARGET = "__local_bridge__";
 const MATCH_SEARCH_RETAINED_KEY = "hdproc.matchSearch.retained.v1";
 const MATCH_SEARCH_MODES = ["live", "today", "early"];
 const MATCH_ODDS_REFRESH_MS = 2000;
@@ -429,6 +431,8 @@ function baseFilterOrders() {
   return state.orders.filter((o) => {
     if (state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET) {
       if (!isRemoteSignalOrder(o)) return false;
+    } else if (state.selectedTarget === LOCAL_BRIDGE_FILTER_TARGET) {
+      if (!isLocalBridgeOrder(o)) return false;
     } else if (state.selectedTarget && (o.target || "") !== state.selectedTarget) return false;
     if (!includesText(o, state.search)) return false;
     return true;
@@ -443,8 +447,13 @@ function filterOrders() {
   return rows;
 }
 
+function isLocalBridgeOrder(row) {
+  return !!(row && String(row._signal_origin || "").trim() === "local_bridge");
+}
+
 function isRemoteSignalOrder(row) {
-  return !!(row && (row._skip_signal_forward === true || String(row._signal_origin || "").trim() === "remote_signal_pull"));
+  if (!row || isLocalBridgeOrder(row)) return false;
+  return !!(row._skip_signal_forward === true || String(row._signal_origin || "").trim() === "remote_signal_pull");
 }
 
 function getSignalSourceSidebarItems() {
@@ -454,6 +463,7 @@ function getSignalSourceSidebarItems() {
     accounts: [],
     statuses: state.statuses,
     signalPullConfig: state.signalPullConfig,
+    localBridgeConfig: state.localBridgeConfig,
     orders: state.orders,
   }).filter((item) => item && item.kind === "signal-source");
 }
@@ -465,6 +475,7 @@ function computeTradingNodeStatus() {
       accounts: state.accounts,
       statuses: state.statuses,
       signalPullConfig: state.signalPullConfig,
+      localBridgeConfig: state.localBridgeConfig,
     });
   }
   const onlineAccounts = state.accounts.filter((a) => {
@@ -1034,7 +1045,7 @@ function renderAccountsSidebar() {
     const filterTarget = item.filterTarget || REMOTE_SIGNAL_FILTER_TARGET;
     const div = document.createElement("div");
     const isActive = state.selectedTarget === filterTarget;
-    const isOnline = String(item.statusText || "") === "已接入";
+    const isOnline = String(item.statusText || "") === "已接入" || (item.isLocalBridge && !!state.localBridgeConfig?.local_bridge_enabled);
     const statusTitle = [item.statusText, item.metaText].filter(Boolean).join(" · ");
     div.className = "account-item signal-source-item" + (isActive ? " active" : "");
     div.innerHTML = `
@@ -1047,7 +1058,7 @@ function renderAccountsSidebar() {
       </div>
       ${item.canDelete ? `
       <div class="acct-actions" style="opacity:0; transition:0.15s">
-        <button class="acct-btn danger" data-action="delete-signal" title="删除远端交易节点">×</button>
+        <button class="acct-btn danger" data-action="delete-signal" title="${item.isLocalBridge ? "删除本地桥接" : "删除远端交易节点"}">×</button>
       </div>` : ""}
     `;
     div.addEventListener("mouseenter", () => {
@@ -1477,6 +1488,15 @@ function renderOrderDetailCards(model, order, group) {
       ["赔率", `@ ${model.oddsText}`],
     ],
   };
+  const bridge = o._local_bridge && typeof o._local_bridge === "object" ? o._local_bridge : null;
+  if (bridge) {
+    itemsByGroup["盘口信息"].push(
+      ["对手盘", bridge.crown_opponent || o.line || "-"],
+      ["对手水位", bridge.crown_odds || o.odds || "-"],
+      ["对手快照", bridge.crown_snapshot_at || "-"],
+      ["桥接来源", bridge.source || "ps3838-wss"],
+    );
+  }
   const items = itemsByGroup[group] || itemsByGroup["注单详情"];
   return items.map(([label, value]) => `
     <article class="order-detail-card">
@@ -2727,7 +2747,9 @@ function renderKpis(orders) {
   if ($("kpi-today-sub")) {
     $("kpi-today-sub").textContent = state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET
       ? "信号源: 远端交易节点"
-      : state.selectedTarget ? `账号: ${accountLabel(a)}` : "全部目标";
+      : state.selectedTarget === LOCAL_BRIDGE_FILTER_TARGET
+        ? "信号源: 本地桥接"
+        : state.selectedTarget ? `账号: ${accountLabel(a)}` : "全部目标";
   }
 }
 
@@ -2876,6 +2898,41 @@ if (typeof document.addEventListener === "function") {
     }
   });
 }
+function normalizeLocalBridgeConfig(data) {
+  const root = data && typeof data === "object" ? data : {};
+  const cfg = root.config && typeof root.config === "object" ? root.config : root;
+  return {
+    local_bridge_configured: !!cfg.local_bridge_configured,
+    local_bridge_enabled: !!cfg.local_bridge_enabled,
+    local_bridge_name: String(cfg.local_bridge_name || "本地桥接"),
+    local_bridge_target: String(cfg.local_bridge_target || ""),
+    local_bridge_token: String(cfg.local_bridge_token || ""),
+    local_bridge_allow_remote: !!cfg.local_bridge_allow_remote,
+    endpoint: String(root.endpoint || cfg.endpoint || ""),
+    status: (root.status && typeof root.status === "object" ? root.status : (cfg.status || {})),
+  };
+}
+
+function defaultLocalBridgeEndpoint() {
+  const origin = window.location && window.location.origin && window.location.origin !== "null"
+    ? window.location.origin
+    : "http://127.0.0.1:9999";
+  return `${origin}/api/local-signal/push`;
+}
+
+function applyLocalBridgeConfigToForm() {
+  if (!addNodeFormState) return;
+  const lb = normalizeLocalBridgeConfig(state.localBridgeConfig);
+  addNodeFormState.bridge = {
+    enabled: lb.local_bridge_configured ? lb.local_bridge_enabled : true,
+    target: lb.local_bridge_target || "ps3838",
+    token: lb.local_bridge_token || "",
+    allow_remote: lb.local_bridge_allow_remote,
+    endpoint: lb.endpoint || defaultLocalBridgeEndpoint(),
+    status: lb.status || {},
+  };
+}
+
 function openAddModal() {
   const helper = window.HDAddNodeForm;
   addNodeFormState = helper && typeof helper.createDefaultAddNodeForm === "function"
@@ -2885,10 +2942,20 @@ function openAddModal() {
         account: { base_url: "", username: "", password: "", login_tab: 3, relogin_min_interval_seconds: 5, security_code: "", monitor_members: [], monitor_downlines: [] },
         signal: { enabled: true, url: "", token: "", live_only: true, limit: 200, interval_seconds: 1 },
         ps3838: { base_url: "https://www.ps38ag.com", username: "", password: "", interval_seconds: 15, telegram_chat_id: "" },
+        bridge: { enabled: true, target: "ps3838", token: "", allow_remote: false, endpoint: "", status: {} },
       };
+  if (!addNodeFormState.bridge) {
+    addNodeFormState.bridge = { enabled: true, target: "ps3838", token: "", allow_remote: false, endpoint: "", status: {} };
+  }
+  applyLocalBridgeConfigToForm();
   renderAddNodeModal();
   const m = $("modal-add"); if (m) m.classList.add("show");
   if ($("add-base-url")) $("add-base-url").focus();
+  loadLocalBridgeConfig().then(() => {
+    if (!addNodeFormState || addNodeFormState.mode !== "bridge") return;
+    applyLocalBridgeConfigToForm();
+    renderAddNodeModal();
+  }).catch(() => {});
 }
 function closeAddModal() {
   const m = $("modal-add"); if (m) m.classList.remove("show");
@@ -2906,9 +2973,53 @@ function bindAddNodeModalControls() {
   bindOnce($("add-mode-account"), "click", () => setAddMode("account"));
   bindOnce($("add-mode-ps3838"), "click", () => setAddMode("ps3838"));
   bindOnce($("add-mode-signal"), "click", () => setAddMode("signal"));
+  bindOnce($("add-mode-bridge"), "click", () => setAddMode("bridge"));
+  bindOnce($("add-bridge-token-generate"), "click", generateLocalBridgeToken);
+  bindOnce($("add-bridge-token-copy"), "click", copyLocalBridgeToken);
   bindOnce($("add-login-tab-2"), "click", () => setAddLoginTab(2));
   bindOnce($("add-login-tab-3"), "click", () => setAddLoginTab(3));
 }
+
+function generateLocalBridgeToken() {
+  const bytes = new Uint8Array(16);
+  if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+    window.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  const token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  if ($("add-bridge-token")) $("add-bridge-token").value = token;
+  if (addNodeFormState && addNodeFormState.bridge) addNodeFormState.bridge.token = token;
+  if ($("add-hint")) {
+    $("add-hint").textContent = "Token 已生成，请同步到 ps3838-wss 的 local_signal_push_token";
+    $("add-hint").className = "form-hint success";
+  }
+}
+
+async function copyLocalBridgeToken() {
+  const input = $("add-bridge-token");
+  const token = String(input?.value || "").trim();
+  if (!token) {
+    toast("还没有可复制的 Token", "warning");
+    return;
+  }
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(token);
+    } else {
+      input.type = "text";
+      input.select();
+      document.execCommand("copy");
+      input.type = "password";
+    }
+    toast("Token 已复制，请填入 ps3838-wss 的 local_signal_push_token", "success");
+  } catch {
+    input.type = "text";
+    input.select();
+    toast("请手动复制选中的 Token", "info");
+  }
+}
+
 function openMemberModal() {
   setMemberHint("");
   setMemberPasswordVisible(false);
@@ -3085,7 +3196,7 @@ function parseListField(value) {
 
 function setAddMode(mode) {
   if (!addNodeFormState) return;
-  addNodeFormState.mode = mode === "signal" || mode === "ps3838" ? mode : "account";
+  addNodeFormState.mode = mode === "signal" || mode === "ps3838" || mode === "bridge" ? mode : "account";
   renderAddNodeModal();
 }
 
@@ -3098,19 +3209,51 @@ function setAddLoginTab(tab) {
 window.setAddMode = setAddMode;
 window.setAddLoginTab = setAddLoginTab;
 
+function formatLocalBridgeStatus(status) {
+  const st = status && typeof status === "object" ? status : {};
+  const last = st.last_signal && typeof st.last_signal === "object" ? st.last_signal : {};
+  const configured = !!st.configured;
+  const enabled = !!st.enabled;
+  const received = Number(st.received_count || 0);
+  if (!configured && !received) {
+    return '<div class="bridge-status-empty">保存后等待桥接推送；先在 ps3838-wss 开启 local_signal_push_enabled。</div>';
+  }
+  const stateText = !enabled ? "已暂停" : (Number(st.last_received_at || 0) > 0 ? "已接收" : "等待信号");
+  const stateTone = !enabled ? "is-warn" : (Number(st.last_received_at || 0) > 0 ? "is-ok" : "is-warn");
+  const lines = [
+    ["状态", stateText, stateTone],
+    ["最后接收", st.last_received_text || "—", ""],
+    ["来源地址", st.last_remote || "—", ""],
+    ["最近对手盘", last.crownOpponent || last.line || "—", ""],
+    ["对手水位", last.crownOdds || last.odds || "—", ""],
+    ["接收计数", `接收 ${received} · 重复 ${Number(st.duplicate_count || 0)} · 拒绝 ${Number(st.rejected_count || 0)}`, ""],
+  ];
+  if (st.last_error) lines.push(["最近错误", String(st.last_error), "is-bad"]);
+  return lines.map(([label, value, tone]) => `
+    <div class="bridge-status-line">
+      <span>${escapeHtml(label)}</span>
+      <strong class="${escapeHtml(tone || "")}" title="${escapeHtml(value)}">${escapeHtml(value)}</strong>
+    </div>
+  `).join("");
+}
+
 function renderAddNodeModal() {
   if (!addNodeFormState) return;
   const isSignal = addNodeFormState.mode === "signal";
   const isPs3838 = addNodeFormState.mode === "ps3838";
-  $("add-mode-account")?.classList.toggle("active", !isSignal && !isPs3838);
+  const isBridge = addNodeFormState.mode === "bridge";
+  $("add-mode-account")?.classList.toggle("active", !isSignal && !isPs3838 && !isBridge);
   $("add-mode-ps3838")?.classList.toggle("active", isPs3838);
   $("add-mode-signal")?.classList.toggle("active", isSignal);
-  $("add-mode-account")?.setAttribute("aria-pressed", String(!isSignal && !isPs3838));
+  $("add-mode-bridge")?.classList.toggle("active", isBridge);
+  $("add-mode-account")?.setAttribute("aria-pressed", String(!isSignal && !isPs3838 && !isBridge));
   $("add-mode-ps3838")?.setAttribute("aria-pressed", String(isPs3838));
   $("add-mode-signal")?.setAttribute("aria-pressed", String(isSignal));
-  if ($("add-account-fields")) $("add-account-fields").hidden = isSignal || isPs3838;
+  $("add-mode-bridge")?.setAttribute("aria-pressed", String(isBridge));
+  if ($("add-account-fields")) $("add-account-fields").hidden = isSignal || isPs3838 || isBridge;
   if ($("add-ps3838-fields")) $("add-ps3838-fields").hidden = !isPs3838;
   if ($("add-signal-fields")) $("add-signal-fields").hidden = !isSignal;
+  if ($("add-bridge-fields")) $("add-bridge-fields").hidden = !isBridge;
 
   const loginTab = Number(addNodeFormState.account?.login_tab || 3);
   const isLogin2 = loginTab === 2;
@@ -3143,10 +3286,18 @@ function renderAddNodeModal() {
   if ($("add-signal-interval")) $("add-signal-interval").value = String(addNodeFormState.signal?.interval_seconds ?? 1);
   if ($("add-signal-live-only")) $("add-signal-live-only").checked = addNodeFormState.signal?.live_only !== false;
 
+  const bridge = addNodeFormState.bridge || {};
+  if ($("add-bridge-endpoint")) $("add-bridge-endpoint").value = String(bridge.endpoint || state.localBridgeConfig?.endpoint || defaultLocalBridgeEndpoint());
+  if ($("add-bridge-target")) $("add-bridge-target").value = String(bridge.target || "ps3838");
+  if ($("add-bridge-token")) $("add-bridge-token").value = String(bridge.token || "");
+  if ($("add-bridge-enabled")) $("add-bridge-enabled").checked = bridge.enabled !== false;
+  if ($("add-bridge-allow-remote")) $("add-bridge-allow-remote").checked = !!bridge.allow_remote;
+  if ($("add-bridge-status")) $("add-bridge-status").innerHTML = formatLocalBridgeStatus(bridge.status || state.localBridgeConfig?.status || {});
+
   const submitLabel = $("add-submit-label");
-  if (submitLabel) submitLabel.textContent = isSignal ? "保存信号源" : isPs3838 ? "登录并开始监控" : "立即接入";
+  if (submitLabel) submitLabel.textContent = isSignal ? "保存信号源" : isPs3838 ? "登录并开始监控" : isBridge ? "保存桥接配置" : "立即接入";
   const submitIcon = $("add-submit")?.querySelector("i");
-  if (submitIcon) submitIcon.className = `fa-solid ${isSignal ? "fa-floppy-disk" : isPs3838 ? "fa-futbol" : "fa-plug"}`;
+  if (submitIcon) submitIcon.className = `fa-solid ${isSignal ? "fa-floppy-disk" : isPs3838 ? "fa-futbol" : isBridge ? "fa-network-wired" : "fa-plug"}`;
   if ($("add-hint")) {
     $("add-hint").textContent = "";
     $("add-hint").className = "form-hint";
@@ -3297,9 +3448,11 @@ async function deleteAccount(name, label, provider = "ag") {
 
 async function deleteSignalSource(item) {
   const endpoint = item && item.deleteEndpoint ? String(item.deleteEndpoint) : "/api/signal-pull-config/delete";
-  const label = (item && item.name) || "远端交易节点";
+  const isLocalBridge = endpoint.includes("/api/local-bridge-config");
+  const label = (item && item.name) || (isLocalBridge ? "本地桥接" : "远端交易节点");
   const meta = item && item.metaText ? `（${item.metaText}）` : "";
-  if (!confirm(`确定要删除${label}${meta}吗？删除后将停止接收这个远端交易节点的信号。`)) return;
+  const stopText = isLocalBridge ? "删除后将停止接收本地桥接推送。" : "删除后将停止接收这个远端交易节点的信号。";
+  if (!confirm(`确定要删除${label}${meta}吗？${stopText}`)) return;
   try {
     const data = await fetchJson(endpoint, {
       method: "POST",
@@ -3307,16 +3460,24 @@ async function deleteSignalSource(item) {
       body: JSON.stringify({}),
     });
     if (!data.ok) throw new Error(data.message || "delete_signal_source_failed");
-    state.signalPullConfig = normalizeSignalPullConfig(data);
-    if (state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET) {
-      state.selectedTarget = "";
-      const sel = $("account"); if (sel) sel.value = "";
+    if (isLocalBridge) {
+      state.localBridgeConfig = normalizeLocalBridgeConfig(data);
+      if (state.selectedTarget === LOCAL_BRIDGE_FILTER_TARGET) {
+        state.selectedTarget = "";
+        const sel = $("account"); if (sel) sel.value = "";
+      }
+    } else {
+      state.signalPullConfig = normalizeSignalPullConfig(data);
+      if (state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET) {
+        state.selectedTarget = "";
+        const sel = $("account"); if (sel) sel.value = "";
+      }
     }
     renderAccountsSidebar();
     renderAccountSelect();
     renderTradingNodeKpi();
     await refreshView();
-    toast("远端交易节点已删除，已停止接收该远端信号", "success");
+    toast(isLocalBridge ? "本地桥接已删除，已停止接收推送" : "远端交易节点已删除，已停止接收该远端信号", "success");
   } catch (e) {
     toast(`删除失败: ${String(e && e.message ? e.message : e)}`, "error");
   }
@@ -4098,6 +4259,42 @@ function buildSignalMonitorSource(item) {
   };
 }
 
+function buildLocalBridgeMonitorSource(item) {
+  const cfg = state.localBridgeConfig || {};
+  const st = cfg.status || {};
+  const enabled = !!cfg.local_bridge_enabled;
+  const online = enabled && !!st.online;
+  const target = String(cfg.local_bridge_target || "").trim() || "ps3838";
+  const received = Number(st.received_count || 0);
+  const lastSignal = st.last_signal && typeof st.last_signal === "object" ? st.last_signal : {};
+  return {
+    kind: "signal",
+    isLocalBridge: true,
+    id: "local-bridge-source",
+    label: (item && item.name) || cfg.local_bridge_name || "本地桥接",
+    title: (item && item.name) || cfg.local_bridge_name || "本地桥接",
+    typeText: "本地桥接 · 皇冠对手盘入口",
+    icon: "fa-network-wired",
+    avatarClass: "signal",
+    statusText: online ? "已接入" : enabled ? "等待信号" : "已暂停",
+    statusTone: online ? "online" : enabled ? "warning" : "offline",
+    enabled,
+    normal: enabled,
+    primaryLabel: "最后接收",
+    primaryValue: st.last_received_text || "等待桥接推送",
+    primaryMeta: `${target} · 已接收 ${received} 条 · 重复 ${Number(st.duplicate_count || 0)} 条`,
+    rows: [
+      { icon: "fa-link", label: "接收地址", value: cfg.endpoint || defaultLocalBridgeEndpoint(), mono: true },
+      { icon: "fa-bullseye", label: "订单目标", value: target, mono: true },
+      { icon: "fa-key", label: "接收 Token", value: cfg.local_bridge_token ? "已设置" : "未设置（仅本机）" },
+      { icon: "fa-clock", label: "最后接收", value: st.last_received_text || "等待桥接推送" },
+      { icon: "fa-scale-balanced", label: "最近对手盘", value: lastSignal.crownOpponent || lastSignal.line || "—" },
+      { icon: "fa-triangle-exclamation", label: "失败原因", value: st.last_error || "最近无异常", warning: !!st.last_error },
+    ],
+    rawItem: item,
+  };
+}
+
 function buildMonitorPoolSources() {
   const sources = [];
   for (const account of Array.isArray(state.accounts) ? state.accounts : []) {
@@ -4111,7 +4308,7 @@ function buildMonitorPoolSources() {
   const signalItems = getSignalSourceSidebarItems();
   if (signalItems.length) {
     for (const item of signalItems) {
-      const source = buildSignalMonitorSource(item);
+      const source = item.isLocalBridge ? buildLocalBridgeMonitorSource(item) : buildSignalMonitorSource(item);
       if (source) sources.push(source);
     }
   } else if (state.signalPullConfig && String(state.signalPullConfig.signal_pull_url || "").trim()) {
@@ -4202,15 +4399,19 @@ function renderLegacyMonitorSourceCard(source) {
   `;
   article.querySelector("[data-action='refresh']")?.addEventListener("click", async (ev) => {
     ev.stopPropagation();
-    if (source.kind === "signal") await loadSignalPullConfig();
-    else await loadStatuses();
+    if (source.kind === "signal") {
+      if (source.isLocalBridge) await loadLocalBridgeConfig();
+      else await loadSignalPullConfig();
+    } else await loadStatuses();
     renderMonitorPool();
     toast("监控状态已刷新", "info");
   });
   article.querySelector("[data-action='toggle']")?.addEventListener("click", async (ev) => {
     ev.stopPropagation();
-    if (source.kind === "signal") await updateSignalPullEnabled(!source.enabled);
-    else await updateAccountEnabled(source.id, source.label, !source.enabled, source.provider);
+    if (source.kind === "signal") {
+      if (source.isLocalBridge) await updateLocalBridgeEnabled(!source.enabled);
+      else await updateSignalPullEnabled(!source.enabled);
+    } else await updateAccountEnabled(source.id, source.label, !source.enabled, source.provider);
   });
   article.querySelector("[data-action='login']")?.addEventListener("click", async (ev) => {
     ev.stopPropagation();
@@ -4477,15 +4678,19 @@ function renderMonitorSourceCard(source) {
   });
   article.querySelector("[data-action='refresh']")?.addEventListener("click", async (event) => {
     event.stopPropagation();
-    if (source.kind === "signal") await loadSignalPullConfig();
-    else await loadStatuses();
+    if (source.kind === "signal") {
+      if (source.isLocalBridge) await loadLocalBridgeConfig();
+      else await loadSignalPullConfig();
+    } else await loadStatuses();
     renderPoolManagement();
     toast("监控状态已刷新", "info");
   });
   article.querySelector("[data-action='toggle']")?.addEventListener("click", async (event) => {
     event.stopPropagation();
-    if (source.kind === "signal") await updateSignalPullEnabled(!source.enabled);
-    else await updateAccountEnabled(source.id, source.label, !source.enabled, source.provider);
+    if (source.kind === "signal") {
+      if (source.isLocalBridge) await updateLocalBridgeEnabled(!source.enabled);
+      else await updateSignalPullEnabled(!source.enabled);
+    } else await updateAccountEnabled(source.id, source.label, !source.enabled, source.provider);
   });
   article.querySelector("[data-action='login']")?.addEventListener("click", async (event) => {
     event.stopPropagation();
@@ -5998,6 +6203,53 @@ function renderReportEngineWarning() {
   `;
 }
 
+// ── Local bridge config ────────────────────────────────────────
+async function loadLocalBridgeConfig() {
+  try {
+    const data = await fetchJson("/api/local-bridge-config");
+    state.localBridgeConfig = normalizeLocalBridgeConfig(data);
+    if (addNodeFormState?.mode === "bridge" && $("modal-add")?.classList.contains("show")) {
+      addNodeFormState.bridge.status = state.localBridgeConfig.status || {};
+      if ($("add-bridge-endpoint")) $("add-bridge-endpoint").value = state.localBridgeConfig.endpoint || defaultLocalBridgeEndpoint();
+      if ($("add-bridge-status")) $("add-bridge-status").innerHTML = formatLocalBridgeStatus(addNodeFormState.bridge.status);
+    }
+    renderAccountsSidebar();
+    renderAccountSelect();
+    renderTradingNodeKpi();
+    if (state.view === "arsenal") renderPoolManagement();
+  } catch { /* endpoint may not exist in older builds */ }
+}
+
+async function updateLocalBridgeEnabled(enabled) {
+  const cfg = state.localBridgeConfig || {};
+  if (!cfg.local_bridge_configured) {
+    toast("本地桥接尚未配置", "warning");
+    return;
+  }
+  try {
+    const data = await fetchJson("/api/local-bridge-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        local_bridge_enabled: !!enabled,
+        local_bridge_configured: true,
+        local_bridge_target: cfg.local_bridge_target || "ps3838",
+        local_bridge_token: cfg.local_bridge_token || "",
+        local_bridge_allow_remote: !!cfg.local_bridge_allow_remote,
+      }),
+    });
+    if (!data.ok) throw new Error(data.message || "update_local_bridge_failed");
+    state.localBridgeConfig = normalizeLocalBridgeConfig(data);
+    renderAccountsSidebar();
+    renderAccountSelect();
+    renderTradingNodeKpi();
+    renderMonitorPool();
+    toast(`${enabled ? "已启用" : "已暂停"}本地桥接`, "success");
+  } catch (e) {
+    toast(`切换本地桥接失败: ${String(e && e.message ? e.message : e)}`, "error");
+  }
+}
+
 // ── Signal pull config ─────────────────────────────────────────
 async function loadSignalPullConfig() {
   try {
@@ -6095,9 +6347,18 @@ async function submitAddAccount() {
   addNodeFormState.signal.interval_seconds = parseInt($("add-signal-interval")?.value || "1", 10) || 1;
   addNodeFormState.signal.live_only = !!$("add-signal-live-only")?.checked;
 
+  if (!addNodeFormState.bridge) {
+    addNodeFormState.bridge = { enabled: true, target: "ps3838", token: "", allow_remote: false, endpoint: "", status: {} };
+  }
+  addNodeFormState.bridge.enabled = !!$("add-bridge-enabled")?.checked;
+  addNodeFormState.bridge.target = $("add-bridge-target")?.value.trim() || "ps3838";
+  addNodeFormState.bridge.token = $("add-bridge-token")?.value.trim() || "";
+  addNodeFormState.bridge.allow_remote = !!$("add-bridge-allow-remote")?.checked;
+
   const isSignalMode = addNodeFormState.mode === "signal";
   const isPs3838Mode = addNodeFormState.mode === "ps3838";
-  const idleLabel = isSignalMode ? "保存信号源" : isPs3838Mode ? "登录并开始监控" : "立即接入";
+  const isBridgeMode = addNodeFormState.mode === "bridge";
+  const idleLabel = isSignalMode ? "保存信号源" : isPs3838Mode ? "登录并开始监控" : isBridgeMode ? "保存桥接配置" : "立即接入";
   const btn = $("add-submit");
   const submitLabel = $("add-submit-label");
   const submitIcon = btn?.querySelector("i");
@@ -6105,7 +6366,7 @@ async function submitAddAccount() {
     btn.disabled = true;
     btn.setAttribute("aria-busy", "true");
   }
-  if (submitLabel) submitLabel.textContent = isSignalMode ? "保存中..." : "接入中...";
+  if (submitLabel) submitLabel.textContent = isSignalMode ? "保存中..." : isBridgeMode ? "保存中..." : "接入中...";
   if (submitIcon) submitIcon.className = "fa-solid fa-spinner";
   try {
     const req = helper.buildAddNodeSubmitRequest(addNodeFormState);
@@ -6127,6 +6388,10 @@ async function submitAddAccount() {
       // add 接口已发起登录，不能再发一次 relogin 打断原窗口里的 2FA。
       await loadStatuses();
       toast(data.message || "请在浏览器完成登录/2FA，窗口不会自动关闭", "info", 6500);
+    } else if (req.endpoint === "/api/local-bridge-config") {
+      await loadLocalBridgeConfig();
+      const bridgeTarget = addNodeFormState?.bridge?.target || "ps3838";
+      toast(`本地桥接已保存：对手盘写入 orders/${bridgeTarget}.jsonl`, "success", 6500);
     } else {
       await loadSignalPullConfig();
       toast("远端交易信号配置已保存", "success");
@@ -6139,7 +6404,7 @@ async function submitAddAccount() {
       btn.setAttribute("aria-busy", "false");
     }
     if (submitLabel) submitLabel.textContent = idleLabel;
-    if (submitIcon) submitIcon.className = `fa-solid ${isSignalMode ? "fa-floppy-disk" : isPs3838Mode ? "fa-futbol" : "fa-plug"}`;
+    if (submitIcon) submitIcon.className = `fa-solid ${isSignalMode ? "fa-floppy-disk" : isPs3838Mode ? "fa-futbol" : isBridgeMode ? "fa-network-wired" : "fa-plug"}`;
   }
 }
 
@@ -6285,7 +6550,9 @@ async function refreshView(options = {}) {
   try {
     const since  = 0;
     const limit  = 200;
-    const target = state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET ? "" : (state.selectedTarget || "");
+    const target = (state.selectedTarget === REMOTE_SIGNAL_FILTER_TARGET || state.selectedTarget === LOCAL_BRIDGE_FILTER_TARGET)
+      ? ""
+      : (state.selectedTarget || "");
     const url = `/api/orders?since=${since}&limit=${limit}&target=${encodeURIComponent(target)}`;
     const [data, queueItems, followRows] = await Promise.all([
       fetchJson(url),
@@ -6620,6 +6887,7 @@ async function loadInitial(opts = {}) {
   window.setInterval(updateTopnavClock, 1000);
   await Promise.allSettled([
     loadSignalPullConfig(),
+    loadLocalBridgeConfig(),
     loadAccounts(),
     loadStatuses(),
     loadArsenal(),
@@ -6751,12 +7019,18 @@ async function loadInitial(opts = {}) {
     loadStatuses().catch(() => {});
   }, STATUS_AUTO_REFRESH_MS);
   setInterval(() => {
+    if (document.visibilityState === "hidden") return;
+    if (!state.localBridgeConfig || !state.localBridgeConfig.local_bridge_configured) return;
+    loadLocalBridgeConfig().catch(() => {});
+  }, STATUS_AUTO_REFRESH_MS);
+  setInterval(() => {
     if (state.view === "orders") updateVisibleMatchClocks();
   }, 1000);
 
   // Preload telegram and signal config
   loadTelegramConfig().catch(() => {});
   loadSignalPullConfig().catch(() => {});
+  loadLocalBridgeConfig().catch(() => {});
 }
 
 let initialLoadPromise = null;

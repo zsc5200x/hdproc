@@ -4490,6 +4490,7 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
             <button class="mode-switch-btn active" type="button" id="add-mode-account" aria-pressed="true" aria-controls="add-account-fields"><i class="fa-solid fa-server" aria-hidden="true"></i><span>本地后台节点</span></button>
             <button class="mode-switch-btn" type="button" id="add-mode-ps3838" aria-pressed="false" aria-controls="add-ps3838-fields"><i class="fa-solid fa-futbol" aria-hidden="true"></i><span>平博 / PS3838</span></button>
             <button class="mode-switch-btn" type="button" id="add-mode-signal" aria-pressed="false" aria-controls="add-signal-fields"><i class="fa-solid fa-satellite-dish" aria-hidden="true"></i><span>远端交易信号</span></button>
+            <button class="mode-switch-btn" type="button" id="add-mode-bridge" aria-pressed="false" aria-controls="add-bridge-fields"><i class="fa-solid fa-network-wired" aria-hidden="true"></i><span>本地桥接</span></button>
           </div>
         </section>
 
@@ -4625,6 +4626,58 @@ body.nav-open .nav-toggle{color:var(--primary);border-color:var(--border-h);}
                 </label>
               </div>
             </div>
+          </section>
+        </div>
+
+        <div class="field-section add-node-fields" id="add-bridge-fields" hidden>
+          <section class="add-node-section" aria-labelledby="add-bridge-ingress-title">
+            <div class="add-node-section-head"><i class="fa-solid fa-network-wired" aria-hidden="true"></i><h3 id="add-bridge-ingress-title">本地桥接入</h3></div>
+            <div class="form-hint" style="margin-bottom:12px">接收 ps3838-wss 合并后的皇冠对手盘信号，写入订单目录后由跟单引擎按目标消费。</div>
+            <div class="add-node-grid">
+              <div class="form-group add-node-span-2">
+                <label class="form-label" for="add-bridge-endpoint">接收地址 <span>Bridge → HD</span></label>
+                <input class="form-input" type="text" id="add-bridge-endpoint" readonly spellcheck="false" placeholder="http://127.0.0.1:9999/api/local-signal/push">
+                <div class="form-hint">填入 ps3838-wss 的 <code>local_signal_push_url</code>；地址必须与当前 HD WebUI 端口一致。</div>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="add-bridge-target">订单目标</label>
+                <input class="form-input" type="text" id="add-bridge-target" spellcheck="false" placeholder="ps3838">
+                <div class="form-hint">写入 orders/&lt;目标&gt;.jsonl；保存后自动加入跟单目标。</div>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="add-bridge-token">接收 Token <span>可选</span></label>
+                <div class="bridge-token-row">
+                  <input class="form-input" type="password" id="add-bridge-token" autocomplete="off" spellcheck="false" placeholder="留空则不校验">
+                  <button class="btn btn-ghost btn-sm" id="add-bridge-token-generate" type="button">生成</button>
+                  <button class="btn btn-ghost btn-sm" id="add-bridge-token-copy" type="button" title="复制 Token" aria-label="复制 Token"><i class="fa-solid fa-copy" aria-hidden="true"></i></button>
+                </div>
+                <div class="form-hint">填入桥接配置的 <code>local_signal_push_token</code>，两端保持一致。</div>
+              </div>
+              <div class="toggle-row">
+                <div>
+                  <label class="toggle-label" for="add-bridge-enabled">启用本地桥接</label>
+                  <div class="toggle-sub">关闭后停止接收，但保留当前配置</div>
+                </div>
+                <label class="toggle-sw">
+                  <input type="checkbox" id="add-bridge-enabled" checked>
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+              <div class="toggle-row">
+                <div>
+                  <label class="toggle-label" for="add-bridge-allow-remote">允许非本机来源</label>
+                  <div class="toggle-sub">默认只接受 127.0.0.1 / ::1</div>
+                </div>
+                <label class="toggle-sw">
+                  <input type="checkbox" id="add-bridge-allow-remote">
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+            </div>
+          </section>
+          <section class="add-node-section" aria-labelledby="add-bridge-status-title">
+            <div class="add-node-section-head"><i class="fa-solid fa-wave-square" aria-hidden="true"></i><h3 id="add-bridge-status-title">接收状态</h3></div>
+            <div class="add-node-bridge-status" id="add-bridge-status">尚未收到信号</div>
           </section>
         </div>
       </div>

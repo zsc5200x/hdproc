@@ -47,6 +47,18 @@ from hdzz.core.watcher.ag_watcher import (
 )
 from hdzz.api.webui.follow_settings import FOLLOW_SETTINGS_DEFAULTS, ensure_follow_settings_defaults, merge_follow_settings
 from hdzz.api.webui.manual_signal import build_manual_signal_payload, send_manual_signal
+from hdzz.api.webui.local_bridge import (
+    LocalBridgeSignalError,
+    LOCAL_BRIDGE_PATH,
+    config_payload as build_local_bridge_config_payload,
+    ensure_local_bridge_defaults,
+    load_state as load_local_bridge_state,
+    merge_local_bridge_config,
+    receive_local_bridge_signal,
+    record_rejection as record_local_bridge_rejection,
+    reset_local_bridge_config,
+    token_matches as local_bridge_token_matches,
+)
 from hdzz.api.webui.signal_pull_config import ensure_signal_pull_config_defaults, merge_signal_pull_config, reset_signal_pull_config
 from hdzz.api.webui.chashui_quote_pool import (
     list_readonly_quote_candidates as _list_readonly_quote_candidates,
@@ -5996,6 +6008,10 @@ class Handler(SimpleHTTPRequestHandler):
             )
             return
 
+        if u.path == "/api/local-bridge-config":
+            self._send_json(200, self._local_bridge_response())
+            return
+
         if u.path == "/api/telegram-status-log":
             qs = parse_qs(u.query)
             limit = int((qs.get("limit") or ["200"])[0])
@@ -6723,6 +6739,108 @@ class Handler(SimpleHTTPRequestHandler):
 
         return super().do_GET()
 
+    def _local_bridge_endpoint(self) -> str:
+        host = str(self.headers.get("Host") or "").strip()
+        if not host:
+            host = f"127.0.0.1:{int(getattr(self.server, 'server_port', 9999) or 9999)}"
+        return f"http://{host}{LOCAL_BRIDGE_PATH}"
+
+    @staticmethod
+    def _is_loopback_client(remote: str) -> bool:
+        text = str(remote or "").strip().lower()
+        if text in {"127.0.0.1", "::1", "localhost"}:
+            return True
+        if text.startswith("127."):
+            return True
+        return text.startswith("::ffff:127.")
+
+    def _handle_local_bridge_push(self, data: Dict[str, Any]) -> None:
+        cfg = ensure_local_bridge_defaults(self._read_config())
+        remote = str((self.client_address or ("", 0))[0] or "")
+        if not cfg.get("local_bridge_configured"):
+            # Not configured yet: ask the bridge to keep the batch pending so
+            # signals are not lost while the user finishes the node setup.
+            self._send_json(503, {"ok": False, "message": "local_bridge_not_configured"})
+            return
+        if not cfg.get("local_bridge_enabled"):
+            # Configured but intentionally paused: ack to stop retrying.
+            self._send_json(200, {"ok": True, "skipped": True, "message": "local_bridge_disabled"})
+            return
+        if not bool(cfg.get("local_bridge_allow_remote")) and not self._is_loopback_client(remote):
+            self._send_json(403, {"ok": False, "message": "local_bridge_remote_not_allowed"})
+            return
+        provided = (
+            str(self.headers.get("X-HDZZ-Signal-Token") or "").strip()
+            or str(self.headers.get("X-Signal-Token") or "").strip()
+            or str(data.get("token") or "").strip()
+        )
+        if not local_bridge_token_matches(str(cfg.get("local_bridge_token") or ""), provided):
+            self._send_json(403, {"ok": False, "message": "local_bridge_token_invalid"})
+            return
+
+        # ps3838-wss posts {"signals": [one merged group]}; accept a flat object
+        # too so manual/older bridge builds keep working.
+        raw_signals = data.get("signals") if isinstance(data.get("signals"), list) else None
+        signals = raw_signals if raw_signals is not None else [data]
+        if not signals:
+            self._send_json(400, {"ok": False, "message": "empty_signals"})
+            return
+        if len(signals) > 100:
+            self._send_json(400, {"ok": False, "message": "too_many_signals"})
+            return
+
+        results = []
+        accepted = 0
+        duplicates = 0
+        for index, signal in enumerate(signals):
+            if not isinstance(signal, dict):
+                record_local_bridge_rejection(self._data_dir, "signal_not_object", remote=remote)
+                self._send_json(400, {"ok": False, "message": f"signal_{index}_not_object", "results": results})
+                return
+            try:
+                result = receive_local_bridge_signal(
+                    data_dir=self._data_dir,
+                    orders_dir=self._orders_dir,
+                    payload=signal,
+                    default_target=str(cfg.get("local_bridge_target") or "ps3838"),
+                    remote=remote,
+                )
+            except LocalBridgeSignalError as exc:
+                record_local_bridge_rejection(self._data_dir, str(exc), remote=remote)
+                self._send_json(400, {"ok": False, "message": str(exc), "index": index, "results": results})
+                return
+            except Exception as exc:
+                record_local_bridge_rejection(self._data_dir, f"write_failed: {exc}", remote=remote)
+                self._send_json(500, {"ok": False, "message": f"local_bridge_write_failed: {exc}", "index": index, "results": results})
+                return
+            if bool(result.get("duplicate")):
+                duplicates += 1
+            else:
+                accepted += 1
+            results.append(
+                {
+                    "orderId": str(result.get("orderId") or ""),
+                    "target": str(result.get("target") or ""),
+                    "duplicate": bool(result.get("duplicate")),
+                }
+            )
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "accepted": accepted,
+                "duplicates": duplicates,
+                "results": results,
+                "server_time": now_iso(),
+            },
+        )
+
+    def _local_bridge_response(self) -> Dict[str, Any]:
+        cfg = ensure_local_bridge_defaults(self._read_config())
+        state = load_local_bridge_state(self._data_dir)
+        return build_local_bridge_config_payload(cfg, state, endpoint=self._local_bridge_endpoint())
+
     def _read_config(self) -> Dict[str, Any]:
         try:
             raw = self._config_path.read_text(encoding="utf-8-sig")
@@ -6812,6 +6930,10 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/telegram-backend-order-test",
             "/api/signal-pull-config",
             "/api/signal-pull-config/delete",
+            "/api/local-bridge-config",
+            "/api/local-bridge-config/delete",
+            "/api/local-signal/push",
+            "/api/local-bridge/push",
             "/api/manual-signal/login",
             "/api/manual-signal/preview",
             "/api/manual-signal/push",
@@ -6841,6 +6963,10 @@ class Handler(SimpleHTTPRequestHandler):
             data = json.loads(body.decode("utf-8"))
         except Exception:
             self._send_json(400, {"ok": False, "message": "无效JSON"})
+            return
+
+        if u.path in ("/api/local-signal/push", "/api/local-bridge/push"):
+            self._handle_local_bridge_push(data if isinstance(data, dict) else {})
             return
 
         telegram_settings_path = self._data_dir / "telegram_signal.json"
@@ -8097,6 +8223,55 @@ class Handler(SimpleHTTPRequestHandler):
                     "server_time": now_iso(),
                 },
             )
+            return
+
+        if u.path == "/api/local-bridge-config":
+            cfg = ensure_local_bridge_defaults(self._read_config())
+            cfg = merge_local_bridge_config(cfg, data)
+            target = str(cfg.get("local_bridge_target") or "").strip()
+            if cfg.get("local_bridge_enabled") and not target:
+                self._send_json(400, {"ok": False, "message": "请填写本地桥接的订单目标"})
+                return
+            try:
+                atomic_write_json(self._config_path, cfg)
+            except Exception as e:
+                self._send_json(500, {"ok": False, "message": f"写入配置失败: {e}"})
+                return
+
+            # Make the bridge target a followable source immediately, even
+            # before the first signal creates orders/<target>.jsonl.
+            if cfg.get("local_bridge_configured") and target:
+                try:
+                    doc = read_json_file(self._follow_settings_path, FOLLOW_SETTINGS_DEFAULTS)
+                    doc = ensure_follow_settings_defaults(doc)
+                    doc = merge_order_targets_into_follow_settings(doc, self._orders_dir)
+                    targets = doc.setdefault("targets", [])
+                    if not isinstance(targets, list):
+                        targets = []
+                        doc["targets"] = targets
+                    if not any(
+                        isinstance(item, dict) and str(item.get("name") or "").strip() == target
+                        for item in targets
+                    ):
+                        targets.append({"name": target, "enabled": True, "only_live": False, "ratio_percent": None})
+                        doc["updated_at"] = now_iso()
+                    atomic_write_json(self._follow_settings_path, doc)
+                except Exception:
+                    # The bridge still ingests orders if follow settings are
+                    # temporarily unavailable; the next save retries this.
+                    pass
+
+            self._send_json(200, self._local_bridge_response())
+            return
+
+        if u.path == "/api/local-bridge-config/delete":
+            cfg = reset_local_bridge_config(self._read_config())
+            try:
+                atomic_write_json(self._config_path, cfg)
+            except Exception as e:
+                self._send_json(500, {"ok": False, "message": f"写入配置失败: {e}"})
+                return
+            self._send_json(200, self._local_bridge_response())
             return
 
         if u.path == "/api/signal-pull-config/delete":

@@ -35,6 +35,14 @@
         interval_seconds: 15,
         telegram_chat_id: '',
       },
+      bridge: {
+        enabled: true,
+        target: 'ps3838',
+        token: '',
+        allow_remote: false,
+        endpoint: '',
+        status: {},
+      },
     };
   }
 
@@ -85,8 +93,29 @@
     return payload;
   }
 
+  function buildBridgePayload(bridge) {
+    const current = bridge || {};
+    const target = toTrimmedString(current.target) || 'ps3838';
+    if (!/^[A-Za-z0-9_.-]+$/.test(target)) {
+      throw new Error('订单目标只能包含字母、数字、下划线、点和短横线');
+    }
+    return {
+      local_bridge_enabled: !!current.enabled,
+      local_bridge_configured: true,
+      local_bridge_target: target,
+      local_bridge_token: toTrimmedString(current.token),
+      local_bridge_allow_remote: !!current.allow_remote,
+    };
+  }
+
   function buildAddNodeSubmitRequest(form) {
     const current = form || {};
+    if (current.mode === 'bridge') {
+      return {
+        endpoint: '/api/local-bridge-config',
+        payload: buildBridgePayload(current.bridge),
+      };
+    }
     if (current.mode === 'ps3838') {
       const ps = current.ps3838 || {};
       const payload = {
@@ -116,6 +145,7 @@
 
   return {
     createDefaultAddNodeForm,
+    buildBridgePayload,
     buildAddNodeSubmitRequest,
   };
 });
