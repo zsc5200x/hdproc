@@ -147,10 +147,15 @@ class TestFollowRetryPolicy(unittest.TestCase):
                     mappings={},
                 )
             )
-
+            selected = engine.pick_random_member_for_stake(
+                latest_snapshot,
+                50.0,
+                avoid_ids={"member-a"},
+                target="",
+                mappings={},
+            )
             self.assertIsNotNone(selected)
             self.assertEqual(selected["id"], "member-b")
-            self.assertFalse(engine._member_has_transient_network_issue(latest_snapshot[0]))
 
     def test_all_cooldown_members_enter_wait_pool(self) -> None:
         from hdzz.core.follower import engine

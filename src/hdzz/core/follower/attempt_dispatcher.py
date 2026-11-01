@@ -18,6 +18,7 @@ class AttemptDispatcher:
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="follow-attempt")
         self._lock = threading.RLock()
         self._busy_members: Dict[str, int] = {}
+        self._member_active_counts = self._busy_members
         self._active: Dict[Future, Tuple[str, str]] = {}
         self._keys: set = set()
 
@@ -31,7 +32,7 @@ class AttemptDispatcher:
         member_id: str,
         fn: Callable[..., Any],
         *args: Any,
-        member_parallel_limit: int = 1,
+        member_parallel_limit: Optional[int] = None,
         **kwargs: Any,
     ) -> Optional[Future]:
         job_key = str(key or "").strip()
@@ -39,9 +40,9 @@ class AttemptDispatcher:
         if not (job_key and mid):
             return None
 
-        per_member_limit = max(1, int(member_parallel_limit or 1))
         with self._lock:
-            if job_key in self._keys or self._busy_members.get(mid, 0) >= self.per_member_limit:
+            per_member_limit = self.per_member_limit if member_parallel_limit is None else max(1, int(member_parallel_limit or 1))
+            if job_key in self._keys:
                 return None
             if len(self._active) >= self.max_workers:
                 return None
@@ -91,13 +92,13 @@ class AttemptDispatcher:
         with self._lock:
             return self._busy_members.get(str(member_id or "").strip(), 0) > 0
 
-    def busy_member_ids(self) -> set:
+    def busy_member_ids(self, member_parallel_limit: Optional[int] = None) -> set:
         """Return members with at least one active network attempt.
 
         Members below the limit remain eligible, which lets separate fresh HTTP
         sessions use the same logged-in account concurrently.
         """
-        limit = max(1, int(member_parallel_limit or 1))
+        limit = 1 if member_parallel_limit is None else max(1, int(member_parallel_limit or 1))
         with self._lock:
             return {
                 member_id

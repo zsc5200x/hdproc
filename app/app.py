@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional
 
 from portable_env import apply_playwright_browsers_path
 
+DEFAULT_SNAPSHOT_MARKET_DEADLINE_MS = "6000"
+
 
 def resolve_app_root(default_file: Optional[Path] = None) -> Path:
     env_root = (os.environ.get("HDZZ_APP_DIR") or "").strip()
@@ -42,6 +44,7 @@ TELEGRAM_SIGNAL_PID_FILE = RUN_DIR / "telegram_signal.pid.json"
 PS3838_PID_FILE = ROOT / "data" / "ps3838" / "worker.pid"
 PS3838_APP_DIR = Path(os.environ.get("HDZZ_PS3838_DIR") or (SOURCE_REPO_ROOT / "ps3838")).expanduser()
 PS3838_HEALTH_URL = os.environ.get("HDZZ_PS3838_HEALTH_URL") or ""
+DEFAULT_SNAPSHOT_MARKET_DEADLINE_MS = "6000"
 
 
 def ps3838_health_url() -> str:
