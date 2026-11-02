@@ -8,10 +8,9 @@
 ./start.sh
 ./stop.sh
 ./dashboard.sh
-./crown.sh
 ```
 
-`start.sh` 启动完整采集链路；`dashboard.sh` 启动主看板和皇冠后端；`crown.sh` 仅启动皇冠后端。使用自定义配置时，为本次终端会话设置同一个文件，保证启动、停止、回填与维护读取一致：
+`start.sh` 启动订单轮询和主看板；`dashboard.sh` 只启动主看板。皇冠联动由外部兼容服务提供。使用自定义配置时，为本次终端会话设置同一个文件，保证启动、停止、回填与维护读取一致：
 
 ```bash
 export PS3838_CONFIG=config.local.json
@@ -29,20 +28,19 @@ CONFIG_ASSIGNMENTS="$(.venv/bin/python project_config.py shell)" || exit 1
 eval "$CONFIG_ASSIGNMENTS"
 curl --noproxy '*' --fail --silent --show-error "$CDP_URL/json/version"
 curl --noproxy '*' --fail --silent --show-error "$DASHBOARD_URL/api/health"
-curl --noproxy '*' --fail --silent --show-error "$CROWN_URL/api/crown/session"
+curl --noproxy '*' --fail --silent --show-error "${CROWN_URL:-http://127.0.0.1:9223}/api/crown/session"
 ```
 
 上面适合交互诊断；启动脚本自身会先检查配置子进程的退出码，再读取变量。HTTP 200 只能说明服务接口可访问。数据新鲜度还需检查页面的来源状态、最后成功时间、缓存提示和采集日志。
 
 ## 手动登录与会话同步
 
-1. 使用 `./start.sh` 启动共享 Chrome；在平博标签中手动登录。
-2. 皇冠已有账号时会按配置补开普通标签页；没有账号时在皇冠设置保存登录地址和账号、打开登录页。
-3. 在皇冠站点页面自己输入密码和验证信息。项目不填写表单、不自动点击登录、不保存密码或 TOTP。
-4. 保持两个站点标签打开；系统复用当前浏览器会话读取赛事与赔率。
-5. 若显示 `session_conflict`，先观察当前标签会话同步，不要仅凭此错误判断其他设备重复登录。
+1. 使用 `./start.sh` 启动 PS3838 订单轮询和主看板。
+2. 皇冠联动需要单独启动外部兼容服务，并让其地址与 `crown_host`、`crown_port` 配置一致。
+3. 按外部兼容服务的说明完成登录和会话准备；本项目不会填写皇冠登录表单、保存密码或 TOTP。
+4. 若显示 `session_conflict`，按外部兼容服务的日志和会话说明处理。
 
-默认皇冠继承平博 `cdp_url`。只有明确需要另一浏览器实例时才设置 `crown_cdp_url` 或 `CROWN_CDP_URL`。`stop.sh` 停止项目 Python 进程但不关闭 Chrome。
+皇冠地址由外部兼容服务提供，可通过 `crown_host`、`crown_port` 或对应环境变量配置。`stop.sh` 只停止本项目 Python 进程。
 
 ## 迁移运行数据
 
@@ -107,9 +105,9 @@ printf '%s\n' "$MIGRATION_MANIFEST"
 ./check.sh --static-only
 ```
 
-`check.sh` 执行 Python、前端 JS、Shell 和差异格式检查，并分别调用平博与皇冠虚拟环境运行测试。Python 测试使用临时配置和数据目录，不读取真实账号库。`--static-only` 跳过 Python 单元测试，仍执行前端测试与静态检查。
+`check.sh` 执行 Python、前端 JS、Shell 和差异格式检查，并运行 PS3838 公共模块测试。Python 测试使用临时配置和数据目录，不读取真实账号库。`--static-only` 跳过 Python 单元测试，仍执行前端测试与静态检查。
 
-两套完整版本快照位于 `requirements/pinnacle-macos-py39.lock` 与 `requirements/crown-macos-py314.lock`。不要将两个环境的依赖混装，或为目录整理顺手升级包。升级后先通过统一检查，再更新对应锁文件；锁文件不保证其他操作系统或 Python 主次版本兼容。
+主项目依赖快照位于 `requirements/pinnacle-macos-py39.lock`。外部皇冠兼容服务的依赖由其自身项目管理。
 
 ## 历史回填与元数据补齐
 

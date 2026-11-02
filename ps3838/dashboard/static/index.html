@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0a0f19">
   <title>赔率数据终端</title>
-  <link rel="stylesheet" href="static/styles.css?v=20261102-ps3838-tg-2">
+  <link rel="stylesheet" href="static/styles.css?v=20261102-league-1">
 </head>
 <body>
   <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -94,7 +94,8 @@
           <option value="480">北京时间 GMT+8</option>
         </select>
         <button id="myEventsAlignPartner" class="my-events-align-btn" type="button" title="结算时间 + GMT-4 + 昨日（对齐代理后台盈亏报表）">一键对齐后台</button>
-        <span class="my-events-basis-hint">代理后台盈亏报表默认按「结算时间 + GMT-4」统计</span>
+        <button id="myEventsMatchCompare" class="my-events-align-btn" type="button" title="打开比赛视角，对照平博与皇冠比赛">比赛对照</button>
+        <button id="myEventsLeagueLibraryBtn" class="my-events-library-btn" type="button" title="查看皇冠与平博/PS3838 联赛对照库">联赛库</button>
       </div>
 
       <div id="myEventsBanner" class="my-events-banner hidden" role="status" aria-live="polite"></div>
@@ -175,7 +176,43 @@
     </footer>
   </div>
 
+  <div id="myEventsLeagueLibrary" class="my-events-library hidden" role="dialog" aria-modal="true" aria-labelledby="myEventsLeagueLibraryTitle">
+    <div class="my-events-library-panel">
+      <header class="my-events-library-head">
+        <div>
+          <div class="eyebrow">LEAGUE LIBRARY</div>
+          <h2 id="myEventsLeagueLibraryTitle">联赛库</h2>
+          <p class="my-events-library-sub">皇冠联赛 ↔ 平博 / PS3838 联赛</p>
+        </div>
+        <button id="myEventsLeagueClose" class="button ghost" type="button">关闭</button>
+      </header>
+      <div class="my-events-library-tools">
+        <label class="search-field my-events-library-search" for="myEventsLeagueSearch">
+          <input id="myEventsLeagueSearch" type="search" placeholder="搜索联赛名称、皇冠 ID、平博 ID" autocomplete="off" spellcheck="false">
+        </label>
+        <button id="myEventsLeagueRefresh" class="button ghost" type="button">刷新</button>
+        <span id="myEventsLeagueCount" class="my-events-library-count">读取中…</span>
+      </div>
+      <div class="my-events-library-body">
+        <table class="my-events-library-table">
+          <thead>
+            <tr>
+              <th>皇冠联赛</th>
+              <th>皇冠 ID</th>
+              <th>平博 / PS3838 联赛</th>
+              <th>平博 ID</th>
+              <th>场次（皇冠 / 平博）</th>
+              <th>更新时间</th>
+            </tr>
+          </thead>
+          <tbody id="myEventsLeagueBody"></tbody>
+        </table>
+        <div id="myEventsLeagueEmpty" class="my-events-library-empty hidden">没有匹配的联赛</div>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="static/app.js?v=20261102-ps3838-tg-2"></script>
+  <script type="module" src="static/app.js?v=20261102-league-1"></script>
 </body>
 </html>

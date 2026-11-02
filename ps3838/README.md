@@ -20,7 +20,7 @@
 ./stop.sh
 ```
 
-默认入口是 HD WebUI 的 `http://127.0.0.1:9999/ps3838/`：看板监听 `var/run/dashboard.sock`（Unix domain socket，不再占用 8787 端口），由 9999 同源转发。只启动看板及皇冠后端可使用 `./dashboard.sh`；只启动皇冠后端可使用 `./crown.sh`。停止脚本不会关闭 Chrome。开发时仍可用 `python dashboard_server.py --host 127.0.0.1 --port 8787` 以独立 TCP 模式运行看板。
+默认入口是 HD WebUI 的 `http://127.0.0.1:9999/ps3838/`：看板监听 `var/run/dashboard.sock`（Unix domain socket，不再占用 8787 端口），由 9999 同源转发。使用 `./dashboard.sh` 可单独启动看板；皇冠联动需要自行运行外部兼容服务并在配置中指定地址。停止脚本不会关闭 Chrome。开发时仍可用 `python dashboard_server.py --host 127.0.0.1 --port 8787` 以独立 TCP 模式运行看板。
 
 完整启动顺序为：检查配置与 Python 环境 → 确认/启动 Chrome CDP → 启动平博采集 → 启动皇冠服务并按已配置账号补开普通标签页 → 启动主看板 → 启动实时快照。已有进程会核对项目归属；HTTP 服务只有通过接口健康检查才会报告就绪。进程就绪不等于数据新鲜，仍需看页面上的最后成功更新时间。
 
@@ -60,23 +60,20 @@ HD 的「接入节点 → 平博 / PS3838」节点也可以直接承担代理后
 
 ## 第一次准备
 
-仓库保留两套已使用的 Python 环境，不在本次规范整理中升级依赖：
+仓库只保留 PS3838 主进程使用的 Python 环境；皇冠联动由外部兼容服务负责：
 
 | 环境 | 当前基线 | 完整依赖快照 |
 | --- | --- | --- |
-| 平博、合并与主看板 | macOS / Python 3.9 | `requirements/pinnacle-macos-py39.lock` |
-| 皇冠运行时 | macOS / Python 3.14 | `requirements/crown-macos-py314.lock` |
+| PS3838、合并与主看板 | macOS / Python 3.9 | `requirements/pinnacle-macos-py39.lock` |
 
-已有 `.venv` 与 `crown/.venv` 时无需重新创建。新环境在安装对应 Python 后运行：
+已有 `.venv` 时无需重新创建。新环境在安装 Python 3.9 后运行：
 
 ```bash
 python3.9 -m venv .venv
 .venv/bin/python -m pip install -r requirements/pinnacle-macos-py39.lock
-python3.14 -m venv crown/.venv
-crown/.venv/bin/python -m pip install -r requirements/crown-macos-py314.lock
 ```
 
-锁文件记录当前 macOS 环境的完整版本，不是带下载哈希的跨平台锁；切换 Python 或系统时先在独立环境验证。`requirements.txt` 与 `crown/requirements.txt` 仍保留直接依赖入口。程序通过 CDP 连接已安装的 Chrome，正常共享浏览器流程无需执行 `playwright install`。前端检查需要 Node.js；旧采集文件压缩需要 `zstd`。
+锁文件记录当前 macOS 环境的完整版本，不是带下载哈希的跨平台锁；切换 Python 或系统时先在独立环境验证。程序通过 CDP 连接已安装的 Chrome，正常共享浏览器流程无需执行 `playwright install`。前端检查需要 Node.js；旧采集文件压缩需要 `zstd`。
 
 只有全新安装、没有本机配置和数据时，才复制示例配置：
 
@@ -186,12 +183,12 @@ var/                          新布局运行数据，不提交 Git
 ./check.sh --static-only
 ```
 
-完整检查执行 Python 静态解析、JavaScript 语法与前端测试、Shell 语法、Git 差异格式，以及分别使用两套虚拟环境的单元测试。测试配置指向临时目录，不使用真实账号库、历史库或采集文件，不会启动/停止在线服务。
+完整检查执行 Python 静态解析、JavaScript 语法与前端测试、Shell 语法、Git 差异格式和单元测试。测试配置指向临时目录，不使用真实账号库、历史库或采集文件，不会启动/停止在线服务。
 
 如 Python 路径不同：
 
 ```bash
-PYTHON_BIN=/usr/local/bin/python3.9 CROWN_PYTHON_BIN=/usr/local/bin/python3.14 ./check.sh
+PYTHON_BIN=/usr/local/bin/python3.9 ./check.sh
 ```
 
 ## 常见问题
@@ -202,4 +199,4 @@ PYTHON_BIN=/usr/local/bin/python3.9 CROWN_PYTHON_BIN=/usr/local/bin/python3.14 .
 
 **显式配置报错**：修复 `PS3838_CONFIG` 路径或 JSON 后再启动。启动和停止脚本都会在配置错误时中止，避免操作错误环境。
 
-更多命令见 [运维指南](docs/operations.md)，皇冠接口与手动登录流程见 [皇冠说明](crown/README.md)。
+更多命令见 [运维指南](docs/operations.md)。皇冠接口由外部兼容服务提供。

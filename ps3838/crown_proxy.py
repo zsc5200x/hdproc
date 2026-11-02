@@ -54,8 +54,7 @@ def _unavailable_page() -> bytes:
         "h1{font-size:20px;margin:0 0 10px}p{color:#8290a7;line-height:1.7;margin:0}"
         "code{color:#42e6a4}</style></head><body><main>"
         "<h1>皇冠服务暂不可用</h1>"
-        "<p>主看板已正常运行，但没有连接上皇冠进程。请执行 "
-        "<code>./start.sh</code> 或 <code>./crown.sh</code>，页面会自动重试。</p>"
+        "<p>主看板已正常运行，但没有连接上外部皇冠兼容服务。请启动该服务并检查配置，页面会自动重试。</p>"
         "</main><script>setTimeout(function(){location.reload()},5000)</script>"
         "</body></html>"
     ).encode("utf-8")

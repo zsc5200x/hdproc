@@ -6,6 +6,7 @@ import {
   setMyEventsView,
 } from "./page.js";
 import { state } from "../state.js";
+import { bindLeagueLibrary } from "./league-library.js";
 
 function setActiveTab(active) {
   document.querySelectorAll("[data-my-events-status]").forEach((button) => {
@@ -65,6 +66,7 @@ function applyRange(value) {
 }
 
 export function bindMyEventsEvents() {
+  bindLeagueLibrary();
   const initialFrom = document.getElementById("myEventsFrom");
   const initialTo = document.getElementById("myEventsTo");
   if (initialFrom) initialFrom.value = state.myEvents.from;
@@ -182,6 +184,14 @@ export function bindMyEventsEvents() {
   document.getElementById("myEventsTz")?.addEventListener("change", (event) => {
     state.myEvents.tz = Number(event.target.value) || 480;
     state.myEvents.offset = 0;
+    state.myEvents.fixtureOffset = 0;
+    clearMyEventsBanner();
+    refreshMyEventsAll({ reset: true });
+  });
+
+  document.getElementById("myEventsMatchCompare")?.addEventListener("click", () => {
+    if (state.myEvents.view === "fixtures") return;
+    setMyEventsView("fixtures");
     state.myEvents.fixtureOffset = 0;
     clearMyEventsBanner();
     refreshMyEventsAll({ reset: true });

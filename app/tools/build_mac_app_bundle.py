@@ -25,10 +25,6 @@ EXCLUDED_RELATIVE_PREFIXES = (
     Path("ps3838/.run"),
     Path("ps3838/data"),
     Path("ps3838/var"),
-    Path("ps3838/crown/data"),
-    Path("ps3838/crown/.run"),
-    Path("ps3838/crown/.venv"),
-    Path("ps3838/crown/venv"),
 )
 EXCLUDED_NAMES = {
     ".DS_Store",

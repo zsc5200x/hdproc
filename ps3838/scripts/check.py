@@ -50,15 +50,14 @@ def isolated_env(directory):
         "live_snapshot_file": str(directory / "latest.csv"),
         "dashboard_db_path": str(directory / "history.sqlite3"),
         "merge_db_path": str(directory / "merge.sqlite3"),
-        "crown_data_dir": str(directory / "crown-data"),
         "backup_dir": str(directory / "backups"),
         "run_dir": str(directory / "run"),
         "log_dir": str(directory / "logs"),
     }), encoding="utf-8")
     (directory / "events.csv").write_text("event_id,比赛,联赛,开赛时间\n", encoding="utf-8")
     (directory / "capture.jsonl").touch()
-    env.update(PS3838_CONFIG=str(config), CROWN_DATA_DIR=str(directory / "crown-data"),
-               PYTHONDONTWRITEBYTECODE="1", NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
+    env.update(PS3838_CONFIG=str(config), PYTHONDONTWRITEBYTECODE="1",
+               NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
     return env
 
 
@@ -66,7 +65,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--static-only", action="store_true")
     parser.add_argument("--python", default=os.environ.get("PYTHON_BIN", str(ROOT / ".venv/bin/python")))
-    parser.add_argument("--crown-python", default=os.environ.get("CROWN_PYTHON_BIN", str(ROOT / "crown/.venv/bin/python")))
     args = parser.parse_args()
     ok = True
     paths = list(source_files(".py"))
@@ -96,8 +94,7 @@ def main():
     if not args.static_only:
         with tempfile.TemporaryDirectory(prefix="ps3838-check-") as temporary:
             env = isolated_env(Path(temporary))
-            ok = run("平博、合并与公共模块测试", [args.python, "-m", "unittest", "discover", "-s", "tests", "-v"], env=env) and ok
-            ok = run("皇冠测试", [args.crown_python, "-m", "unittest", "discover", "-s", ".", "-p", "test_*.py", "-v"], cwd=ROOT / "crown", env=env) and ok
+            ok = run("PS3838 与公共模块测试", [args.python, "-m", "unittest", "discover", "-s", "tests", "-v"], env=env) and ok
     print("\n全部检查通过" if ok else "\n检查未通过，请修复以上失败", flush=True)
     return 0 if ok else 1
 

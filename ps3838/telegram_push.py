@@ -710,6 +710,8 @@ class TelegramPusher(threading.Thread):
             self._enqueue(data)
 
     def _crown_context(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        if not bool(config.get("crown_enabled", True)):
+            return {"events": [], "leagues": {}, "aliases": {}}
         now = time.monotonic()
         if self._crown_cache["value"] is not None and now - self._crown_cache["at"] < 5.0:
             return self._crown_cache["value"]

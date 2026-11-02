@@ -6,7 +6,7 @@
 
 | 入口或目录 | 当前职责 | 边界 |
 | --- | --- | --- |
-| `start.sh`、`dashboard.sh`、`crown.sh`、`stop.sh` | 启停 Python 服务、检查 PID 归属和接口就绪 | 共用 `scripts/runtime.sh`；停止时不关闭用户 Chrome |
+| `start.sh`、`dashboard.sh`、`stop.sh` | 启停 Python 服务、检查 PID 归属和接口就绪 | 共用 `scripts/runtime.sh`；停止时不关闭用户 Chrome |
 | `project_config.py` | 默认配置、指定 JSON、环境变量覆盖及路径解析 | 环境变量优先；相对数据路径以项目根目录为基准 |
 | `capture.py` | 连接 CDP，观察平博服务端 WebSocket 帧并写 JSONL；提交赛事存在性快照 | 不登录、不向赔率 WebSocket 发消息 |
 | `live_snapshot.py` | 回放采集历史、跟随新增数据，写最新 CSV | 只有 `main()` 执行时才读配置、访问运行文件或启动循环；导入安全 |
@@ -21,9 +21,7 @@
 | `src/services/source_freshness.py` | 将实际采集时间、缓存与错误转为统一字段 | 不以响应生成时间伪装来源更新时间 |
 | `src/core/` | 共享常量、时间格式及运行目录迁移锁 | 不包含页面或认证业务 |
 | `metadata_sync.py`、`backfill_history.py` | 独立元数据补全和历史回填工具 | 直接依赖公共解析/盘口服务，避免反向导入 HTTP 入口 |
-| `crown/app.py`、`crown/crown_runtime.py` | 皇冠 HTTP 接口、缓存、只读轮询、附加盘刷新和运行时管理 | 皇冠继续使用独立进程和虚拟环境 |
-| `crown/crown_local/backend/` | 皇冠会话、账号元数据、上游只读客户端及本地存储 | 延续现有手动登录和共享 Chrome 会话方案 |
-| `crown_proxy.py` | 同源转发皇冠页面、API 和模块资源 | 上游由统一配置指定；模块路径限制在 `crown/static/modules/` |
+| `crown_proxy.py` | 同源转发外部皇冠页面和 API | 上游由统一配置指定；仅允许固定皇冠路径 |
 
 主要数据流：
 
@@ -70,7 +68,7 @@
 
 主页面 `dashboard/static/app.js` 负责初始化和轮询编排，状态、路由、平博、合并、历史、设置分别位于 `dashboard/static/modules/`。公共格式、请求、路由和来源状态位于 `modules/shared/`；样式按功能拆到 `dashboard/static/styles/`。
 
-皇冠基础页面仍由 `crown/static/app.js` 管理。主页的已确认盘口处理抽到 `crown/static/modules/confirmed-markets.js`，平博港赔格式、HTTP 请求和来源提示分别有独立模块。只有 `fixtures=1` 的主页视图启用两家盘口展示，独立皇冠页面保持皇冠职责。
+皇冠页面和盘口数据由外部兼容服务提供；主看板只通过固定代理路径读取其 API。
 
 ## 来源新鲜度契约
 

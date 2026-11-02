@@ -18,7 +18,7 @@ python app.py stop     # 停止所有服务
 python app.py status-ps3838  # 查看合并的 PS3838 栈状态
 ```
 
-PS3838 已并入本仓库：`app.py start/stop/restart` 会同时启停 `ps3838/` 下的后台订单轮询、皇冠（Python 3.14）和看板；同源入口为 `http://127.0.0.1:9999/ps3838/`。
+PS3838 已并入本仓库：`app.py start/stop/restart` 会同时启停 `ps3838/` 下的后台订单轮询和看板；同源入口为 `http://127.0.0.1:9999/ps3838/`。皇冠数据服务实现已移除，联动依赖外部兼容服务。
 
 ### 单独启动各组件
 
@@ -92,7 +92,7 @@ app.py（多进程管理器）
 | `src/hdzz/common/` | 配置解析、HTTP、日志、数据解析等通用工具 |
 | `cc/` | Node.js 网络抓包工具（HGA 平台接口逆向） |
 | `ook/` | 信号中继模块（转发器 + 拉取器） |
-| `ps3838/` | 合并的 PS3838 数据终端（后台订单/皇冠/看板；数据在 `ps3838/var/`） |
+| `ps3838/` | 合并的 PS3838 数据终端（后台订单/看板；数据在 `ps3838/var/`） |
 | `tests/` | pytest 测试套件（47 个文件） |
 | `data/` | 运行时数据（arsenal.json、follow_settings.json、结算等） |
 | `app/orders/` | 订单存储（JSONL 格式，按账号分文件） |
@@ -108,7 +108,6 @@ app.py（多进程管理器）
 - `app/config.json` — 运行时配置（目标账号、代理等）
 - `app/data/follow_settings.json` — 跟单策略配置
 - `ps3838/dashboard_server.py` — PS3838 看板与代理 API
-- `ps3838/crown/` — 皇冠服务（Python 3.14 独立运行）
 - `src/hdzz/api/webui/ps3838_app.py` — PS3838 状态/启停与同源嵌入
 
 ### 跟单引擎模块关系（`src/hdzz/core/follower/`）

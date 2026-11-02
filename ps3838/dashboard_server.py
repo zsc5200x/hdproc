@@ -726,6 +726,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _crown_fixture_events(self) -> tuple[list[Dict[str, Any]], Optional[str]]:
         config = getattr(self, "config", {})
+        if not bool(config.get("crown_enabled", True)):
+            self._crown_source = crown_freshness(error="皇冠服务已停用")
+            return [], "皇冠服务已停用"
         connection = http.client.HTTPConnection(
             str(config.get("crown_host") or "127.0.0.1"),
             int(config.get("crown_port") or 9223), timeout=4,

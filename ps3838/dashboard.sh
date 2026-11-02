@@ -12,10 +12,6 @@ fi
 runtime_load_config "$PYTHON_BIN"
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
-# The dashboard keeps the existing same-origin Crown proxy available.
-if ! "$PROJECT_DIR/crown.sh"; then
-  echo "皇冠服务未能就绪（不影响看板），请查看 $LOG_DIR/crown.log。" >&2
-fi
 RUNTIME_READY_ATTEMPTS="${RUNTIME_READY_ATTEMPTS:-90}"
 DASHBOARD_SOCKET="${DASHBOARD_SOCKET:-$RUN_DIR/dashboard.sock}"
 RUNTIME_HEALTH_SOCKET="$DASHBOARD_SOCKET"

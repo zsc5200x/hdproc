@@ -19,10 +19,10 @@ class RuntimeScriptTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         (self.root / "scripts").mkdir()
-        for name in ("project_config.py", "start.sh", "stop.sh", "dashboard.sh", "crown.sh", "scripts/runtime.sh"):
+        for name in ("project_config.py", "start.sh", "stop.sh", "dashboard.sh", "scripts/runtime.sh"):
             shutil.copy2(ROOT / name, self.root / name)
         self.env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(self.root),
-                    "PYTHON_BIN": sys.executable, "CROWN_PYTHON_BIN": sys.executable}
+                    "PYTHON_BIN": sys.executable}
 
     def run_helper(self, body, *, locale=None):
         source = "\n".join([
@@ -50,7 +50,7 @@ class RuntimeScriptTests(unittest.TestCase):
             stub.write_text("#!/bin/sh\ntouch " + shlex.quote(str(marker)) + "\nexit 0\n", encoding="utf-8")
             stub.chmod(0o755)
         env = dict(self.env, PATH=str(fakebin) + ":" + self.env["PATH"])
-        for script in ("start.sh", "stop.sh", "dashboard.sh", "crown.sh"):
+        for script in ("start.sh", "stop.sh", "dashboard.sh"):
             with self.subTest(script=script):
                 result = subprocess.run(["/bin/bash", str(self.root / script)], cwd=self.root, env=env,
                                         text=True, capture_output=True, timeout=10)
@@ -88,10 +88,10 @@ if runtime_owned_pid 123 "$PROJECT_DIR/capture.py"; then exit 92; fi
 PID_COMMAND="vim $PROJECT_DIR/capture.py"
 PID_EXECUTABLE="vim"
 if runtime_owned_pid 123 "$PROJECT_DIR/capture.py"; then exit 93; fi
-PID_COMMAND="python3 -u app.py"
+PID_COMMAND="python3 -u dashboard_server.py --socket $PROJECT_DIR/var/run/dashboard.sock"
 PID_EXECUTABLE="/usr/bin/python3"
-PID_CWD="$PROJECT_DIR/crown"
-runtime_owned_pid 123 "$PROJECT_DIR/crown/app.py"
+PID_CWD="$PROJECT_DIR"
+runtime_owned_pid 123 "$PROJECT_DIR/dashboard_server.py"
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -254,7 +254,7 @@ if runtime_pid_alive "$worker_pid"; then exit 91; fi
 
     def test_shell_variables_have_explicit_boundaries_before_non_ascii_text(self):
         import re
-        for filename in ("start.sh", "stop.sh", "dashboard.sh", "crown.sh", "scripts/runtime.sh"):
+        for filename in ("start.sh", "stop.sh", "dashboard.sh", "scripts/runtime.sh"):
             with self.subTest(filename=filename):
                 self.assertIsNone(re.search(r"\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7f])",
                                             (ROOT / filename).read_text()))
