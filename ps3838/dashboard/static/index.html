@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0a0f19">
   <title>赔率数据终端</title>
-  <link rel="stylesheet" href="static/styles.css?v=20261102-league-1">
+  <link rel="stylesheet" href="static/styles.css?v=20261102-compareblank-1">
 </head>
 <body>
   <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -94,7 +94,7 @@
           <option value="480">北京时间 GMT+8</option>
         </select>
         <button id="myEventsAlignPartner" class="my-events-align-btn" type="button" title="结算时间 + GMT-4 + 昨日（对齐代理后台盈亏报表）">一键对齐后台</button>
-        <button id="myEventsMatchCompare" class="my-events-align-btn" type="button" title="打开比赛视角，对照平博与皇冠比赛">比赛对照</button>
+        <button id="myEventsMatchCompare" class="my-events-align-btn" data-my-events-view="compare" type="button" aria-pressed="false" title="比赛对照页面（暂留空）">比赛对照</button>
         <button id="myEventsLeagueLibraryBtn" class="my-events-library-btn" type="button" title="查看皇冠与平博/PS3838 联赛对照库">联赛库</button>
       </div>
 
@@ -165,6 +165,8 @@
         </table>
         <div id="myEventsPushEmpty" class="my-events-empty hidden">当前范围内没有跟单记录</div>
       </div>
+
+      <div id="myEventsCompareWrap" class="my-events-compare-wrap hidden"></div>
     </section>
 
     <footer class="footer-bar">
@@ -213,6 +215,6 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="static/app.js?v=20261102-league-1"></script>
+  <script type="module" src="static/app.js?v=20261102-compareblank-1"></script>
 </body>
 </html>

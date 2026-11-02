@@ -189,12 +189,10 @@ export function bindMyEventsEvents() {
     refreshMyEventsAll({ reset: true });
   });
 
-  document.getElementById("myEventsMatchCompare")?.addEventListener("click", () => {
-    if (state.myEvents.view === "fixtures") return;
-    setMyEventsView("fixtures");
-    state.myEvents.fixtureOffset = 0;
+  document.querySelector('[data-my-events-view="compare"]')?.addEventListener("click", () => {
+    if (state.myEvents.view === "compare") return;
+    setMyEventsView("compare");
     clearMyEventsBanner();
-    refreshMyEventsAll({ reset: true });
   });
 
   document.getElementById("myEventsAlignPartner")?.addEventListener("click", () => {

@@ -106,7 +106,6 @@ _work/
 ps3838/config.json
 ps3838/var/
 ps3838/.venv
-ps3838/crown/.venv
 ps3838/logs
 ps3838/backups
 ps3838/.run

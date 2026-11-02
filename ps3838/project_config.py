@@ -37,6 +37,7 @@ DEFAULTS: Dict[str, Any] = {
     "dashboard_port": 8787,
     "crown_host": "127.0.0.1",
     "crown_port": 9223,
+    "crown_enabled": False,
     "crown_extra_markets_enabled": True,
     "backup_dir": "backups",
     "run_dir": ".run",

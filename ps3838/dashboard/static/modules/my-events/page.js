@@ -923,7 +923,7 @@ export async function refreshFixtures({ reset = false, silent = false, keepOpen 
 
 export function setMyEventsView(view) {
   const current = myEvents();
-  const next = view === "fixtures" ? "fixtures" : view === "pushes" ? "pushes" : "orders";
+  const next = view === "fixtures" ? "fixtures" : view === "pushes" ? "pushes" : view === "compare" ? "compare" : "orders";
   current.view = next;
 
   for (const item of document.querySelectorAll("[data-my-events-view]")) {
@@ -940,12 +940,14 @@ export function setMyEventsView(view) {
 
   const fixtures = next === "fixtures";
   const pushes = next === "pushes";
-  $("myEventsOrdersWrap")?.classList.toggle("hidden", fixtures || pushes);
+  const compare = next === "compare";
+  $("myEventsOrdersWrap")?.classList.toggle("hidden", fixtures || pushes || compare);
   $("myEventsFixtureWrap")?.classList.toggle("hidden", !fixtures);
   $("myEventsPushWrap")?.classList.toggle("hidden", !pushes);
+  $("myEventsCompareWrap")?.classList.toggle("hidden", !compare);
   const ordersMore = $("myEventsMore");
   if (ordersMore) {
-    ordersMore.classList.toggle("hidden", fixtures || pushes || current.rows.length >= current.total);
+    ordersMore.classList.toggle("hidden", fixtures || pushes || compare || current.rows.length >= current.total);
   }
   const fixtureMore = $("myEventsFixtureMore");
   if (fixtureMore) {

@@ -10,7 +10,7 @@
 ./dashboard.sh
 ```
 
-`start.sh` 启动订单轮询和主看板；`dashboard.sh` 只启动主看板。皇冠联动由外部兼容服务提供。使用自定义配置时，为本次终端会话设置同一个文件，保证启动、停止、回填与维护读取一致：
+`start.sh` 启动订单轮询和主看板；`dashboard.sh` 只启动主看板。皇冠联动由外部兼容服务提供，且默认关闭；需要时将 `crown_enabled` 设为 `true`。使用自定义配置时，为本次终端会话设置同一个文件，保证启动、停止、回填与维护读取一致：
 
 ```bash
 export PS3838_CONFIG=config.local.json
@@ -36,11 +36,11 @@ curl --noproxy '*' --fail --silent --show-error "${CROWN_URL:-http://127.0.0.1:9
 ## 手动登录与会话同步
 
 1. 使用 `./start.sh` 启动 PS3838 订单轮询和主看板。
-2. 皇冠联动需要单独启动外部兼容服务，并让其地址与 `crown_host`、`crown_port` 配置一致。
+2. 需要皇冠联动时，先启动外部兼容服务，将 `crown_enabled` 设为 `true`，并让其地址与 `crown_host`、`crown_port` 配置一致。
 3. 按外部兼容服务的说明完成登录和会话准备；本项目不会填写皇冠登录表单、保存密码或 TOTP。
-4. 若显示 `session_conflict`，按外部兼容服务的日志和会话说明处理。
+4. 若显示 `session_conflict` 或连接失败，按外部兼容服务的日志和会话说明处理。
 
-皇冠地址由外部兼容服务提供，可通过 `crown_host`、`crown_port` 或对应环境变量配置。`stop.sh` 只停止本项目 Python 进程。
+皇冠地址由外部兼容服务提供，可通过 `crown_host`、`crown_port` 或对应环境变量配置。`stop.sh` 只停止本项目 Python 进程，不会停止外部兼容服务。
 
 ## 迁移运行数据
 
@@ -178,7 +178,7 @@ rm "$HOME/Library/LaunchAgents/com.ps3838-wss.maintenance.plist"
 | GET | `/api/crown/session` | 皇冠会话运行诊断 |
 | GET | `/api/crown/events?compact=1` | 皇冠轻量赛事缓存 |
 
-历史查询可附加 `stage`、`market`、`option`、`line` 精确选择盘口；`hours` 最大 8760，`limit` 最大 10000。浏览器访问皇冠 API 时使用主看板同源代理即可，无需另开 9223；需要直接调试皇冠服务时可访问 `http://127.0.0.1:9223`。
+历史查询可附加 `stage`、`market`、`option`、`line` 精确选择盘口；`hours` 最大 8760，`limit` 最大 10000。浏览器访问皇冠 API 时使用主看板同源代理即可；需要直接调试时访问外部兼容服务配置的地址。
 
 ## 排障顺序
 

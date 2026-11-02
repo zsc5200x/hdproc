@@ -1039,3 +1039,7 @@
     margin-left: 0;
   }
 }
+
+.my-events-compare-wrap {
+  min-height: 60vh;
+}

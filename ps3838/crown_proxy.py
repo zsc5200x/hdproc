@@ -67,7 +67,7 @@ def _send_upstream_unavailable(handler: Any) -> None:
         content_type = "text/html; charset=utf-8"
     else:
         body = json.dumps(
-            {"ok": False, "error": "皇冠服务暂不可用，请执行 ./start.sh"},
+            {"ok": False, "error": "外部皇冠兼容服务暂不可用，请检查 crown_host/crown_port 配置"},
             ensure_ascii=False,
         ).encode("utf-8")
         content_type = "application/json; charset=utf-8"
